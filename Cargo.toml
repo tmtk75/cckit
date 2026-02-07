@@ -1,0 +1,55 @@
+[package]
+name = "cckit"
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/tmtk75/cckit"
+
+[[bin]]
+name = "cckit-app"
+path = "src/bin/cckit_app.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+toml = "0.8"
+clap = { version = "4.0", features = ["derive"] }
+dirs = "6.0"
+colored = "3.0"
+glob = "0.3"
+
+# monitor feature
+ratatui = "0.29"
+crossterm = "0.28"
+chrono = { version = "0.4", features = ["serde"] }
+fs2 = "0.4"
+
+# File watching
+notify = "7.0"
+
+# Signal handling
+ctrlc = "3.4"
+libc = "0.2.180"
+
+# macOS accessibility (for Ghostty tab focus)
+[target.'cfg(target_os = "macos")'.dependencies]
+accessibility = "0.2"
+accessibility-sys = "0.2"
+core-foundation = "0.10"
+
+# macOS menubar & notification (objc2 bindings)
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSThread", "NSRunLoop", "NSDate", "NSTimer", "block2"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication", "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusBarButton", "NSStatusItem",
+    "NSRunningApplication", "NSImage", "NSButton", "NSControl", "NSView", "NSResponder",
+    # For custom notification window
+    "NSWindow", "NSPanel", "NSScreen", "NSTextField", "NSColor", "NSFont",
+    "NSVisualEffectView", "NSAnimationContext", "NSGraphics", "NSLayoutConstraint"
+] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+block2 = "0.6"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

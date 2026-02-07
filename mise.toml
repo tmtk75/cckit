@@ -1,0 +1,15 @@
+[tools]
+gitleaks = "latest"
+rust = "latest"
+
+[tasks.build]
+run = "cargo build --release --bins"
+
+[tasks.build-app]
+run = "scripts/macos/build_app.sh"
+
+[tasks.test]
+run = "cargo test"
+
+[tasks.install]
+run = "cargo install --path ."

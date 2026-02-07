@@ -1,0 +1,5 @@
+/target
+/dist
+/.claude/settings.local.json
+ccview.toml
+.DS_Store

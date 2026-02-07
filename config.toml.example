@@ -1,0 +1,4 @@
+# Paths to exclude from cckit ls output
+disable_paths = [
+    "/path/to/excluded/project",
+]
