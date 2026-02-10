@@ -70,6 +70,16 @@ enum Commands {
         command: Option<SessionCommands>,
     },
 
+    /// Show ~/.claude.json contents in a readable format
+    Config {
+        /// Key path to inspect (e.g., "projects", "tipsHistory")
+        key: Option<String>,
+
+        /// Show raw JSON output (pretty-printed)
+        #[arg(long)]
+        raw: bool,
+    },
+
     /// Show cckit status and file paths
     Status,
 
@@ -797,6 +807,219 @@ fn get_file_info(path: &Path) -> String {
     }
 }
 
+fn value_type_label(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn value_preview(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => {
+            if s.len() > 60 {
+                format!("\"{}...\" ({} chars)", &s[..57], s.len())
+            } else {
+                format!("\"{}\"", s)
+            }
+        }
+        serde_json::Value::Array(a) => format!("[{} items]", a.len()),
+        serde_json::Value::Object(o) => format!("{{{} keys}}", o.len()),
+    }
+}
+
+fn claude_json_key_description(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "autoUpdaterStatus" => "Auto-updater state",
+        "autoUpdates" => "Enable auto-updates",
+        "cachedChromeExtensionInstalled" => "Chrome extension detected",
+        "cachedDynamicConfigs" => "Statsig dynamic configs cache",
+        "cachedGrowthBookFeatures" => "Growth/feature flags cache",
+        "cachedStatsigGates" => "Statsig feature gates cache",
+        "changelogLastFetched" => "Last changelog fetch timestamp",
+        "claudeCodeFirstTokenDate" => "First API token date",
+        "claudeMaxTier" => "Max subscription tier",
+        "clientDataCache" => "Client data cache",
+        "fallbackAvailableWarningThreshold" => "Fallback warning threshold",
+        "feedbackSurveyState" => "Feedback survey state",
+        "firstStartTime" => "First startup timestamp",
+        "githubActionSetupCount" => "GitHub Actions setup count",
+        "githubRepoPaths" => "GitHub repo path mappings",
+        "groveConfigCache" => "Grove config cache",
+        "hasAcknowledgedCostThreshold" => "Cost threshold acknowledged",
+        "hasAvailableMaxSubscription" => "Max subscription available",
+        "hasAvailableSubscription" => "Subscription available",
+        "hasCompletedOnboarding" => "Onboarding completed",
+        "hasIdeOnboardingBeenShown" => "IDE onboarding shown",
+        "hasOpusPlanDefault" => "Opus as default plan model",
+        "hasSeenStashHint" => "Stash hint seen",
+        "hasSeenTasksHint" => "Tasks hint seen",
+        "hasShownOpus45Notice" => "Opus 4.5 notice shown",
+        "hasShownOpus46Notice" => "Opus 4.6 notice shown",
+        "hasUsedBackslashReturn" => "Used backslash-return",
+        "hasVisitedPasses" => "Visited passes page",
+        "installMethod" => "Installation method",
+        "isQualifiedForDataSharing" => "Data sharing qualification",
+        "iterm2BackupPath" => "iTerm2 config backup path",
+        "iterm2SetupInProgress" => "iTerm2 setup in progress",
+        "lastOnboardingVersion" => "Last onboarding version",
+        "lastPlanModeUse" => "Last plan mode usage timestamp",
+        "lastReleaseNotesSeen" => "Last release notes seen",
+        "lspRecommendationIgnoredCount" => "LSP recommendation ignored count",
+        "maxSubscriptionNoticeCount" => "Max subscription notice count",
+        "mcpServers" => "MCP server configurations",
+        "memoryUsageCount" => "/memory command usage count",
+        "numStartups" => "Total startup count",
+        "oauthAccount" => "OAuth account info",
+        "officialMarketplaceAutoInstallAttempted" => "Marketplace auto-install attempted",
+        "officialMarketplaceAutoInstalled" => "Marketplace auto-installed",
+        "opus45MigrationComplete" => "Opus 4.5 migration done",
+        "opus46FeedSeenCount" => "Opus 4.6 feed seen count",
+        "opusProMigrationComplete" => "Opus Pro migration done",
+        "passesEligibilityCache" => "Passes eligibility cache",
+        "passesLastSeenRemaining" => "Passes remaining count",
+        "passesUpsellSeenCount" => "Passes upsell seen count",
+        "projects" => "Per-project settings (allowedTools, etc.)",
+        "promptQueueUseCount" => "Prompt queue usage count",
+        "recommendedSubscription" => "Recommended subscription plan",
+        "s1mAccessCache" => "S1M access cache",
+        "shiftEnterKeyBindingInstalled" => "Shift+Enter keybinding installed",
+        "showExpandedTodos" => "Show expanded todo list",
+        "showSpinnerTree" => "Show spinner tree UI",
+        "skillUsage" => "Skill usage statistics",
+        "sonnet45MigrationComplete" => "Sonnet 4.5 migration done",
+        "statsigModel" => "Statsig model config",
+        "subscriptionNoticeCount" => "Subscription notice count",
+        "subscriptionUpsellShownCount" => "Subscription upsell shown count",
+        "thinkingMigrationComplete" => "Thinking mode migration done",
+        "tipsHistory" => "Tip display history (startup counts)",
+        "userID" => "Anonymous user identifier",
+        _ => return None,
+    })
+}
+
+fn print_value_detail(v: &serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            let max_key_len = map.keys().map(|k| k.len()).max().unwrap_or(0);
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                let val = &map[k];
+                let type_label = value_type_label(val);
+                let preview = value_preview(val);
+                println!(
+                    "  {:<width$}  {:<8} {}",
+                    k.cyan(),
+                    type_label.dimmed(),
+                    preview,
+                    width = max_key_len
+                );
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            let show = 5;
+            for (i, item) in arr.iter().enumerate().take(show) {
+                let s = serde_json::to_string(item).unwrap_or_default();
+                if s.len() > 100 {
+                    println!("  [{}] {}...", i, &s[..97]);
+                } else {
+                    println!("  [{}] {}", i, s);
+                }
+            }
+            if arr.len() > show {
+                println!("  ... ({} more)", arr.len() - show);
+            }
+        }
+        _ => {
+            println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        }
+    }
+}
+
+fn config_command(key: Option<String>, raw: bool) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            eprintln!("{}", "Error: Could not find home directory".red());
+            std::process::exit(1);
+        }
+    };
+
+    let claude_json = home.join(".claude.json");
+    let content = match fs::read_to_string(&claude_json) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{}: {}", "Error reading ~/.claude.json".red(), e);
+            std::process::exit(1);
+        }
+    };
+
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}: {}", "Error parsing ~/.claude.json".red(), e);
+            std::process::exit(1);
+        }
+    };
+
+    if raw {
+        println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());
+        return;
+    }
+
+    match key {
+        Some(k) => {
+            // Lookup the key (supports dot-separated paths)
+            let mut current = &value;
+            for part in k.split('.') {
+                current = match current.get(part) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("{}: key \"{}\" not found", "Error".red(), k);
+                        std::process::exit(1);
+                    }
+                };
+            }
+            println!("{} {}", "~/.claude.json".dimmed(), k.bold());
+            println!();
+            print_value_detail(current);
+        }
+        None => {
+            println!("{}", "~/.claude.json".bold());
+            println!();
+            if let serde_json::Value::Object(map) = &value {
+                let max_key_len = map.keys().map(|k| k.len()).max().unwrap_or(0);
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                for k in keys {
+                    let v = &map[k];
+                    let type_label = value_type_label(v);
+                    let preview = value_preview(v);
+                    let desc = claude_json_key_description(k)
+                        .map(|d| format!("  # {}", d).dimmed().to_string())
+                        .unwrap_or_default();
+                    println!(
+                        "  {:<width$}  {:<8} {}{}",
+                        k.cyan(),
+                        type_label.dimmed(),
+                        preview,
+                        desc,
+                        width = max_key_len
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn status_command() {
     let home = match dirs::home_dir() {
         Some(h) => h,
@@ -1516,6 +1739,9 @@ pub fn run() {
         }
         Some(Commands::Prune { execute, no_backup }) => {
             prune_command(execute, no_backup);
+        }
+        Some(Commands::Config { key, raw }) => {
+            config_command(key, raw);
         }
         Some(Commands::Status) => {
             status_command();
