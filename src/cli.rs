@@ -80,6 +80,12 @@ enum Commands {
         raw: bool,
     },
 
+    /// Manage skills across projects
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommands,
+    },
+
     /// Show cckit status and file paths
     Status,
 
@@ -195,6 +201,24 @@ enum SessionCommands {
 
     /// Run menubar app (macOS only)
     Menubar,
+}
+
+#[derive(Subcommand)]
+enum SkillCommands {
+    /// Copy a skill from another project to the current project
+    Copy {
+        #[arg(short, long, help = "Filter skills by name pattern")]
+        filter: Option<String>,
+
+        #[arg(long, help = "Copy from a specific project path")]
+        from: Option<String>,
+
+        #[arg(short, long, help = "Skill name (skip interactive selection)")]
+        name: Option<String>,
+
+        #[arg(long, help = "Overwrite existing skill without confirmation")]
+        force: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -322,6 +346,352 @@ fn scan_skills(dir: &Path) -> Vec<SkillInfo> {
     }
 
     skills
+}
+
+#[derive(Debug)]
+struct SkillSource {
+    project_display: String,
+    skill_dir: std::path::PathBuf,
+    dir_name: String,
+    info: SkillInfo,
+}
+
+fn scan_skills_with_paths(dir: &Path) -> Vec<SkillSource> {
+    let skills_dir = dir.join("skills");
+    let mut results = Vec::new();
+
+    if !skills_dir.exists() {
+        return results;
+    }
+
+    if let Ok(entries) = fs::read_dir(&skills_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let skill_file = path.join("SKILL.md");
+                if skill_file.exists() {
+                    if let Ok(content) = fs::read_to_string(&skill_file) {
+                        let (name, description) = parse_frontmatter(&content);
+                        let dir_name = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        let name = name.unwrap_or_else(|| dir_name.clone());
+                        results.push(SkillSource {
+                            project_display: String::new(),
+                            skill_dir: path.clone(),
+                            dir_name,
+                            info: SkillInfo { name, description },
+                        });
+                    }
+                }
+            }
+        }
+    }
+    results
+}
+
+fn collect_all_skills(from: Option<&str>) -> Vec<SkillSource> {
+    let mut all_skills = Vec::new();
+    let cwd = std::env::current_dir().ok();
+
+    if let Some(project_path) = from {
+        let claude_dir = Path::new(project_path).join(".claude");
+        let display = shorten_path(project_path);
+        for mut skill in scan_skills_with_paths(&claude_dir) {
+            skill.project_display = display.clone();
+            all_skills.push(skill);
+        }
+    } else {
+        // Global ~/.claude
+        let home = dirs::home_dir().expect("Could not find home directory");
+        let global_claude = home.join(".claude");
+        for mut skill in scan_skills_with_paths(&global_claude) {
+            skill.project_display = "~/.claude (global)".to_string();
+            all_skills.push(skill);
+        }
+
+        // All projects from ~/.claude.json
+        if let Ok(config) = load_claude_config() {
+            if let Some(projects) = config.projects {
+                for project_path in projects.keys() {
+                    let claude_dir = Path::new(project_path).join(".claude");
+                    let display = shorten_path(project_path);
+                    for mut skill in scan_skills_with_paths(&claude_dir) {
+                        skill.project_display = display.clone();
+                        all_skills.push(skill);
+                    }
+                }
+            }
+        }
+    }
+
+    // Exclude skills from the current project
+    if let Some(ref cwd_path) = cwd {
+        all_skills.retain(|s| !s.skill_dir.starts_with(cwd_path));
+    }
+
+    all_skills.sort_by(|a, b| a.info.name.cmp(&b.info.name));
+    all_skills
+}
+
+fn select_skill_fzf(skills: &[SkillSource], filter: Option<&str>) -> Option<usize> {
+    use std::io::Write;
+
+    // Build input lines for fzf
+    let lines: Vec<String> = skills
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let desc = s
+                .info
+                .description
+                .as_ref()
+                .map(|d| truncate_str(d, 60))
+                .unwrap_or_default();
+            format!("{}\t{}\t[{}]\t{}", i, s.info.name, s.project_display, desc)
+        })
+        .collect();
+    let input = lines.join("\n");
+
+    let mut cmd = Command::new("fzf");
+    cmd.args([
+        "--header",
+        "Select a skill to copy (TAB to preview)",
+        "--delimiter",
+        "\t",
+        "--with-nth",
+        "2..",
+        "--no-multi",
+        "--ansi",
+    ]);
+    if let Some(q) = filter {
+        cmd.args(["--query", q]);
+    }
+
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+
+    if let Some(ref mut stdin) = child.stdin {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    drop(child.stdin.take());
+
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(_) => return None,
+    };
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout);
+    let selected = selected.trim();
+    if selected.is_empty() {
+        return None;
+    }
+
+    // Extract the index from the first tab-delimited field
+    selected
+        .split('\t')
+        .next()
+        .and_then(|idx| idx.parse::<usize>().ok())
+}
+
+fn select_skill_numbered(skills: &[SkillSource]) -> Option<usize> {
+    use std::io::{self, BufRead, Write};
+
+    if skills.is_empty() {
+        println!("{}", "No skills found.".yellow());
+        return None;
+    }
+
+    let max_name_len = skills.iter().map(|s| s.info.name.len()).max().unwrap_or(0);
+    println!("{} skills found:\n", skills.len().to_string().cyan());
+    for (i, skill) in skills.iter().enumerate() {
+        let desc = skill
+            .info
+            .description
+            .as_ref()
+            .map(|d| format!(" - {}", truncate_str(d, 50).dimmed()))
+            .unwrap_or_default();
+        println!(
+            "  {:>3}) {:<width$} {}{}",
+            (i + 1).to_string().cyan(),
+            skill.info.name.green(),
+            format!("[{}]", skill.project_display).dimmed(),
+            desc,
+            width = max_name_len
+        );
+    }
+
+    println!();
+    print!("{}", "Select skill number (or 'q' to quit): ".bold());
+    io::stdout().flush().ok();
+
+    let stdin = io::stdin();
+    let line = stdin.lock().lines().next()?.ok()?;
+    let line = line.trim().to_string();
+
+    if line == "q" || line == "Q" || line.is_empty() {
+        return None;
+    }
+
+    let num: usize = match line.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            eprintln!("{}: invalid number: {}", "Error".red(), line);
+            return None;
+        }
+    };
+
+    if num == 0 || num > skills.len() {
+        eprintln!("{}: out of range: {}", "Error".red(), num);
+        return None;
+    }
+
+    Some(num - 1)
+}
+
+fn select_skill(skills: &[SkillSource], filter: Option<&str>) -> Option<usize> {
+    // Try fzf first
+    if Command::new("fzf")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+    {
+        return select_skill_fzf(skills, filter);
+    }
+    // Fallback to numbered list
+    select_skill_numbered(skills)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut copied = 0u64;
+    fs::create_dir_all(dst)?;
+
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if file_type.is_dir() {
+            copied += copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
+fn skill_copy_command(
+    filter: Option<String>,
+    from: Option<String>,
+    name: Option<String>,
+    force: bool,
+) {
+    let mut skills = collect_all_skills(from.as_deref());
+
+    // Apply filter when using --name (fzf handles its own filtering via --query)
+    if name.is_some() {
+        if let Some(ref pattern) = filter {
+            skills.retain(|s| {
+                s.info.name.contains(pattern.as_str()) || s.dir_name.contains(pattern.as_str())
+            });
+        }
+    }
+
+    if skills.is_empty() {
+        println!("{}", "No skills found.".yellow());
+        return;
+    }
+
+    let selected = if let Some(ref skill_name) = name {
+        match skills
+            .iter()
+            .position(|s| s.info.name == *skill_name || s.dir_name == *skill_name)
+        {
+            Some(idx) => idx,
+            None => {
+                eprintln!("{}: skill '{}' not found", "Error".red(), skill_name);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        match select_skill(&skills, filter.as_deref()) {
+            Some(idx) => idx,
+            None => {
+                println!("Cancelled.");
+                return;
+            }
+        }
+    };
+
+    let skill = &skills[selected];
+
+    // Determine destination
+    let cwd = std::env::current_dir().expect("Could not determine current directory");
+    let dest_base = cwd.join(".claude").join("skills");
+    let dest_dir = dest_base.join(&skill.dir_name);
+
+    // Check for conflicts
+    if dest_dir.exists() && !force {
+        use std::io::{self, BufRead, Write};
+        eprintln!(
+            "{}: skill '{}' already exists at {}",
+            "Warning".yellow(),
+            skill.info.name,
+            shorten_path(&dest_dir.to_string_lossy())
+        );
+        print!("{}", "Overwrite? (y/N): ".bold());
+        io::stdout().flush().ok();
+
+        let stdin = io::stdin();
+        let line = stdin
+            .lock()
+            .lines()
+            .next()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
+        if line.trim().to_lowercase() != "y" {
+            println!("Cancelled.");
+            return;
+        }
+    }
+
+    // Copy
+    println!(
+        "Copying skill '{}' from {} ...",
+        skill.info.name.green(),
+        skill.project_display.dimmed()
+    );
+
+    match copy_dir_recursive(&skill.skill_dir, &dest_dir) {
+        Ok(count) => {
+            println!(
+                "{} Copied {} files to {}",
+                "Done!".green().bold(),
+                count,
+                shorten_path(&dest_dir.to_string_lossy())
+            );
+        }
+        Err(e) => {
+            eprintln!("{}: {}", "Error copying skill".red(), e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn scan_agents(dir: &Path) -> Vec<AgentInfo> {
@@ -1743,6 +2113,16 @@ pub fn run() {
         Some(Commands::Config { key, raw }) => {
             config_command(key, raw);
         }
+        Some(Commands::Skill { command }) => match command {
+            SkillCommands::Copy {
+                filter,
+                from,
+                name,
+                force,
+            } => {
+                skill_copy_command(filter, from, name, force);
+            }
+        },
         Some(Commands::Status) => {
             status_command();
         }
