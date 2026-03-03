@@ -86,11 +86,32 @@ enum Commands {
         command: SkillCommands,
     },
 
+    /// Manage MCP servers across projects
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
+
     /// Show cckit status and file paths
     Status,
 
     /// Check cckit configuration health
     Doctor,
+
+    /// List permissions (allow/deny) from settings files
+    Permissions {
+        #[arg(short, long, help = "Filter entries by pattern (substring match)")]
+        filter: Option<String>,
+
+        #[arg(long, help = "Show only risky allow patterns with warnings")]
+        audit: bool,
+
+        #[arg(long, help = "Remove risky allow patterns (requires --audit, dry-run by default)")]
+        clean: bool,
+
+        #[arg(long, help = "Actually remove patterns (use with --clean)")]
+        execute: bool,
+    },
 
     /// Send a macOS notification (macOS only)
     Notify {
@@ -217,6 +238,24 @@ enum SkillCommands {
         name: Option<String>,
 
         #[arg(long, help = "Overwrite existing skill without confirmation")]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// Copy an MCP server config from another project
+    Copy {
+        #[arg(short, long, help = "Filter MCP servers by name pattern")]
+        filter: Option<String>,
+
+        #[arg(long, help = "Copy from a specific project path")]
+        from: Option<String>,
+
+        #[arg(short, long, help = "MCP server name (skip interactive selection)")]
+        name: Option<String>,
+
+        #[arg(long, help = "Overwrite existing MCP server without confirmation")]
         force: bool,
     },
 }
@@ -815,6 +854,368 @@ fn scan_mcp_servers(project_dir: &Path) -> Vec<McpServerInfo> {
     servers
 }
 
+#[derive(Debug)]
+struct McpSource {
+    project_display: String,
+    server_name: String,
+    config: serde_json::Value,
+    info: McpServerInfo,
+}
+
+fn scan_mcp_sources(project_dir: &Path) -> Vec<McpSource> {
+    let mcp_file = project_dir.join(".mcp.json");
+    let mut sources = Vec::new();
+
+    if !mcp_file.exists() {
+        return sources;
+    }
+
+    let source_path = mcp_file.to_string_lossy().to_string();
+
+    let content = match fs::read_to_string(&mcp_file) {
+        Ok(c) => c,
+        Err(_) => return sources,
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return sources,
+    };
+
+    if let Some(mcp_servers) = json.get("mcpServers").and_then(|v| v.as_object()) {
+        for (name, config) in mcp_servers {
+            let server_type = config
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let command = config.get("command").and_then(|v| v.as_str()).map(|s| {
+                let args = config
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                if args.is_empty() {
+                    s.to_string()
+                } else {
+                    format!("{} {}", s, args)
+                }
+            });
+            sources.push(McpSource {
+                project_display: String::new(),
+                server_name: name.clone(),
+                config: config.clone(),
+                info: McpServerInfo {
+                    name: name.clone(),
+                    server_type,
+                    command,
+                    source: source_path.clone(),
+                },
+            });
+        }
+    }
+
+    sources.sort_by(|a, b| a.server_name.cmp(&b.server_name));
+    sources
+}
+
+fn collect_all_mcp_servers(from: Option<&str>) -> Vec<McpSource> {
+    let mut all = Vec::new();
+    let cwd = std::env::current_dir().ok();
+
+    if let Some(project_path) = from {
+        let display = shorten_path(project_path);
+        for mut src in scan_mcp_sources(Path::new(project_path)) {
+            src.project_display = display.clone();
+            all.push(src);
+        }
+    } else {
+        if let Ok(config) = load_claude_config() {
+            if let Some(projects) = config.projects {
+                for project_path in projects.keys() {
+                    let display = shorten_path(project_path);
+                    for mut src in scan_mcp_sources(Path::new(project_path)) {
+                        src.project_display = display.clone();
+                        all.push(src);
+                    }
+                }
+            }
+        }
+    }
+
+    // Exclude MCP servers from the current project
+    if let Some(ref cwd_path) = cwd {
+        let cwd_str = cwd_path.to_string_lossy().to_string();
+        all.retain(|s| !s.info.source.starts_with(&cwd_str));
+    }
+
+    all.sort_by(|a, b| a.server_name.cmp(&b.server_name));
+    all
+}
+
+fn select_mcp_fzf(servers: &[McpSource], filter: Option<&str>) -> Option<usize> {
+    use std::io::Write;
+
+    let lines: Vec<String> = servers
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let cmd = s
+                .info
+                .command
+                .as_ref()
+                .map(|c| truncate_str(c, 40))
+                .unwrap_or_default();
+            format!(
+                "{}\t{}\t[{}]\t({}) {}",
+                i, s.server_name, s.project_display, s.info.server_type, cmd
+            )
+        })
+        .collect();
+    let input = lines.join("\n");
+
+    let mut cmd = Command::new("fzf");
+    cmd.args([
+        "--header",
+        "Select an MCP server to copy",
+        "--delimiter",
+        "\t",
+        "--with-nth",
+        "2..",
+        "--no-multi",
+        "--ansi",
+    ]);
+    if let Some(q) = filter {
+        cmd.args(["--query", q]);
+    }
+
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+
+    if let Some(ref mut stdin) = child.stdin {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    drop(child.stdin.take());
+
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(_) => return None,
+    };
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout);
+    let selected = selected.trim();
+    if selected.is_empty() {
+        return None;
+    }
+
+    selected
+        .split('\t')
+        .next()
+        .and_then(|idx| idx.parse::<usize>().ok())
+}
+
+fn select_mcp_numbered(servers: &[McpSource]) -> Option<usize> {
+    use std::io::{self, BufRead, Write};
+
+    if servers.is_empty() {
+        println!("{}", "No MCP servers found.".yellow());
+        return None;
+    }
+
+    let max_name_len = servers.iter().map(|s| s.server_name.len()).max().unwrap_or(0);
+    println!("{} MCP servers found:\n", servers.len().to_string().cyan());
+    for (i, server) in servers.iter().enumerate() {
+        let cmd = server
+            .info
+            .command
+            .as_ref()
+            .map(|c| format!(" {}", truncate_str(c, 40).dimmed()))
+            .unwrap_or_default();
+        println!(
+            "  {:>3}) {:<width$} {} {}{}",
+            (i + 1).to_string().cyan(),
+            server.server_name.bright_blue(),
+            format!("[{}]", server.project_display).dimmed(),
+            format!("({})", server.info.server_type).dimmed(),
+            cmd,
+            width = max_name_len
+        );
+    }
+
+    println!();
+    print!("{}", "Select MCP server number (or 'q' to quit): ".bold());
+    io::stdout().flush().ok();
+
+    let stdin = io::stdin();
+    let line = stdin.lock().lines().next()?.ok()?;
+    let line = line.trim().to_string();
+
+    if line == "q" || line == "Q" || line.is_empty() {
+        return None;
+    }
+
+    let num: usize = match line.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            eprintln!("{}: invalid number: {}", "Error".red(), line);
+            return None;
+        }
+    };
+
+    if num == 0 || num > servers.len() {
+        eprintln!("{}: out of range: {}", "Error".red(), num);
+        return None;
+    }
+
+    Some(num - 1)
+}
+
+fn select_mcp(servers: &[McpSource], filter: Option<&str>) -> Option<usize> {
+    if Command::new("fzf")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+    {
+        return select_mcp_fzf(servers, filter);
+    }
+    select_mcp_numbered(servers)
+}
+
+fn mcp_copy_command(
+    filter: Option<String>,
+    from: Option<String>,
+    name: Option<String>,
+    force: bool,
+) {
+    let mut servers = collect_all_mcp_servers(from.as_deref());
+
+    if name.is_some() {
+        if let Some(ref pattern) = filter {
+            servers.retain(|s| s.server_name.contains(pattern.as_str()));
+        }
+    }
+
+    if servers.is_empty() {
+        println!("{}", "No MCP servers found.".yellow());
+        return;
+    }
+
+    let selected = if let Some(ref server_name) = name {
+        match servers
+            .iter()
+            .position(|s| s.server_name == *server_name)
+        {
+            Some(idx) => idx,
+            None => {
+                eprintln!("{}: MCP server '{}' not found", "Error".red(), server_name);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        match select_mcp(&servers, filter.as_deref()) {
+            Some(idx) => idx,
+            None => {
+                println!("Cancelled.");
+                return;
+            }
+        }
+    };
+
+    let server = &servers[selected];
+
+    // Read or create .mcp.json
+    let cwd = std::env::current_dir().expect("Could not determine current directory");
+    let mcp_path = cwd.join(".mcp.json");
+
+    let mut mcp_json: serde_json::Value = if mcp_path.exists() {
+        match fs::read_to_string(&mcp_path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| {
+                serde_json::json!({"mcpServers": {}})
+            }),
+            Err(_) => serde_json::json!({"mcpServers": {}}),
+        }
+    } else {
+        serde_json::json!({"mcpServers": {}})
+    };
+
+    // Check for conflicts
+    let mcp_servers = mcp_json
+        .as_object_mut()
+        .and_then(|o| o.entry("mcpServers").or_insert_with(|| serde_json::json!({})).as_object_mut());
+
+    let mcp_servers = match mcp_servers {
+        Some(s) => s,
+        None => {
+            eprintln!("{}: invalid .mcp.json structure", "Error".red());
+            std::process::exit(1);
+        }
+    };
+
+    if mcp_servers.contains_key(&server.server_name) && !force {
+        use std::io::{self, BufRead, Write};
+        eprintln!(
+            "{}: MCP server '{}' already exists in .mcp.json",
+            "Warning".yellow(),
+            server.server_name
+        );
+        print!("{}", "Overwrite? (y/N): ".bold());
+        io::stdout().flush().ok();
+
+        let stdin = io::stdin();
+        let line = stdin
+            .lock()
+            .lines()
+            .next()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
+        if line.trim().to_lowercase() != "y" {
+            println!("Cancelled.");
+            return;
+        }
+    }
+
+    mcp_servers.insert(server.server_name.clone(), server.config.clone());
+
+    // Write back
+    println!(
+        "Adding MCP server '{}' from {} ...",
+        server.server_name.bright_blue(),
+        server.project_display.dimmed()
+    );
+
+    let output = serde_json::to_string_pretty(&mcp_json).expect("Failed to serialize JSON");
+    match fs::write(&mcp_path, format!("{}\n", output)) {
+        Ok(_) => {
+            println!(
+                "{} Added '{}' to .mcp.json",
+                "Done!".green().bold(),
+                server.server_name.bright_blue()
+            );
+        }
+        Err(e) => {
+            eprintln!("{}: {}", "Error writing .mcp.json".red(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn scan_plugins(claude_dir: &Path) -> Vec<PluginInfo> {
     let plugins_file = claude_dir.join("plugins/installed_plugins.json");
     let mut plugins = Vec::new();
@@ -1387,6 +1788,330 @@ fn config_command(key: Option<String>, raw: bool) {
                 }
             }
         }
+    }
+}
+
+struct RiskyPattern {
+    pattern: &'static str,
+    reason: &'static str,
+}
+
+const RISKY_PATTERNS: &[RiskyPattern] = &[
+    // Arbitrary code execution
+    RiskyPattern { pattern: "Bash(python:", reason: "arbitrary code execution via python" },
+    RiskyPattern { pattern: "Bash(python3:", reason: "arbitrary code execution via python3" },
+    RiskyPattern { pattern: "Bash(node:", reason: "arbitrary code execution via node" },
+    RiskyPattern { pattern: "Bash(source:", reason: "arbitrary script sourcing" },
+    // File destruction
+    RiskyPattern { pattern: "Bash(rm:", reason: "file deletion" },
+    // Destructive git operations
+    RiskyPattern { pattern: "Bash(git push:", reason: "can force push and destroy remote history" },
+    RiskyPattern { pattern: "Bash(git reset:", reason: "can discard uncommitted changes with --hard" },
+    RiskyPattern { pattern: "Bash(git checkout:", reason: "can discard working tree changes" },
+    // Overly broad wildcards
+    RiskyPattern { pattern: "Bash(gh:*)", reason: "allows ALL gh commands including destructive ones" },
+    RiskyPattern { pattern: "Bash(terraform:*)", reason: "allows ALL terraform commands including apply/destroy" },
+    RiskyPattern { pattern: "Bash(pnpm:*)", reason: "allows ALL pnpm commands including pnpm exec" },
+    RiskyPattern { pattern: "Bash(cat:", reason: "can bypass Read deny rules to read sensitive files" },
+    // Infrastructure access
+    RiskyPattern { pattern: "Bash(aws ", reason: "AWS CLI access (check scope)" },
+    RiskyPattern { pattern: "Bash(AWS_PROFILE=", reason: "AWS CLI access with profile (check scope)" },
+    // macOS
+    RiskyPattern { pattern: "Bash(osascript", reason: "AppleScript can perform arbitrary macOS actions" },
+    // Slack send
+    RiskyPattern { pattern: "slack_send_message", reason: "can send Slack messages" },
+];
+
+fn check_risky(entry: &str) -> Option<&'static str> {
+    RISKY_PATTERNS
+        .iter()
+        .find(|r| entry.starts_with(r.pattern) || entry.contains(r.pattern))
+        .map(|r| r.reason)
+}
+
+fn print_permissions(label: &str, path: &std::path::Path, filter: Option<&str>, audit: bool, separator: bool) -> bool {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}: {} ({})", "Error parsing".red(), label, e);
+            return false;
+        }
+    };
+
+    let permissions = match value.get("permissions") {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let allow = permissions.get("allow").and_then(|v| v.as_array());
+    let deny = permissions.get("deny").and_then(|v| v.as_array());
+
+    if allow.is_none() && deny.is_none() {
+        return false;
+    }
+
+    let matches_filter = |s: &str| -> bool {
+        match filter {
+            Some(f) => s.contains(f),
+            None => true,
+        }
+    };
+
+    let filtered_allow: Vec<&str> = allow
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .filter(|s| matches_filter(s))
+        .collect();
+    let filtered_deny: Vec<&str> = deny
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .filter(|s| matches_filter(s))
+        .collect();
+
+    if audit {
+        // Audit mode: only show risky allow entries
+        let risky: Vec<(&str, &str)> = filtered_allow
+            .iter()
+            .filter_map(|s| check_risky(s).map(|reason| (*s, reason)))
+            .collect();
+
+        if risky.is_empty() {
+            return false;
+        }
+
+        if separator {
+            println!();
+        }
+        println!("{}:", label.cyan());
+
+        let max_len = risky.iter().map(|(s, _)| s.len()).max().unwrap_or(0);
+        for (entry, reason) in &risky {
+            println!("    {:<width$}  -- {}", entry, reason.yellow(), width = max_len);
+        }
+
+        return true;
+    }
+
+    if filtered_allow.is_empty() && filtered_deny.is_empty() {
+        return false;
+    }
+
+    if separator {
+        println!();
+    }
+    println!("{}:", label.cyan());
+
+    if !filtered_allow.is_empty() {
+        println!("  {}:", "allow".green());
+        for s in &filtered_allow {
+            println!("    {}", s);
+        }
+    }
+
+    if !filtered_deny.is_empty() {
+        println!("  {}:", "deny".red());
+        for s in &filtered_deny {
+            println!("    {}", s);
+        }
+    }
+
+    true
+}
+
+fn collect_settings_files(home: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+    let mut files = vec![
+        ("~/.claude/settings.json".to_string(), home.join(".claude").join("settings.json")),
+    ];
+
+    if let Ok(config) = load_claude_config() {
+        if let Some(projects) = config.projects {
+            let mut paths: Vec<&String> = projects.keys().collect();
+            paths.sort();
+
+            for project_path in paths {
+                let base = Path::new(project_path);
+                for filename in &["settings.json", "settings.local.json"] {
+                    let settings_path = base.join(".claude").join(filename);
+                    if settings_path.exists() {
+                        let label = shorten_path(&settings_path.to_string_lossy());
+                        files.push((label, settings_path));
+                    }
+                }
+            }
+        }
+    }
+
+    files
+}
+
+fn find_risky_entries(path: &std::path::Path) -> Vec<String> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let allow = value
+        .get("permissions")
+        .and_then(|p| p.get("allow"))
+        .and_then(|v| v.as_array());
+
+    match allow {
+        Some(items) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| check_risky(s).is_some())
+            .map(|s| s.to_string())
+            .collect(),
+        None => vec![],
+    }
+}
+
+fn remove_allow_entries(path: &std::path::Path, entries_to_remove: &[String]) -> Result<(), String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Error reading {}: {}", path.display(), e))?;
+
+    let mut value: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Error parsing {}: {}", path.display(), e))?;
+
+    let allow = value
+        .get_mut("permissions")
+        .and_then(|p| p.get_mut("allow"))
+        .and_then(|v| v.as_array_mut());
+
+    if let Some(arr) = allow {
+        arr.retain(|v| {
+            v.as_str()
+                .map(|s| !entries_to_remove.contains(&s.to_string()))
+                .unwrap_or(true)
+        });
+    }
+
+    let pretty = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("Error serializing JSON: {}", e))?;
+
+    fs::write(path, format!("{}\n", pretty))
+        .map_err(|e| format!("Error writing {}: {}", path.display(), e))?;
+
+    Ok(())
+}
+
+fn permissions_command(filter: Option<String>, audit: bool, clean: bool, execute: bool) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            eprintln!("{}", "Error: Could not find home directory".red());
+            std::process::exit(1);
+        }
+    };
+
+    if clean && !audit {
+        eprintln!("{}", "--clean requires --audit".red());
+        std::process::exit(1);
+    }
+
+    if execute && !clean {
+        eprintln!("{}", "--execute requires --clean".red());
+        std::process::exit(1);
+    }
+
+    let files = collect_settings_files(&home);
+    let filter_ref = filter.as_deref();
+
+    if clean {
+        // Clean mode: collect risky entries per file, then remove them
+        let mut targets: Vec<(String, std::path::PathBuf, Vec<String>)> = Vec::new();
+
+        for (label, path) in &files {
+            let mut risky = find_risky_entries(path);
+            if let Some(f) = filter_ref {
+                risky.retain(|s| s.contains(f));
+            }
+            if !risky.is_empty() {
+                targets.push((label.clone(), path.clone(), risky));
+            }
+        }
+
+        if targets.is_empty() {
+            println!("{}", "No risky patterns found. Nothing to clean.".green());
+            return;
+        }
+
+        let total: usize = targets.iter().map(|(_, _, entries)| entries.len()).sum();
+        println!(
+            "Found {} risky entries across {} files:\n",
+            total.to_string().yellow(),
+            targets.len().to_string().yellow(),
+        );
+
+        for (label, _, entries) in &targets {
+            println!("{}:", label.cyan());
+            for entry in entries {
+                let reason = check_risky(entry).unwrap_or("");
+                println!("    {}  -- {}", entry.red(), reason.yellow());
+            }
+            println!();
+        }
+
+        if !execute {
+            println!(
+                "Run with {} {} {} to remove these entries.",
+                "--audit".cyan(),
+                "--clean".cyan(),
+                "--execute".cyan(),
+            );
+            return;
+        }
+
+        // Execute removal
+        let mut removed_total = 0;
+        for (label, path, entries) in &targets {
+            match remove_allow_entries(path, entries) {
+                Ok(()) => {
+                    println!(
+                        "{} {} entries from {}",
+                        "Removed".green(),
+                        entries.len().to_string().yellow(),
+                        label.cyan(),
+                    );
+                    removed_total += entries.len();
+                }
+                Err(e) => {
+                    eprintln!("{}", e.red());
+                }
+            }
+        }
+
+        println!(
+            "\n{} {} risky entries removed.",
+            "Done.".green(),
+            removed_total.to_string().yellow(),
+        );
+        return;
+    }
+
+    // Normal / audit display mode
+    let mut found_any = false;
+
+    for (label, path) in &files {
+        if print_permissions(label, path, filter_ref, audit, found_any) {
+            found_any = true;
+        }
+    }
+
+    if !found_any {
+        println!("{}", "No permissions found in any settings file.".yellow());
     }
 }
 
@@ -2123,11 +2848,24 @@ pub fn run() {
                 skill_copy_command(filter, from, name, force);
             }
         },
+        Some(Commands::Mcp { command }) => match command {
+            McpCommands::Copy {
+                filter,
+                from,
+                name,
+                force,
+            } => {
+                mcp_copy_command(filter, from, name, force);
+            }
+        },
         Some(Commands::Status) => {
             status_command();
         }
         Some(Commands::Doctor) => {
             doctor_command();
+        }
+        Some(Commands::Permissions { filter, audit, clean, execute }) => {
+            permissions_command(filter, audit, clean, execute);
         }
         Some(Commands::Session { command }) => {
             match command {
