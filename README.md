@@ -13,6 +13,7 @@ cckit helps you manage and monitor your Claude Code environment:
 
 - **Session Monitoring** (`session`) - Track active Claude Code sessions in real-time with an interactive TUI
 - **Project Inspection** (`ls`) - View all Claude Code projects with their skills, agents, commands, plugins, and MCP servers at a glance
+- **Permissions Audit** (`permissions`) - List, audit, and clean risky allow/deny rules across all projects
 - **Cleanup Tools** (`prune`, `sync`) - Remove stale project paths and orphaned sessions
 
 ## Install
@@ -30,12 +31,13 @@ cargo install --path .
 ## Commands
 
 ```bash
-cckit session   # Manage Claude Code sessions (TUI)
-cckit ls        # List Claude Code projects
-cckit prune     # Remove non-existent paths from ~/.claude.json
-cckit notify    # Send macOS notification (macOS only)
-cckit status    # Show cckit status and file paths
-cckit doctor    # Check cckit configuration health
+cckit session      # Manage Claude Code sessions (TUI)
+cckit ls           # List Claude Code projects
+cckit permissions  # List/audit permissions across all projects
+cckit prune        # Remove non-existent paths from ~/.claude.json
+cckit notify       # Send macOS notification (macOS only)
+cckit status       # Show cckit status and file paths
+cckit doctor       # Check cckit configuration health
 ```
 
 ## session Command
@@ -226,6 +228,48 @@ Options:
 - `--opacity` - Window opacity 0.0-1.0
 - `--bgcolor` - Background color as hex
 
+## permissions Command
+
+List and audit `permissions.allow` / `permissions.deny` from settings files across all projects.
+
+### Why?
+
+Claude Code's allow rules accumulate over time across `~/.claude/settings.json` and each project's `.claude/settings.json` / `.claude/settings.local.json`. Some allowed patterns are dangerously broad (e.g., `Bash(python:*)`, `Bash(rm:*)`, `Bash(git push:*)`), but it's hard to spot them when scattered across dozens of projects.
+
+The `permissions` command gives you a single view of all permission rules, with an audit mode that flags risky patterns and a clean mode to remove them.
+
+```bash
+# List all permissions across all projects
+cckit permissions
+
+# Filter by pattern
+cckit permissions -f 'uv run'
+
+# Audit: show only risky allow patterns with reasons
+cckit permissions --audit
+
+# Clean: dry-run showing what would be removed
+cckit permissions --audit --clean
+
+# Clean: actually remove risky entries
+cckit permissions --audit --clean --execute
+
+# Combine filter with clean
+cckit permissions --audit --clean --execute -f 'Bash(rm'
+```
+
+### Risky Patterns Detected
+
+| Category | Patterns | Risk |
+|---|---|---|
+| Arbitrary code execution | `python:*`, `python3:*`, `node:*`, `source:*` | Can run any code |
+| File destruction | `rm:*` | Can delete any file |
+| Git destructive ops | `git push:*`, `git reset:*`, `git checkout:*` | Can destroy history or discard changes |
+| Overly broad wildcards | `gh:*`, `terraform:*`, `pnpm:*` | Includes destructive subcommands |
+| Deny bypass | `cat:*` | Can read files blocked by Read deny rules |
+| Infrastructure | `aws ...`, `AWS_PROFILE=...` | Cloud resource access |
+| External messaging | `slack_send_message` | Can send messages on your behalf |
+
 ## prune Command
 
 Remove non-existent project paths from `~/.claude.json`.
@@ -351,3 +395,10 @@ Double-click `CCKit.app` or run from terminal:
 3. Scans `.mcp.json` for MCP server configurations
 4. Parses YAML frontmatter from markdown files
 5. Displays name and description for each component
+
+### permissions command
+
+1. Reads `~/.claude/settings.json` (global) and each project's `.claude/settings.json` / `.claude/settings.local.json`
+2. Extracts `permissions.allow` and `permissions.deny` arrays
+3. In audit mode, matches allow entries against built-in risky patterns (prefix match)
+4. In clean mode, removes matched entries from the JSON files
