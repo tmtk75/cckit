@@ -1,92 +1,127 @@
-# Plan: `cckit permissions --audit` 危険パターン検出機能
+# Plan: macOS ウィンドウアプリ (`cckit-window`)
 
 ## Context
 
-`cckit permissions` で全プロジェクトの allow/deny を一覧できるようになったが、数が多く、危険なパターンを目視で見つけるのが大変。`--audit` フラグで危険な allow のみをフィルター＋警告理由付きで表示する。
+既存の `cckit-app` はメニューバーアプリ（Cmd+Tab に出ない）。Cmd+Tab でフォーカスして、キーボードでセッションを選んで activate したい。新しいバイナリ `cckit-window` として追加する。ウィンドウを閉じたら終了。
+
+## 方針
+
+- `notification.rs` の NSWindow 生成パターンと `menubar.rs` のイベントループ・action handler パターンを組み合わせる
+- NSTableView は objc2 で DataSource/Delegate の実装が複雑すぎるため、**NSStackView + カスタム row view** で実装
+- キーボードイベントは **NSView サブクラスで `keyDown:` をオーバーライド**して処理
+- セッション一覧は Timer で定期更新（`menubar.rs` と同じパターン）
 
 ## 変更ファイル
 
-- `src/cli.rs` のみ
+| ファイル | 変更内容 |
+|---|---|
+| `Cargo.toml` | `[[bin]]` に `cckit-window` 追加、objc2-app-kit features 追加 |
+| `src/bin/cckit_window.rs` | 新規: エントリポイント |
+| `src/monitor/window.rs` | 新規: ウィンドウアプリ本体 |
+| `src/monitor/mod.rs` | `pub mod window;` 追加 |
 
-## 実装
+## 実装詳細
 
-### 1. 危険パターン定義（定数配列）
+### 1. `Cargo.toml`
+
+```toml
+[[bin]]
+name = "cckit-window"
+path = "src/bin/cckit_window.rs"
+```
+
+objc2-app-kit の features に追加:
+- `"NSStackView"` - セッション一覧のレイアウト
+- `"NSScrollView"` - スクロール対応
+- `"NSClipView"` - NSScrollView に必要
+- `"NSEvent"` - キーボードイベント
+- `"NSWorkspace"` - (既にあるが確認)
+
+### 2. `src/bin/cckit_window.rs`
 
 ```rust
-struct RiskyPattern {
-    pattern: &'static str,   // allow エントリの prefix match
-    reason: &'static str,
+fn main() {
+    cckit::monitor::window::run_window_app().unwrap();
 }
-
-const RISKY_PATTERNS: &[RiskyPattern] = &[
-    // 任意コード実行
-    RiskyPattern { pattern: "Bash(python:", reason: "arbitrary code execution via python" },
-    RiskyPattern { pattern: "Bash(python3:", reason: "arbitrary code execution via python3" },
-    RiskyPattern { pattern: "Bash(node:", reason: "arbitrary code execution via node" },
-    RiskyPattern { pattern: "Bash(source:", reason: "arbitrary script sourcing" },
-    // ファイル破壊
-    RiskyPattern { pattern: "Bash(rm:", reason: "file deletion" },
-    // Git 破壊操作
-    RiskyPattern { pattern: "Bash(git push:", reason: "can force push and destroy remote history" },
-    RiskyPattern { pattern: "Bash(git reset:", reason: "can discard uncommitted changes with --hard" },
-    RiskyPattern { pattern: "Bash(git checkout:", reason: "can discard working tree changes" },
-    // 広すぎるワイルドカード
-    RiskyPattern { pattern: "Bash(gh:*)", reason: "allows ALL gh commands including destructive ones" },
-    RiskyPattern { pattern: "Bash(terraform:*)", reason: "allows ALL terraform commands including apply/destroy" },
-    RiskyPattern { pattern: "Bash(pnpm:*)", reason: "allows ALL pnpm commands including pnpm exec" },
-    RiskyPattern { pattern: "Bash(cat:", reason: "can bypass Read deny rules to read sensitive files" },
-    // インフラ操作
-    RiskyPattern { pattern: "Bash(aws ", reason: "AWS CLI access (check scope)" },
-    RiskyPattern { pattern: "Bash(AWS_PROFILE=", reason: "AWS CLI access with profile (check scope)" },
-    // macOS 特殊
-    RiskyPattern { pattern: "Bash(osascript", reason: "AppleScript can perform arbitrary macOS actions" },
-    // Slack 送信 (read系は除外)
-    RiskyPattern { pattern: "slack_send_message", reason: "can send Slack messages" },
-];
 ```
 
-### 2. `Permissions` サブコマンドに `--audit` フラグ追加
+### 3. `src/monitor/window.rs` — 構造
 
+#### アプリ初期化
+- `NSApplicationActivationPolicy::Regular` — Dock に表示、Cmd+Tab に出る
+- NSWindow 作成 (タイトルバー + 閉じるボタン付き、`NSWindowStyleMask::Titled | Closable`)
+- タイトル: "cckit sessions"
+
+#### ウィンドウ構造
+```
+NSWindow (480x400)
+└─ NSScrollView
+   └─ content view (カスタム NSView サブクラス)
+      └─ セッション行を動的に描画
+```
+
+#### カスタム NSView サブクラス (`CCKitSessionListView`)
+- `ClassBuilder` で動的に作成（`menubar.rs` L273-304 のパターン）
+- オーバーライドするメソッド:
+  - `acceptsFirstResponder` → `true` (キーボードイベント受信)
+  - `keyDown:` → 上下キー、Enter、Esc 処理
+  - `drawRect:` → セッション行の描画
+
+#### グローバル状態 (static Mutex)
 ```rust
-Permissions {
-    #[arg(short, long)]
-    filter: Option<String>,
-
-    #[arg(long, help = "Show only risky allow patterns with warnings")]
-    audit: bool,
-},
+static SESSION_LIST: Mutex<Vec<Session>> = ...;
+static SELECTED_INDEX: Mutex<usize> = ...;
 ```
 
-### 3. `print_permissions` に audit モード追加
+#### キーボード操作
+| キー | アクション |
+|---|---|
+| `↑` / `k` | 前のセッション |
+| `↓` / `j` | 次のセッション |
+| `Enter` | 選択セッションの activate (focus.rs 再利用) |
+| `q` / `Esc` | アプリ終了 |
+| `1-9` | 番号でジャンプ |
 
-- `audit: true` のとき、allow エントリを `RISKY_PATTERNS` と prefix マッチ
-- マッチしたエントリだけ表示、横に理由を黄色で表示
-- deny は表示しない（audit は allow の危険性チェックなので）
-- `-f` と `--audit` は併用可能（audit 結果をさらに絞る）
+#### セッション行の描画 (`drawRect:`)
+- 各セッション: 高さ 36px
+- 左から: ステータスアイコン ("●"/"○"/"?"/"×"), プロジェクト名, ツール名, 更新時刻
+- 選択行: 青い背景色 (`NSColor::selectedContentBackgroundColor`)
+- 非選択行: 透明
 
-### 4. 出力イメージ
+#### フォーカス処理 (Enter)
+- `focus::focus_ghostty_tab_by_tty()` → フォールバック `focus::focus_ghostty_tab()`
+- `tui.rs` L253-282 と同じロジック
 
-```
-cckit permissions --audit
+#### 定期更新
+- `NSTimer` で 2 秒ごとにセッション更新 (`menubar.rs` L616-623 のパターン)
+- `Storage::load()` で最新セッションを取得
+- `setNeedsDisplay(true)` で再描画
 
-~/.ghq/github.com/kiicorp/vrp-hub/.claude/settings.local.json:
-    Bash(rm:*)                    -- file deletion
-    Bash(python:*)                -- arbitrary code execution via python
-    Bash(git reset:*)             -- can discard uncommitted changes with --hard
-    Bash(git push:*)              -- can force push and destroy remote history
-    Bash(git checkout:*)          -- can discard working tree changes
-    Bash(source:*)                -- arbitrary script sourcing
+#### ウィンドウ閉じ → 終了
+- `NSWindow` の delegate で `windowWillClose:` を実装
+- `NSApplication::terminate()` を呼ぶ
 
-~/.ghq/github.com/kiicorp/tank-workspace/.claude/settings.local.json:
-    Bash(gh:*)                    -- allows ALL gh commands including destructive ones
-    Bash(cat:*)                   -- can bypass Read deny rules to read sensitive files
-```
+### 4. 再利用するコード
+
+| 機能 | ファイル | 関数/パターン |
+|---|---|---|
+| セッションデータ | `session.rs` | `Session`, `SessionStatus`, `SessionStore` |
+| ストレージ | `storage.rs` | `Storage::load()` |
+| ターミナルフォーカス | `focus.rs` | `focus_ghostty_tab_by_tty()`, `focus_ghostty_tab()` |
+| 動的ObjCクラス | `menubar.rs:273-304` | `ClassBuilder` + `Once` パターン |
+| NSTimer更新 | `menubar.rs:616-623` | Timer + block パターン |
+| 経過時間表示 | `tui.rs` の `format_elapsed()` 相当 |
 
 ## 検証
 
 ```bash
-cargo build
-./target/debug/cckit permissions --audit
-./target/debug/cckit permissions --audit -f 'rm'
-cargo test
+cargo build --bin cckit-window
+./target/debug/cckit-window
+
+# 確認:
+# 1. Cmd+Tab に表示される
+# 2. セッション一覧が表示される
+# 3. ↑↓ で選択が移動する
+# 4. Enter でターミナルにフォーカスが移る
+# 5. ウィンドウを閉じるとアプリ終了
 ```

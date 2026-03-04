@@ -4,6 +4,8 @@ pub mod hook;
 pub mod menubar;
 #[cfg(target_os = "macos")]
 pub mod notification;
+#[cfg(target_os = "macos")]
+pub mod window;
 pub mod session;
 pub mod setup;
 pub mod storage;
