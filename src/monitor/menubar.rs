@@ -8,7 +8,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
 use objc2::{ClassType, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem, NSStatusBar,
+    NSApplication, NSApplicationActivationPolicy, NSFont, NSImage, NSMenu, NSMenuItem, NSStatusBar,
     NSStatusItem, NSWorkspace,
 };
 use objc2_foundation::{
@@ -162,6 +162,153 @@ static ICON_SIZE: Mutex<f64> = Mutex::new(24.0); // Default: 24px
 // Menu update interval configuration
 static MENU_UPDATE_INTERVAL_MS: Mutex<u64> = Mutex::new(2000); // Default: 2000ms
 
+// Menubar display style
+#[derive(Clone, Copy, PartialEq)]
+pub enum MenubarStyle {
+    Emoji,    // ▶️ 2/1/5   |  ▶️ project [Bash] ~/path
+    Terminal, // CC 2R 1T 5  |  ● project    Bash  3m
+    Htop,     // [2/1/5]     |  [RUN] project  Bash  3m
+    Compact,  // ● 2·1·5     |  ● project:Bash 3m
+}
+
+impl MenubarStyle {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "emoji" => Some(Self::Emoji),
+            "terminal" | "term" => Some(Self::Terminal),
+            "htop" => Some(Self::Htop),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+
+    fn all() -> &'static [MenubarStyle] {
+        &[Self::Emoji, Self::Terminal, Self::Htop, Self::Compact]
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Emoji => "Emoji",
+            Self::Terminal => "Terminal",
+            Self::Htop => "htop",
+            Self::Compact => "Compact",
+        }
+    }
+
+    fn status_title(&self, running: usize, tooling: usize, waiting: usize, total: usize) -> String {
+        match self {
+            Self::Emoji => {
+                let icon = if waiting > 0 {
+                    "💬"
+                } else if tooling > 0 {
+                    "🛠️"
+                } else if running > 0 {
+                    "▶️"
+                } else {
+                    "⏹️"
+                };
+                format!("{} {}/{}/{}", icon, running, tooling, total)
+            }
+            Self::Terminal => {
+                let indicator = if waiting > 0 {
+                    "◆"
+                } else if tooling > 0 {
+                    "◇"
+                } else if running > 0 {
+                    "●"
+                } else {
+                    "○"
+                };
+                format!("{} {}R {}T {}", indicator, running, tooling, total)
+            }
+            Self::Htop => {
+                format!("[{}/{}/{}]", running, tooling, total)
+            }
+            Self::Compact => {
+                let dot = if waiting > 0 {
+                    "◆"
+                } else if tooling > 0 {
+                    "◇"
+                } else if running > 0 {
+                    "●"
+                } else {
+                    "○"
+                };
+                format!("{} {}·{}·{}", dot, running, tooling, total)
+            }
+        }
+    }
+
+    fn session_label(&self, session: &Session) -> String {
+        let project = session.project_name();
+        let tool = session.last_tool.as_deref().unwrap_or("-");
+        let elapsed = format_menu_elapsed(session.updated_at);
+
+        match self {
+            Self::Emoji => {
+                let icon = match session.status {
+                    SessionStatus::Running => "▶️",
+                    SessionStatus::AwaitingApproval => "🛠️",
+                    SessionStatus::WaitingInput => "💬",
+                    SessionStatus::Stopped => "⏹️",
+                };
+                format!("{} {} [{}] {}", icon, project, tool, session.short_cwd())
+            }
+            Self::Terminal => {
+                let dot = match session.status {
+                    SessionStatus::Running => "●",
+                    SessionStatus::AwaitingApproval => "◆",
+                    SessionStatus::WaitingInput => "◇",
+                    SessionStatus::Stopped => "×",
+                };
+                format!("{} {:<14} {:<6} {:>4}", dot, project, tool, elapsed)
+            }
+            Self::Htop => {
+                let tag = match session.status {
+                    SessionStatus::Running => "[RUN]",
+                    SessionStatus::AwaitingApproval => "[TOOL]",
+                    SessionStatus::WaitingInput => "[WAIT]",
+                    SessionStatus::Stopped => "[DONE]",
+                };
+                format!("{} {:<14} {:<6} {:>4}", tag, project, tool, elapsed)
+            }
+            Self::Compact => {
+                let dot = match session.status {
+                    SessionStatus::Running => "●",
+                    SessionStatus::AwaitingApproval => "◆",
+                    SessionStatus::WaitingInput => "◇",
+                    SessionStatus::Stopped => "·",
+                };
+                format!("{} {}:{} {}", dot, project, tool, elapsed)
+            }
+        }
+    }
+}
+
+static MENUBAR_STYLE: Mutex<MenubarStyle> = Mutex::new(MenubarStyle::Terminal);
+
+pub fn set_style(style: MenubarStyle) {
+    *MENUBAR_STYLE.lock().unwrap() = style;
+}
+
+fn current_style() -> MenubarStyle {
+    *MENUBAR_STYLE.lock().unwrap()
+}
+
+fn format_menu_elapsed(dt: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = chrono::Utc::now()
+        .signed_duration_since(dt)
+        .num_seconds()
+        .max(0);
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    }
+}
+
 pub fn set_icon_size(size: f64) {
     *ICON_SIZE.lock().unwrap() = size;
 }
@@ -261,6 +408,19 @@ extern "C" fn focus_session_action(_this: *mut AnyObject, _cmd: Sel, sender: *mu
     }
 }
 
+// Action handler for style switching (tag encodes style index)
+extern "C" fn switch_style_action(_this: *mut AnyObject, _cmd: Sel, sender: *mut AnyObject) {
+    if sender.is_null() {
+        return;
+    }
+    let sender: &NSMenuItem = unsafe { &*(sender as *const NSMenuItem) };
+    let tag = sender.tag() as usize;
+    let styles = MenubarStyle::all();
+    if tag < styles.len() {
+        set_style(styles[tag]);
+    }
+}
+
 // Action handler called when quit menu item is clicked
 extern "C" fn quit_app_action(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
     SHOULD_QUIT.store(true, Ordering::SeqCst);
@@ -288,6 +448,10 @@ fn get_handler_class() -> &'static AnyClass {
             builder.add_method(
                 sel!(quitApp:),
                 quit_app_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(switchStyle:),
+                switch_style_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
         }
 
@@ -342,7 +506,6 @@ impl MenubarApp {
             return "CC".to_string();
         }
 
-        // Count by status
         let running = sessions
             .iter()
             .filter(|s| s.status == SessionStatus::Running)
@@ -351,23 +514,12 @@ impl MenubarApp {
             .iter()
             .filter(|s| s.status == SessionStatus::AwaitingApproval)
             .count();
-
-        // Determine icon based on highest priority status
-        let has_waiting = sessions
+        let waiting = sessions
             .iter()
-            .any(|s| s.status == SessionStatus::WaitingInput);
+            .filter(|s| s.status == SessionStatus::WaitingInput)
+            .count();
 
-        let icon = if has_waiting {
-            "💬"
-        } else if tooling > 0 {
-            "🛠️"
-        } else if running > 0 {
-            "▶️"
-        } else {
-            "⏹️"
-        };
-
-        format!("{} {}/{}/{}", icon, running, tooling, total)
+        current_style().status_title(running, tooling, waiting, total)
     }
 
     pub fn update_menu(&self) {
@@ -376,6 +528,7 @@ impl MenubarApp {
 
         if let Some(button) = self.status_item.button(self.mtm) {
             button.setTitle(&title_ns);
+            set_button_mono_font(&button);
         }
 
         let menu = NSMenu::new(self.mtm);
@@ -419,21 +572,9 @@ impl MenubarApp {
             let mut tty_map = HashMap::new();
             let mut cwd_map = HashMap::new();
 
+            let style = current_style();
             for (idx, session) in sessions.iter().enumerate() {
-                let status_icon = match session.status {
-                    SessionStatus::Running => "▶️",
-                    SessionStatus::AwaitingApproval => "🛠️",
-                    SessionStatus::WaitingInput => "💬",
-                    SessionStatus::Stopped => "⏹️",
-                };
-                let tool = session.last_tool.as_deref().unwrap_or("-");
-                let label = format!(
-                    "{} {} [{}] {}",
-                    status_icon,
-                    session.project_name(),
-                    tool,
-                    session.short_cwd()
-                );
+                let label = style.session_label(session);
 
                 let item = create_menu_item(self.mtm, &label, None);
                 let tag = idx as isize;
@@ -463,6 +604,28 @@ impl MenubarApp {
         // Separator
         let separator = NSMenuItem::separatorItem(self.mtm);
         menu.addItem(&separator);
+
+        // Style submenu
+        let style_menu = NSMenu::new(self.mtm);
+        let cur = current_style();
+        for (i, s) in MenubarStyle::all().iter().enumerate() {
+            let check = if *s == cur { "✓ " } else { "   " };
+            let label = format!("{}{}", check, s.label());
+            let item = create_menu_item(self.mtm, &label, None);
+            item.setTag(i as isize);
+            unsafe {
+                item.setAction(Some(objc2::sel!(switchStyle:)));
+                item.setTarget(Some(&self.handler));
+            }
+            style_menu.addItem(&item);
+        }
+        let style_item = create_menu_item(self.mtm, "Style", None);
+        style_item.setSubmenu(Some(&style_menu));
+        menu.addItem(&style_item);
+
+        // Separator before quit
+        let separator2 = NSMenuItem::separatorItem(self.mtm);
+        menu.addItem(&separator2);
 
         // Quit item
         let quit_item = create_menu_item(self.mtm, "Quit", Some("q"));
@@ -507,17 +670,50 @@ impl MenubarApp {
     }
 }
 
+const MENU_FONT_SIZE: f64 = 13.0;
+const STATUS_FONT_SIZE: f64 = 12.0;
+
 fn create_menu_item(mtm: MainThreadMarker, title: &str, key: Option<&str>) -> Retained<NSMenuItem> {
     let title_ns = NSString::from_str(title);
     let key_ns = NSString::from_str(key.unwrap_or(""));
-    unsafe {
+    let item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
             &title_ns,
             None,
             &key_ns,
         )
+    };
+
+    // Apply monospace font via NSAttributedString
+    set_menu_item_mono_font(&item, title, MENU_FONT_SIZE);
+    item
+}
+
+fn set_menu_item_mono_font(item: &NSMenuItem, text: &str, size: f64) {
+    let font = NSFont::monospacedSystemFontOfSize_weight(size, 0.0);
+    let text_ns = NSString::from_str(text);
+    let font_key = NSString::from_str("NSFont");
+
+    unsafe {
+        // NSDictionary with font attribute
+        let dict_cls = AnyClass::get(c"NSDictionary").unwrap();
+        let attrs: *mut AnyObject =
+            msg_send![dict_cls, dictionaryWithObject: &*font, forKey: &*font_key];
+
+        // NSAttributedString
+        let attr_cls = AnyClass::get(c"NSAttributedString").unwrap();
+        let attr_str: *mut AnyObject = msg_send![attr_cls, alloc];
+        let attr_str: *mut AnyObject =
+            msg_send![attr_str, initWithString: &*text_ns, attributes: attrs];
+
+        let _: () = msg_send![item, setAttributedTitle: attr_str];
     }
+}
+
+fn set_button_mono_font(button: &objc2_app_kit::NSStatusBarButton) {
+    let font = NSFont::monospacedSystemFontOfSize_weight(STATUS_FONT_SIZE, 0.0);
+    button.setFont(Some(&font));
 }
 
 /// Initialize menubar without blocking. Returns MenubarApp that must be kept alive.

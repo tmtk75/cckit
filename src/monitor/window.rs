@@ -96,6 +96,7 @@ const ROW_HEIGHT: CGFloat = 22.0;
 const HEADER_HEIGHT: CGFloat = 20.0;
 const FOOTER_HEIGHT: CGFloat = 22.0;
 const FONT_SIZE: CGFloat = 11.5;
+const FONT_SIZE_SMALL: CGFloat = 10.0;
 const HINT_FONT_SIZE: CGFloat = 10.5;
 const DOT_SIZE: CGFloat = 6.0;
 const LEFT_PAD: CGFloat = 10.0;
@@ -395,7 +396,7 @@ fn rebuild_view(view: &NSView) {
         NSSize::new(right_w, HEADER_HEIGHT - 2.0),
     );
     let hdr_right_label =
-        create_mono_label(mtm, &hdr_right, hdr_right_rect, &color_dim(), FONT_SIZE);
+        create_mono_label(mtm, &hdr_right, hdr_right_rect, &color_dim(), FONT_SIZE_SMALL);
     let _: () = unsafe { msg_send![&*hdr_right_label, setAlignment: 1_isize] };
     view.addSubview(&hdr_right_label);
 
@@ -502,7 +503,7 @@ fn rebuild_view(view: &NSView) {
             NSPoint::new(view_width - right_w - LEFT_PAD, y + 2.0),
             NSSize::new(right_w, ROW_HEIGHT - 4.0),
         );
-        let right_label = create_mono_label(mtm, &right_text, right_rect, &text_color, FONT_SIZE);
+        let right_label = create_mono_label(mtm, &right_text, right_rect, &text_color, FONT_SIZE_SMALL);
         let _: () = unsafe { msg_send![&*right_label, setAlignment: 1_isize] }; // right
         view.addSubview(&right_label);
 

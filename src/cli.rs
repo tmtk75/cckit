@@ -124,6 +124,14 @@ enum Commands {
         /// Show only window (no menubar)
         #[arg(long, help = "Show only window")]
         window_only: bool,
+
+        /// Menubar display style: emoji, terminal, htop, compact
+        #[arg(
+            long,
+            default_value = "terminal",
+            help = "Menubar style (emoji|terminal|htop|compact)"
+        )]
+        style: String,
     },
 
     /// Send a macOS notification (macOS only)
@@ -2799,8 +2807,8 @@ fn build_stop_message(hook_json: &serde_json::Value) -> String {
         let storage = monitor::storage::Storage::new();
         let store = storage.load();
 
-        // Find session by session_id (key format is "session_id:tty")
-        if let Some((_, session)) = store.sessions.iter().find(|(k, _)| k.starts_with(sid)) {
+        // Find session by exact session_id.
+        if let Some(session) = store.sessions.values().find(|s| s.session_id == sid) {
             // Duration
             let duration = chrono::Utc::now().signed_duration_since(session.created_at);
             let duration_str = format_duration(duration);
@@ -3117,7 +3125,17 @@ pub fn run() {
         Some(Commands::App {
             menubar_only,
             window_only,
+            style,
         }) => {
+            if let Some(s) = monitor::menubar::MenubarStyle::from_str(&style) {
+                monitor::menubar::set_style(s);
+            } else {
+                eprintln!(
+                    "{}: unknown style '{}' (use: emoji, terminal, htop, compact)",
+                    "Warning".yellow(),
+                    style
+                );
+            }
             if let Err(e) = monitor::window::run_app(menubar_only, window_only) {
                 eprintln!("{}: {}", "Error running app".red(), e);
                 std::process::exit(1);

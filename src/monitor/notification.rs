@@ -501,6 +501,33 @@ fn calculate_position(
     window_height: CGFloat,
     margin: CGFloat,
 ) -> (CGFloat, CGFloat) {
+    fn clamp_to_visible_frame(
+        visible_frame: NSRect,
+        window_width: CGFloat,
+        window_height: CGFloat,
+        margin: CGFloat,
+        x: CGFloat,
+        y: CGFloat,
+    ) -> (CGFloat, CGFloat) {
+        let min_x = visible_frame.origin.x + margin;
+        let max_x = visible_frame.origin.x + visible_frame.size.width - window_width - margin;
+        let min_y = visible_frame.origin.y + margin;
+        let max_y = visible_frame.origin.y + visible_frame.size.height - window_height - margin;
+
+        let clamped_x = if min_x <= max_x {
+            x.clamp(min_x, max_x)
+        } else {
+            min_x
+        };
+        let clamped_y = if min_y <= max_y {
+            y.clamp(min_y, max_y)
+        } else {
+            min_y
+        };
+
+        (clamped_x, clamped_y)
+    }
+
     // Handle menubar position specially
     if let Position::Menubar = position {
         if let Some(mb_pos) = load_menubar_position() {
@@ -508,7 +535,14 @@ fn calculate_position(
             let x = mb_pos.x - window_width / 2.0;
             // mb_pos.y is the bottom of the menubar button (top of visible area)
             let y = mb_pos.y - window_height - margin;
-            return (x, y);
+            return clamp_to_visible_frame(
+                visible_frame,
+                window_width,
+                window_height,
+                margin,
+                x,
+                y,
+            );
         }
         // Fallback to right-top if no menubar position available
         let vis_x = visible_frame.origin.x;
