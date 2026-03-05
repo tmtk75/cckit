@@ -7,12 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-const VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    " (",
-    env!("GIT_DESCRIBE"),
-    ")"
-);
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_DESCRIBE"), ")");
 
 #[derive(Parser)]
 #[command(name = "cckit")]
@@ -27,7 +22,11 @@ struct Cli {
 enum Commands {
     /// List Claude Code projects with their skills, agents, and MCP servers
     Ls {
-        #[arg(short, long, help = "Show all projects (including those without skills/agents)")]
+        #[arg(
+            short,
+            long,
+            help = "Show all projects (including those without skills/agents)"
+        )]
         all: bool,
 
         #[arg(long, help = "Filter projects by path pattern")]
@@ -106,7 +105,10 @@ enum Commands {
         #[arg(long, help = "Show only risky allow patterns with warnings")]
         audit: bool,
 
-        #[arg(long, help = "Remove risky allow patterns (requires --audit, dry-run by default)")]
+        #[arg(
+            long,
+            help = "Remove risky allow patterns (requires --audit, dry-run by default)"
+        )]
         clean: bool,
 
         #[arg(long, help = "Actually remove patterns (use with --clean)")]
@@ -1048,7 +1050,11 @@ fn select_mcp_numbered(servers: &[McpSource]) -> Option<usize> {
         return None;
     }
 
-    let max_name_len = servers.iter().map(|s| s.server_name.len()).max().unwrap_or(0);
+    let max_name_len = servers
+        .iter()
+        .map(|s| s.server_name.len())
+        .max()
+        .unwrap_or(0);
     println!("{} MCP servers found:\n", servers.len().to_string().cyan());
     for (i, server) in servers.iter().enumerate() {
         let cmd = server
@@ -1129,10 +1135,7 @@ fn mcp_copy_command(
     }
 
     let selected = if let Some(ref server_name) = name {
-        match servers
-            .iter()
-            .position(|s| s.server_name == *server_name)
-        {
+        match servers.iter().position(|s| s.server_name == *server_name) {
             Some(idx) => idx,
             None => {
                 eprintln!("{}: MCP server '{}' not found", "Error".red(), server_name);
@@ -1157,9 +1160,8 @@ fn mcp_copy_command(
 
     let mut mcp_json: serde_json::Value = if mcp_path.exists() {
         match fs::read_to_string(&mcp_path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| {
-                serde_json::json!({"mcpServers": {}})
-            }),
+            Ok(content) => serde_json::from_str(&content)
+                .unwrap_or_else(|_| serde_json::json!({"mcpServers": {}})),
             Err(_) => serde_json::json!({"mcpServers": {}}),
         }
     } else {
@@ -1167,9 +1169,11 @@ fn mcp_copy_command(
     };
 
     // Check for conflicts
-    let mcp_servers = mcp_json
-        .as_object_mut()
-        .and_then(|o| o.entry("mcpServers").or_insert_with(|| serde_json::json!({})).as_object_mut());
+    let mcp_servers = mcp_json.as_object_mut().and_then(|o| {
+        o.entry("mcpServers")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+    });
 
     let mcp_servers = match mcp_servers {
         Some(s) => s,
@@ -1411,7 +1415,13 @@ fn print_skills(skills: &[SkillInfo], indent: &str) {
             .as_ref()
             .map(|d| format!(" - {}", truncate_str(d, 57).dimmed()))
             .unwrap_or_default();
-        println!("{}  {} {}{}", indent, "-".dimmed(), skill.name.green(), desc);
+        println!(
+            "{}  {} {}{}",
+            indent,
+            "-".dimmed(),
+            skill.name.green(),
+            desc
+        );
     }
 }
 
@@ -1441,7 +1451,13 @@ fn print_commands(commands: &[CommandInfo], indent: &str) {
             .as_ref()
             .map(|d| format!(" - {}", truncate_str(d, 57).dimmed()))
             .unwrap_or_default();
-        println!("{}  {} /{}{}", indent, "-".dimmed(), cmd.name.yellow(), desc);
+        println!(
+            "{}  {} /{}{}",
+            indent,
+            "-".dimmed(),
+            cmd.name.yellow(),
+            desc
+        );
     }
 }
 
@@ -1538,10 +1554,7 @@ fn run_sync(execute: bool) {
 
     if !execute {
         println!();
-        println!(
-            "Run with {} to remove these sessions.",
-            "--execute".cyan()
-        );
+        println!("Run with {} to remove these sessions.", "--execute".cyan());
         return;
     }
 
@@ -1753,7 +1766,10 @@ fn config_command(key: Option<String>, raw: bool) {
     };
 
     if raw {
-        println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
         return;
     }
 
@@ -1809,28 +1825,76 @@ struct RiskyPattern {
 
 const RISKY_PATTERNS: &[RiskyPattern] = &[
     // Arbitrary code execution
-    RiskyPattern { pattern: "Bash(python:", reason: "arbitrary code execution via python" },
-    RiskyPattern { pattern: "Bash(python3:", reason: "arbitrary code execution via python3" },
-    RiskyPattern { pattern: "Bash(node:", reason: "arbitrary code execution via node" },
-    RiskyPattern { pattern: "Bash(source:", reason: "arbitrary script sourcing" },
+    RiskyPattern {
+        pattern: "Bash(python:",
+        reason: "arbitrary code execution via python",
+    },
+    RiskyPattern {
+        pattern: "Bash(python3:",
+        reason: "arbitrary code execution via python3",
+    },
+    RiskyPattern {
+        pattern: "Bash(node:",
+        reason: "arbitrary code execution via node",
+    },
+    RiskyPattern {
+        pattern: "Bash(source:",
+        reason: "arbitrary script sourcing",
+    },
     // File destruction
-    RiskyPattern { pattern: "Bash(rm:", reason: "file deletion" },
+    RiskyPattern {
+        pattern: "Bash(rm:",
+        reason: "file deletion",
+    },
     // Destructive git operations
-    RiskyPattern { pattern: "Bash(git push:", reason: "can force push and destroy remote history" },
-    RiskyPattern { pattern: "Bash(git reset:", reason: "can discard uncommitted changes with --hard" },
-    RiskyPattern { pattern: "Bash(git checkout:", reason: "can discard working tree changes" },
+    RiskyPattern {
+        pattern: "Bash(git push:",
+        reason: "can force push and destroy remote history",
+    },
+    RiskyPattern {
+        pattern: "Bash(git reset:",
+        reason: "can discard uncommitted changes with --hard",
+    },
+    RiskyPattern {
+        pattern: "Bash(git checkout:",
+        reason: "can discard working tree changes",
+    },
     // Overly broad wildcards
-    RiskyPattern { pattern: "Bash(gh:*)", reason: "allows ALL gh commands including destructive ones" },
-    RiskyPattern { pattern: "Bash(terraform:*)", reason: "allows ALL terraform commands including apply/destroy" },
-    RiskyPattern { pattern: "Bash(pnpm:*)", reason: "allows ALL pnpm commands including pnpm exec" },
-    RiskyPattern { pattern: "Bash(cat:", reason: "can bypass Read deny rules to read sensitive files" },
+    RiskyPattern {
+        pattern: "Bash(gh:*)",
+        reason: "allows ALL gh commands including destructive ones",
+    },
+    RiskyPattern {
+        pattern: "Bash(terraform:*)",
+        reason: "allows ALL terraform commands including apply/destroy",
+    },
+    RiskyPattern {
+        pattern: "Bash(pnpm:*)",
+        reason: "allows ALL pnpm commands including pnpm exec",
+    },
+    RiskyPattern {
+        pattern: "Bash(cat:",
+        reason: "can bypass Read deny rules to read sensitive files",
+    },
     // Infrastructure access
-    RiskyPattern { pattern: "Bash(aws ", reason: "AWS CLI access (check scope)" },
-    RiskyPattern { pattern: "Bash(AWS_PROFILE=", reason: "AWS CLI access with profile (check scope)" },
+    RiskyPattern {
+        pattern: "Bash(aws ",
+        reason: "AWS CLI access (check scope)",
+    },
+    RiskyPattern {
+        pattern: "Bash(AWS_PROFILE=",
+        reason: "AWS CLI access with profile (check scope)",
+    },
     // macOS
-    RiskyPattern { pattern: "Bash(osascript", reason: "AppleScript can perform arbitrary macOS actions" },
+    RiskyPattern {
+        pattern: "Bash(osascript",
+        reason: "AppleScript can perform arbitrary macOS actions",
+    },
     // Slack send
-    RiskyPattern { pattern: "slack_send_message", reason: "can send Slack messages" },
+    RiskyPattern {
+        pattern: "slack_send_message",
+        reason: "can send Slack messages",
+    },
 ];
 
 fn check_risky(entry: &str) -> Option<&'static str> {
@@ -1840,7 +1904,13 @@ fn check_risky(entry: &str) -> Option<&'static str> {
         .map(|r| r.reason)
 }
 
-fn print_permissions(label: &str, path: &std::path::Path, filter: Option<&str>, audit: bool, separator: bool) -> bool {
+fn print_permissions(
+    label: &str,
+    path: &std::path::Path,
+    filter: Option<&str>,
+    audit: bool,
+    separator: bool,
+) -> bool {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return false,
@@ -1904,7 +1974,12 @@ fn print_permissions(label: &str, path: &std::path::Path, filter: Option<&str>, 
 
         let max_len = risky.iter().map(|(s, _)| s.len()).max().unwrap_or(0);
         for (entry, reason) in &risky {
-            println!("    {:<width$}  -- {}", entry, reason.yellow(), width = max_len);
+            println!(
+                "    {:<width$}  -- {}",
+                entry,
+                reason.yellow(),
+                width = max_len
+            );
         }
 
         return true;
@@ -1937,9 +2012,10 @@ fn print_permissions(label: &str, path: &std::path::Path, filter: Option<&str>, 
 }
 
 fn collect_settings_files(home: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
-    let mut files = vec![
-        ("~/.claude/settings.json".to_string(), home.join(".claude").join("settings.json")),
-    ];
+    let mut files = vec![(
+        "~/.claude/settings.json".to_string(),
+        home.join(".claude").join("settings.json"),
+    )];
 
     if let Ok(config) = load_claude_config() {
         if let Some(projects) = config.projects {
@@ -1989,9 +2065,12 @@ fn find_risky_entries(path: &std::path::Path) -> Vec<String> {
     }
 }
 
-fn remove_allow_entries(path: &std::path::Path, entries_to_remove: &[String]) -> Result<(), String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("Error reading {}: {}", path.display(), e))?;
+fn remove_allow_entries(
+    path: &std::path::Path,
+    entries_to_remove: &[String],
+) -> Result<(), String> {
+    let content =
+        fs::read_to_string(path).map_err(|e| format!("Error reading {}: {}", path.display(), e))?;
 
     let mut value: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("Error parsing {}: {}", path.display(), e))?;
@@ -2179,10 +2258,7 @@ fn status_command() {
     let global_config = dirs::config_dir().map(|p| p.join("cckit/config.toml"));
 
     if let Some(ref path) = cwd_config {
-        println!(
-            "  ./config.toml               {}",
-            get_file_info(path)
-        );
+        println!("  ./config.toml               {}", get_file_info(path));
     }
     if let Some(ref path) = global_config {
         let display_path = if cfg!(target_os = "macos") {
@@ -2201,7 +2277,11 @@ fn status_command() {
 
     // Environment variables
     println!("{}", "Environment Variables:".cyan());
-    println!("  {:<24} {}", "HOME", std::env::var("HOME").unwrap_or_default().green());
+    println!(
+        "  {:<24} {}",
+        "HOME",
+        std::env::var("HOME").unwrap_or_default().green()
+    );
 
     println!();
 
@@ -2306,10 +2386,7 @@ fn doctor_command() {
                     }
 
                     if !missing_hooks.is_empty() {
-                        issues.push(format!(
-                            "Missing hooks: {}",
-                            missing_hooks.join(", ")
-                        ));
+                        issues.push(format!("Missing hooks: {}", missing_hooks.join(", ")));
                         issues.push("  Run: cckit session install".to_string());
                     }
                 }
@@ -2426,10 +2503,7 @@ fn prune_command(execute: bool, no_backup: bool) {
 
     if !execute {
         println!();
-        println!(
-            "Run with {} to remove these paths.",
-            "--execute".cyan()
-        );
+        println!("Run with {} to remove these paths.", "--execute".cyan());
         return;
     }
 
@@ -2571,19 +2645,19 @@ fn ls_command(opts: LsOptions) {
     });
 
     // Filter by MCP server name if specified
-    let all_infos: Vec<(ProjectInfo, Option<String>)> = if let Some(ref mcp_filter) = opts.mcp_filter
-    {
-        all_infos
-            .into_iter()
-            .filter(|(info, _)| {
-                info.mcp_servers
-                    .iter()
-                    .any(|server| server.name.contains(mcp_filter.as_str()))
-            })
-            .collect()
-    } else {
-        all_infos
-    };
+    let all_infos: Vec<(ProjectInfo, Option<String>)> =
+        if let Some(ref mcp_filter) = opts.mcp_filter {
+            all_infos
+                .into_iter()
+                .filter(|(info, _)| {
+                    info.mcp_servers
+                        .iter()
+                        .any(|server| server.name.contains(mcp_filter.as_str()))
+                })
+                .collect()
+        } else {
+            all_infos
+        };
 
     // Filter by skill name if specified
     let all_infos: Vec<(ProjectInfo, Option<String>)> =
@@ -2680,12 +2754,7 @@ fn ls_command(opts: LsOptions) {
         duplicates.sort_by(|a, b| a.0.cmp(&b.0));
         println!("{}", "Duplicates (same git remote):".dimmed());
         for (skipped, kept) in &duplicates {
-            println!(
-                "  {} {} {}",
-                skipped.dimmed(),
-                "->".dimmed(),
-                kept.dimmed()
-            );
+            println!("  {} {} {}", skipped.dimmed(), "->".dimmed(), kept.dimmed());
         }
     }
 }
@@ -2790,19 +2859,23 @@ fn get_last_assistant_message(transcript_path: &str) -> Option<String> {
 
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
             if json.get("type").and_then(|t| t.as_str()) == Some("assistant") {
-                if let Some(content_arr) = json.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+                if let Some(content_arr) = json
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
                     for item in content_arr {
                         if item.get("type").and_then(|t| t.as_str()) == Some("text") {
                             if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
                                 // Take first 3 lines, truncate to 200 chars
-                                let summary: String = text
-                                    .lines()
-                                    .take(3)
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
+                                let summary: String =
+                                    text.lines().take(3).collect::<Vec<_>>().join("\n");
                                 let chars: Vec<char> = summary.chars().collect();
                                 if chars.len() > 200 {
-                                    return Some(format!("{}...", chars[..200].iter().collect::<String>()));
+                                    return Some(format!(
+                                        "{}...",
+                                        chars[..200].iter().collect::<String>()
+                                    ));
                                 }
                                 return Some(summary);
                             }
@@ -2875,12 +2948,26 @@ pub fn run() {
         Some(Commands::Doctor) => {
             doctor_command();
         }
-        Some(Commands::Permissions { filter, audit, clean, execute }) => {
+        Some(Commands::Permissions {
+            filter,
+            audit,
+            clean,
+            execute,
+        }) => {
             permissions_command(filter, audit, clean, execute);
         }
         Some(Commands::Session { command }) => {
             match command {
-                Some(SessionCommands::Ls { text, menubar, no_tui, icon_size, check_interval, poll_interval, menu_update_interval, event_timeout }) => {
+                Some(SessionCommands::Ls {
+                    text,
+                    menubar,
+                    no_tui,
+                    icon_size,
+                    check_interval,
+                    poll_interval,
+                    menu_update_interval,
+                    event_timeout,
+                }) => {
                     if text {
                         monitor::print_sessions_list();
                     } else if no_tui {
@@ -2888,7 +2975,9 @@ pub fn run() {
                         {
                             monitor::menubar::set_icon_size(icon_size as f64);
                             monitor::menubar::set_update_interval(menu_update_interval);
-                            if let Err(e) = monitor::menubar::run_menubar_with_polling(poll_interval) {
+                            if let Err(e) =
+                                monitor::menubar::run_menubar_with_polling(poll_interval)
+                            {
                                 eprintln!("{}: {}", "Error running menubar".red(), e);
                                 std::process::exit(1);
                             }
@@ -2907,7 +2996,10 @@ pub fn run() {
 
                         #[cfg(not(target_os = "macos"))]
                         if menubar {
-                            eprintln!("{}", "Warning: --menubar is only supported on macOS, ignoring".yellow());
+                            eprintln!(
+                                "{}",
+                                "Warning: --menubar is only supported on macOS, ignoring".yellow()
+                            );
                         }
 
                         let tui_config = monitor::tui::TuiConfig {
@@ -2957,9 +3049,14 @@ pub fn run() {
                 }
                 Some(SessionCommands::Focus { project }) => {
                     match monitor::focus::focus_ghostty_tab(&project) {
-                        Ok(true) => println!("{}", format!("Focused tab matching '{}'", project).green()),
+                        Ok(true) => {
+                            println!("{}", format!("Focused tab matching '{}'", project).green())
+                        }
                         Ok(false) => {
-                            eprintln!("{}", format!("No tab found matching '{}'", project).yellow());
+                            eprintln!(
+                                "{}",
+                                format!("No tab found matching '{}'", project).yellow()
+                            );
                             std::process::exit(1);
                         }
                         Err(e) => {
@@ -2969,15 +3066,13 @@ pub fn run() {
                     }
                 }
                 #[cfg(target_os = "macos")]
-                Some(SessionCommands::DumpUi) => {
-                    match monitor::focus::ax::dump_ghostty_ui_tree() {
-                        Ok(tree) => println!("{}", tree),
-                        Err(e) => {
-                            eprintln!("{}: {}", "Error dumping UI tree".red(), e);
-                            std::process::exit(1);
-                        }
+                Some(SessionCommands::DumpUi) => match monitor::focus::ax::dump_ghostty_ui_tree() {
+                    Ok(tree) => println!("{}", tree),
+                    Err(e) => {
+                        eprintln!("{}: {}", "Error dumping UI tree".red(), e);
+                        std::process::exit(1);
                     }
-                }
+                },
                 #[cfg(not(target_os = "macos"))]
                 Some(SessionCommands::DumpUi) => {
                     eprintln!("DumpUi is only supported on macOS");
@@ -3001,7 +3096,8 @@ pub fn run() {
                     {
                         monitor::menubar::set_icon_size(24.0);
                         monitor::menubar::set_update_interval(2000);
-                        let result = monitor::tui::run_tui_with_menubar(monitor::tui::TuiConfig::default());
+                        let result =
+                            monitor::tui::run_tui_with_menubar(monitor::tui::TuiConfig::default());
                         if let Err(e) = result {
                             eprintln!("{}: {}", "Error running TUI".red(), e);
                             std::process::exit(1);
@@ -3018,7 +3114,10 @@ pub fn run() {
             }
         }
         #[cfg(target_os = "macos")]
-        Some(Commands::App { menubar_only, window_only }) => {
+        Some(Commands::App {
+            menubar_only,
+            window_only,
+        }) => {
             if let Err(e) = monitor::window::run_app(menubar_only, window_only) {
                 eprintln!("{}: {}", "Error running app".red(), e);
                 std::process::exit(1);
@@ -3030,7 +3129,19 @@ pub fn run() {
             std::process::exit(1);
         }
         #[cfg(target_os = "macos")]
-        Some(Commands::Notify { title, subtitle, message, sound, duration, width, height, position, margin, opacity, bgcolor }) => {
+        Some(Commands::Notify {
+            title,
+            subtitle,
+            message,
+            sound,
+            duration,
+            width,
+            height,
+            position,
+            margin,
+            opacity,
+            bgcolor,
+        }) => {
             // Determine message: use -m if provided, otherwise read from stdin
             let (final_title, final_message) = if let Some(m) = message {
                 // Explicit message provided, use as-is
@@ -3044,7 +3155,8 @@ pub fn run() {
 
                 if !stdin_content.is_empty() {
                     // Try to parse as hook JSON
-                    if let Ok(hook_json) = serde_json::from_str::<serde_json::Value>(stdin_content) {
+                    if let Ok(hook_json) = serde_json::from_str::<serde_json::Value>(stdin_content)
+                    {
                         if hook_json.get("hook_event_name").is_some() {
                             // It's a hook JSON, parse it nicely
                             parse_hook_notification(&hook_json, &title)
@@ -3057,7 +3169,10 @@ pub fn run() {
                         (title, stdin_content.to_string())
                     }
                 } else {
-                    eprintln!("{}: No message provided (use -m or pipe to stdin)", "Error".red());
+                    eprintln!(
+                        "{}: No message provided (use -m or pipe to stdin)",
+                        "Error".red()
+                    );
                     std::process::exit(1);
                 }
             };
@@ -3198,7 +3313,10 @@ name: agent-name
         let patterns = vec!["*.tmp".to_string(), "/home/*/Downloads/*".to_string()];
         assert!(is_path_disabled("file.tmp", &patterns));
         assert!(is_path_disabled("/home/user/Downloads/file.zip", &patterns));
-        assert!(!is_path_disabled("/home/user/Documents/file.txt", &patterns));
+        assert!(!is_path_disabled(
+            "/home/user/Documents/file.txt",
+            &patterns
+        ));
     }
 
     #[test]

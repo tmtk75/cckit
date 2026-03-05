@@ -6,14 +6,14 @@ use super::storage::Storage;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
-    Frame, Terminal,
 };
 use std::io;
 use std::time::{Duration, Instant};
@@ -67,8 +67,8 @@ impl App {
     }
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Configuration for TUI and menubar polling intervals
 #[derive(Clone)]
@@ -190,7 +190,11 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn run_tui_core(config: TuiConfig, external_quit: Option<Arc<AtomicBool>>, tty: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_tui_core(
+    config: TuiConfig,
+    external_quit: Option<Arc<AtomicBool>>,
+    tty: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut guard = TerminalGuard::enter()?;
     let stdout = io::stdout();
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
@@ -239,7 +243,9 @@ fn run_tui_core(config: TuiConfig, external_quit: Option<Arc<AtomicBool>>, tty: 
                     app.message = None; // Clear message on key press
 
                     // Handle Ctrl+C
-                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
                         app.should_quit = true;
                         continue;
                     }
@@ -255,7 +261,8 @@ fn run_tui_core(config: TuiConfig, external_quit: Option<Arc<AtomicBool>>, tty: 
                                 // Use TTY-based focus (works with tmux)
                                 match focus::focus_ghostty_tab_by_tty(&session.tty) {
                                     Ok(true) => {
-                                        app.message = Some(format!("Focused: {}", session.short_cwd()));
+                                        app.message =
+                                            Some(format!("Focused: {}", session.short_cwd()));
                                     }
                                     Ok(false) => {
                                         // Fallback to project name matching
@@ -265,10 +272,12 @@ fn run_tui_core(config: TuiConfig, external_quit: Option<Arc<AtomicBool>>, tty: 
                                             .unwrap_or(&session.cwd);
                                         match focus::focus_ghostty_tab(project_name) {
                                             Ok(true) => {
-                                                app.message = Some(format!("Focused: {}", project_name));
+                                                app.message =
+                                                    Some(format!("Focused: {}", project_name));
                                             }
                                             Ok(false) => {
-                                                app.message = Some(format!("No tab: {}", project_name));
+                                                app.message =
+                                                    Some(format!("No tab: {}", project_name));
                                             }
                                             Err(e) => {
                                                 app.message = Some(format!("Error: {}", e));
@@ -427,7 +436,7 @@ fn draw_sessions_table(frame: &mut Frame, area: Rect, app: &App) {
 
             let status_text = match session.status {
                 SessionStatus::Running => "● run",
-                SessionStatus::AwaitingApproval => "? pend",
+                SessionStatus::AwaitingApproval => "◐ tool",
                 SessionStatus::WaitingInput => "○ wait",
                 SessionStatus::Stopped => "× done",
             };

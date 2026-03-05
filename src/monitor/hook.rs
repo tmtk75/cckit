@@ -54,17 +54,20 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             "UserPromptSubmit" => {
-                let session = store.sessions.entry(key.clone()).or_insert_with(|| Session {
-                    session_id: hook_input.session_id.clone(),
-                    cwd: hook_input.cwd.clone(),
-                    tty: tty.clone(),
-                    status: SessionStatus::Running,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                    last_tool: None,
-                    last_tool_input: None,
-                    pid,
-                });
+                let session = store
+                    .sessions
+                    .entry(key.clone())
+                    .or_insert_with(|| Session {
+                        session_id: hook_input.session_id.clone(),
+                        cwd: hook_input.cwd.clone(),
+                        tty: tty.clone(),
+                        status: SessionStatus::Running,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        last_tool: None,
+                        last_tool_input: None,
+                        pid,
+                    });
                 session.status = SessionStatus::Running;
                 session.updated_at = Utc::now();
                 session.cwd = hook_input.cwd.clone();
@@ -131,8 +134,8 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn log_error(event: &str, error: &str) {
-    let data_dir = dirs::data_local_dir()
-        .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")));
+    let data_dir =
+        dirs::data_local_dir().or_else(|| dirs::home_dir().map(|h| h.join(".local/share")));
     let log_path = match data_dir {
         Some(d) => d.join("cckit").join("error.log"),
         None => return,
@@ -142,11 +145,7 @@ pub fn log_error(event: &str, error: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
         let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S");
         let _ = writeln!(file, "[{}] event={} error={}", timestamp, event, error);
     }
@@ -295,7 +294,10 @@ mod tests {
             tool_input: Some(json!({"command": "ls -la"})),
             transcript_path: None,
         };
-        assert_eq!(extract_tool_summary(&hook_input), Some("ls -la".to_string()));
+        assert_eq!(
+            extract_tool_summary(&hook_input),
+            Some("ls -la".to_string())
+        );
     }
 
     #[test]

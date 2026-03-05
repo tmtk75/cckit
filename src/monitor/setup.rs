@@ -1,5 +1,5 @@
 use colored::Colorize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -119,7 +119,9 @@ fn ensure_hooks_object(settings: &mut Value) -> io::Result<&mut Map<String, Valu
     if settings.get("hooks").is_none() {
         settings
             .as_object_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "settings.json is not an object"))?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "settings.json is not an object")
+            })?
             .insert("hooks".to_string(), json!({}));
     }
 
@@ -213,21 +215,13 @@ pub fn run_install(force: bool) -> io::Result<()> {
 
     if added.is_empty() {
         println!("{}", "All cckit hooks are already configured.".green());
-        println!(
-            "Use {} to see active sessions.",
-            "cckit session".cyan()
-        );
+        println!("Use {} to see active sessions.", "cckit session".cyan());
         return Ok(());
     }
 
     println!("{}:", "Adding".cyan());
     for event in &added {
-        println!(
-            "  {} {} session hook {}",
-            "+".green(),
-            cckit_cmd,
-            event
-        );
+        println!("  {} {} session hook {}", "+".green(), cckit_cmd, event);
     }
     println!();
 
@@ -259,10 +253,7 @@ pub fn show_status() -> io::Result<()> {
 
     if !settings_path.exists() {
         println!("{}", "No settings.json found.".yellow());
-        println!(
-            "Run {} to configure hooks.",
-            "cckit session install".cyan()
-        );
+        println!("Run {} to configure hooks.", "cckit session install".cyan());
         return Ok(());
     }
 
@@ -279,7 +270,12 @@ pub fn show_status() -> io::Result<()> {
             if has_cckit_hook(hook_array) {
                 println!("  {} {} {}", "✓".green(), event, "(cckit)".dimmed());
             } else {
-                println!("  {} {} {}", "-".yellow(), event, "(no cckit hook)".dimmed());
+                println!(
+                    "  {} {} {}",
+                    "-".yellow(),
+                    event,
+                    "(no cckit hook)".dimmed()
+                );
             }
         } else {
             println!("  {} {}", "✗".red(), event);
@@ -287,10 +283,7 @@ pub fn show_status() -> io::Result<()> {
     }
 
     println!();
-    println!(
-        "Settings: {}",
-        settings_path.display().to_string().dimmed()
-    );
+    println!("Settings: {}", settings_path.display().to_string().dimmed());
 
     Ok(())
 }
@@ -299,7 +292,10 @@ pub fn run_uninstall() -> io::Result<()> {
     let settings_path = get_settings_path();
 
     if !settings_path.exists() {
-        println!("{}", "No settings.json found. Nothing to uninstall.".yellow());
+        println!(
+            "{}",
+            "No settings.json found. Nothing to uninstall.".yellow()
+        );
         return Ok(());
     }
 
@@ -382,7 +378,10 @@ mod tests {
     #[test]
     fn test_create_hook_entry_custom_command() {
         let entry = create_hook_entry("/usr/local/bin/cckit");
-        assert_eq!(entry["hooks"][0]["command"], "/usr/local/bin/cckit session hook");
+        assert_eq!(
+            entry["hooks"][0]["command"],
+            "/usr/local/bin/cckit session hook"
+        );
     }
 
     #[test]

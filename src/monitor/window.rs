@@ -6,15 +6,12 @@ use crate::monitor::storage::Storage;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
-use objc2::{msg_send, sel, ClassType, MainThreadOnly};
+use objc2::{ClassType, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSColor, NSEvent, NSFont, NSScreen, NSTextField, NSView,
-    NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
+    NSColor, NSEvent, NSFont, NSScreen, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
-use objc2_foundation::{
-    MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer,
-};
+use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
 type CGFloat = f64;
 
@@ -79,7 +76,10 @@ fn apply_config() {
 
 fn open_config_file() {
     let path = config_path();
-    let _ = std::process::Command::new("open").arg("-t").arg(&path).spawn();
+    let _ = std::process::Command::new("open")
+        .arg("-t")
+        .arg(&path)
+        .spawn();
 }
 
 fn reload_config() {
@@ -184,7 +184,7 @@ fn format_elapsed(dt: chrono::DateTime<chrono::Utc>) -> String {
 fn status_label(status: &SessionStatus) -> &'static str {
     match status {
         SessionStatus::Running => "run",
-        SessionStatus::AwaitingApproval => "pend",
+        SessionStatus::AwaitingApproval => "tool",
         SessionStatus::WaitingInput => "wait",
         SessionStatus::Stopped => "done",
     }
@@ -367,14 +367,26 @@ fn rebuild_view(view: &NSView) {
         NSPoint::new(TEXT_LEFT, 2.0),
         NSSize::new(220.0, HEADER_HEIGHT - 2.0),
     );
-    view.addSubview(&create_mono_label(mtm, &hdr_left, hdr_left_rect, &color_dim(), FONT_SIZE));
+    view.addSubview(&create_mono_label(
+        mtm,
+        &hdr_left,
+        hdr_left_rect,
+        &color_dim(),
+        FONT_SIZE,
+    ));
 
     let path_x = TEXT_LEFT + 220.0;
     let hdr_path_rect = NSRect::new(
         NSPoint::new(path_x, 2.0),
         NSSize::new(100.0, HEADER_HEIGHT - 2.0),
     );
-    view.addSubview(&create_mono_label(mtm, "PATH", hdr_path_rect, &color_dim(), FONT_SIZE));
+    view.addSubview(&create_mono_label(
+        mtm,
+        "PATH",
+        hdr_path_rect,
+        &color_dim(),
+        FONT_SIZE,
+    ));
 
     let right_w = 110.0;
     let hdr_right = format!("{:>6}  {:>5}", "TOOL", "AGE");
@@ -382,7 +394,8 @@ fn rebuild_view(view: &NSView) {
         NSPoint::new(view_width - right_w - LEFT_PAD, 2.0),
         NSSize::new(right_w, HEADER_HEIGHT - 2.0),
     );
-    let hdr_right_label = create_mono_label(mtm, &hdr_right, hdr_right_rect, &color_dim(), FONT_SIZE);
+    let hdr_right_label =
+        create_mono_label(mtm, &hdr_right, hdr_right_rect, &color_dim(), FONT_SIZE);
     let _: () = unsafe { msg_send![&*hdr_right_label, setAlignment: 1_isize] };
     view.addSubview(&hdr_right_label);
 
@@ -463,7 +476,13 @@ fn rebuild_view(view: &NSView) {
             NSPoint::new(TEXT_LEFT, y + 2.0),
             NSSize::new(220.0, ROW_HEIGHT - 4.0),
         );
-        view.addSubview(&create_mono_label(mtm, &left_text, left_rect, &text_color, FONT_SIZE));
+        view.addSubview(&create_mono_label(
+            mtm,
+            &left_text,
+            left_rect,
+            &text_color,
+            FONT_SIZE,
+        ));
 
         // Middle: path (dim, truncate middle)
         let path_x = TEXT_LEFT + 220.0;
@@ -514,8 +533,7 @@ extern "C" fn is_flipped(_this: *mut AnyObject, _sel: Sel) -> Bool {
 fn get_view_class() -> &'static AnyClass {
     REGISTER_VIEW_CLASS.call_once(|| {
         let superclass = NSView::class();
-        let mut builder =
-            ClassBuilder::new(c"CCKitSessionListView", superclass).unwrap();
+        let mut builder = ClassBuilder::new(c"CCKitSessionListView", superclass).unwrap();
 
         unsafe {
             builder.add_method(
@@ -559,8 +577,7 @@ extern "C" fn window_will_close(_this: *mut AnyObject, _sel: Sel, _notification:
 fn get_delegate_class() -> &'static AnyClass {
     REGISTER_DELEGATE_CLASS.call_once(|| {
         let superclass = NSObject::class();
-        let mut builder =
-            ClassBuilder::new(c"CCKitWindowDelegate", superclass).unwrap();
+        let mut builder = ClassBuilder::new(c"CCKitWindowDelegate", superclass).unwrap();
 
         unsafe {
             builder.add_method(
@@ -620,9 +637,8 @@ pub fn run_app(menubar_only: bool, window_only: bool) -> Result<(), Box<dyn std:
         let block = block2::RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
             menubar_for_timer.update_menu();
         });
-        let _timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &block)
-        };
+        let _timer =
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &block) };
         Some((menubar, _timer))
     } else {
         None
@@ -640,7 +656,10 @@ pub fn run_window_app() -> Result<(), Box<dyn std::error::Error>> {
     run_app(false, true)
 }
 
-fn setup_window(mtm: MainThreadMarker, app: &NSApplication) -> Result<(), Box<dyn std::error::Error>> {
+fn setup_window(
+    mtm: MainThreadMarker,
+    app: &NSApplication,
+) -> Result<(), Box<dyn std::error::Error>> {
     load_sessions();
 
     let screen = NSScreen::mainScreen(mtm).ok_or("No main screen")?;
@@ -663,7 +682,10 @@ fn setup_window(mtm: MainThreadMarker, app: &NSApplication) -> Result<(), Box<dy
     let content_rect_h = (needed_h + titlebar_h).clamp(MIN_WINDOW_HEIGHT, max_window_h);
 
     // Frame height for centering on screen
-    let frame_probe = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WINDOW_WIDTH, content_rect_h));
+    let frame_probe = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(WINDOW_WIDTH, content_rect_h),
+    );
     let frame_rect = NSWindow::frameRectForContentRect_styleMask(frame_probe, style_mask, mtm);
     let frame_h = frame_rect.size.height;
 
@@ -673,7 +695,10 @@ fn setup_window(mtm: MainThreadMarker, app: &NSApplication) -> Result<(), Box<dy
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            NSRect::new(NSPoint::new(x, y), NSSize::new(WINDOW_WIDTH, content_rect_h)),
+            NSRect::new(
+                NSPoint::new(x, y),
+                NSSize::new(WINDOW_WIDTH, content_rect_h),
+            ),
             style_mask,
             NSBackingStoreType(2),
             false,
@@ -718,8 +743,7 @@ fn setup_window(mtm: MainThreadMarker, app: &NSApplication) -> Result<(), Box<dy
     let _: () = unsafe { msg_send![&*effect_view, setBlendingMode: 0_isize] }; // BehindWindow
     let _: () = unsafe { msg_send![&*effect_view, setState: 1_isize] }; // Active
     effect_view.setAutoresizingMask(
-        NSAutoresizingMaskOptions::ViewWidthSizable
-            | NSAutoresizingMaskOptions::ViewHeightSizable,
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
     *EFFECT_VIEW_PTR.lock().unwrap() = Some(&*effect_view as *const NSView as usize);
     root.addSubview(&effect_view);
@@ -741,8 +765,7 @@ fn setup_window(mtm: MainThreadMarker, app: &NSApplication) -> Result<(), Box<dy
         ),
     );
     footer.setAutoresizingMask(
-        NSAutoresizingMaskOptions::ViewWidthSizable
-            | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin,
     );
 
     let hint_rect = NSRect::new(
@@ -784,8 +807,7 @@ fn setup_window(mtm: MainThreadMarker, app: &NSApplication) -> Result<(), Box<dy
     );
     scroll_view.setHasVerticalScroller(true);
     scroll_view.setAutoresizingMask(
-        NSAutoresizingMaskOptions::ViewWidthSizable
-            | NSAutoresizingMaskOptions::ViewHeightSizable,
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
     let _: () = unsafe { msg_send![&*scroll_view, setDrawsBackground: Bool::NO] };
 

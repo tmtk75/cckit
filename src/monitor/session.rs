@@ -15,7 +15,7 @@ impl std::fmt::Display for SessionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SessionStatus::Running => write!(f, "running"),
-            SessionStatus::AwaitingApproval => write!(f, "pending"),
+            SessionStatus::AwaitingApproval => write!(f, "tooling"),
             SessionStatus::WaitingInput => write!(f, "waiting"),
             SessionStatus::Stopped => write!(f, "stopped"),
         }
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn test_session_status_display() {
         assert_eq!(format!("{}", SessionStatus::Running), "running");
-        assert_eq!(format!("{}", SessionStatus::AwaitingApproval), "pending");
+        assert_eq!(format!("{}", SessionStatus::AwaitingApproval), "tooling");
         assert_eq!(format!("{}", SessionStatus::WaitingInput), "waiting");
         assert_eq!(format!("{}", SessionStatus::Stopped), "stopped");
     }

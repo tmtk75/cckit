@@ -1,17 +1,19 @@
 // macOS menubar implementation using objc2
 
 use super::focus;
-use super::notification::{save_menubar_position, MenubarPosition};
+use super::notification::{MenubarPosition, save_menubar_position};
 use super::session::{Session, SessionStatus};
 use super::storage::Storage;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
-use objc2::{msg_send, sel, ClassType, MainThreadOnly};
+use objc2::{ClassType, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem, NSStatusBar,
     NSStatusItem, NSWorkspace,
 };
-use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSObject, NSSize, NSString, NSTimer};
+use objc2_foundation::{
+    MainThreadMarker, NSDefaultRunLoopMode, NSObject, NSSize, NSString, NSTimer,
+};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -345,7 +347,7 @@ impl MenubarApp {
             .iter()
             .filter(|s| s.status == SessionStatus::Running)
             .count();
-        let asking = sessions
+        let tooling = sessions
             .iter()
             .filter(|s| s.status == SessionStatus::AwaitingApproval)
             .count();
@@ -355,17 +357,17 @@ impl MenubarApp {
             .iter()
             .any(|s| s.status == SessionStatus::WaitingInput);
 
-        let icon = if asking > 0 {
-            "⚠️"
+        let icon = if has_waiting {
+            "💬"
+        } else if tooling > 0 {
+            "🛠️"
         } else if running > 0 {
             "▶️"
-        } else if has_waiting {
-            "💬"
         } else {
             "⏹️"
         };
 
-        format!("{} {}/{}/{}", icon, running, asking, total)
+        format!("{} {}/{}/{}", icon, running, tooling, total)
     }
 
     pub fn update_menu(&self) {
@@ -420,7 +422,7 @@ impl MenubarApp {
             for (idx, session) in sessions.iter().enumerate() {
                 let status_icon = match session.status {
                     SessionStatus::Running => "▶️",
-                    SessionStatus::AwaitingApproval => "⚠️",
+                    SessionStatus::AwaitingApproval => "🛠️",
                     SessionStatus::WaitingInput => "💬",
                     SessionStatus::Stopped => "⏹️",
                 };
@@ -579,8 +581,8 @@ pub fn run_menubar() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Menubar mode with polling loop (supports Ctrl+C)
 pub fn run_menubar_with_polling(poll_interval_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let should_quit = Arc::new(AtomicBool::new(false));
     let should_quit_ctrlc = should_quit.clone();
@@ -620,7 +622,8 @@ pub fn run_menubar_app(poll_interval_ms: u64) -> Result<(), Box<dyn std::error::
         menubar_for_timer.update_menu();
     });
 
-    let _timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(interval, true, &block) };
+    let _timer =
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(interval, true, &block) };
 
     app.run();
 

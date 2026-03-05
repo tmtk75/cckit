@@ -5,9 +5,8 @@ use std::process::Command;
 #[cfg(target_os = "macos")]
 pub mod ax {
     use accessibility_sys::{
-        kAXChildrenAttribute, kAXErrorSuccess, kAXRoleAttribute,
-        kAXTitleAttribute, AXUIElementCopyAttributeValue,
-        AXUIElementCreateApplication, AXUIElementPerformAction, AXUIElementRef,
+        AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementPerformAction,
+        AXUIElementRef, kAXChildrenAttribute, kAXErrorSuccess, kAXRoleAttribute, kAXTitleAttribute,
     };
     use core_foundation::{
         array::CFArray,
@@ -62,7 +61,8 @@ pub mod ax {
         let windows = unsafe { get_children(app)? };
 
         for i in 0..windows.len() {
-            let window: AXUIElementRef = unsafe { std::mem::transmute(windows.get(i).unwrap().as_CFTypeRef()) };
+            let window: AXUIElementRef =
+                unsafe { std::mem::transmute(windows.get(i).unwrap().as_CFTypeRef()) };
 
             // Recursively search for tabs in this window
             if unsafe { search_and_focus_tab(window, target_title)? } {
@@ -73,7 +73,10 @@ pub mod ax {
         Ok(false)
     }
 
-    unsafe fn search_and_focus_tab(element: AXUIElementRef, target_title: &str) -> Result<bool, String> {
+    unsafe fn search_and_focus_tab(
+        element: AXUIElementRef,
+        target_title: &str,
+    ) -> Result<bool, String> {
         // Check if this element is a tab (AXRadioButton in tab group)
         if let Some(role) = unsafe { get_role(element) } {
             if role == "AXRadioButton" || role == "AXButton" {
@@ -83,7 +86,9 @@ pub mod ax {
                     if title.contains(target_title) || target_title.contains(&title) {
                         // Found matching tab, press it
                         let action = CFString::new("AXPress");
-                        let err = unsafe { AXUIElementPerformAction(element, action.as_concrete_TypeRef()) };
+                        let err = unsafe {
+                            AXUIElementPerformAction(element, action.as_concrete_TypeRef())
+                        };
                         if err == kAXErrorSuccess {
                             return Ok(true);
                         }
@@ -95,7 +100,8 @@ pub mod ax {
         // Recursively search children
         if let Ok(children) = unsafe { get_children(element) } {
             for i in 0..children.len() {
-                let child: AXUIElementRef = unsafe { std::mem::transmute(children.get(i).unwrap().as_CFTypeRef()) };
+                let child: AXUIElementRef =
+                    unsafe { std::mem::transmute(children.get(i).unwrap().as_CFTypeRef()) };
                 if unsafe { search_and_focus_tab(child, target_title)? } {
                     return Ok(true);
                 }
@@ -109,7 +115,9 @@ pub mod ax {
         let attr = CFString::from_static_string(kAXChildrenAttribute);
         let mut value: core_foundation::base::CFTypeRef = ptr::null();
 
-        let err = unsafe { AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value) };
+        let err = unsafe {
+            AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value)
+        };
         if err != kAXErrorSuccess || value.is_null() {
             return Err("Failed to get children".into());
         }
@@ -121,7 +129,9 @@ pub mod ax {
         let attr = CFString::from_static_string(kAXRoleAttribute);
         let mut value: core_foundation::base::CFTypeRef = ptr::null();
 
-        let err = unsafe { AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value) };
+        let err = unsafe {
+            AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value)
+        };
         if err != kAXErrorSuccess || value.is_null() {
             return None;
         }
@@ -134,7 +144,9 @@ pub mod ax {
         let attr = CFString::from_static_string(kAXTitleAttribute);
         let mut value: core_foundation::base::CFTypeRef = ptr::null();
 
-        let err = unsafe { AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value) };
+        let err = unsafe {
+            AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value)
+        };
         if err != kAXErrorSuccess || value.is_null() {
             return None;
         }
@@ -182,7 +194,8 @@ pub mod ax {
 
         if let Ok(children) = unsafe { get_children(element) } {
             for i in 0..children.len() {
-                let child: AXUIElementRef = unsafe { std::mem::transmute(children.get(i).unwrap().as_CFTypeRef()) };
+                let child: AXUIElementRef =
+                    unsafe { std::mem::transmute(children.get(i).unwrap().as_CFTypeRef()) };
                 unsafe { dump_element(child, depth + 1, output) };
             }
         }
@@ -224,7 +237,12 @@ pub fn focus_ghostty_tab_by_tty(tty: &str) -> Result<bool, Box<dyn std::error::E
 fn get_tmux_session_for_tty(tty: &str) -> Option<String> {
     // tmux list-panes -a -F "#{pane_tty}|#{session_name}|#{window_index}|#{pane_index}"
     let output = Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{pane_tty}|#{session_name}|#{window_index}|#{pane_index}"])
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_tty}|#{session_name}|#{window_index}|#{pane_index}",
+        ])
         .output()
         .ok()?;
 
@@ -259,7 +277,12 @@ fn strip_numeric_suffix(name: &str) -> String {
 /// Select tmux pane by TTY
 fn select_tmux_pane(tty: &str) -> Result<(), Box<dyn std::error::Error>> {
     let output = Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{pane_tty}|#{session_name}|#{window_index}|#{pane_index}"])
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_tty}|#{session_name}|#{window_index}|#{pane_index}",
+        ])
         .output()?;
 
     if !output.status.success() {

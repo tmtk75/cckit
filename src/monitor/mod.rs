@@ -4,12 +4,12 @@ pub mod hook;
 pub mod menubar;
 #[cfg(target_os = "macos")]
 pub mod notification;
-#[cfg(target_os = "macos")]
-pub mod window;
 pub mod session;
 pub mod setup;
 pub mod storage;
 pub mod tui;
+#[cfg(target_os = "macos")]
+pub mod window;
 
 use colored::Colorize;
 use session::{Session, SessionStatus};
@@ -41,7 +41,7 @@ pub fn print_sessions_list() {
     for session in sessions {
         let status = match session.status {
             SessionStatus::Running => "●".green(),
-            SessionStatus::AwaitingApproval => "?".truecolor(255, 165, 0),
+            SessionStatus::AwaitingApproval => "◐".truecolor(255, 165, 0),
             SessionStatus::WaitingInput => "○".yellow(),
             SessionStatus::Stopped => "×".dimmed(),
         };

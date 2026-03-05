@@ -1,16 +1,15 @@
 // macOS custom notification window implementation
 
 use objc2::rc::Retained;
-use objc2::{msg_send, MainThreadOnly};
+use objc2::{MainThreadOnly, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSFont,
-    NSScreen, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSFont, NSScreen,
+    NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
-use objc2_foundation::{
-    MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString,
-};
+use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 /// Menubar position info saved by menubar app
@@ -119,7 +118,10 @@ pub struct NotifyOptions {
 pub fn parse_hex_color(s: &str) -> Result<(f64, f64, f64), String> {
     let s = s.trim_start_matches('#');
     if s.len() != 3 && s.len() != 6 {
-        return Err(format!("Invalid hex color: '{}'. Expected #RGB or #RRGGBB", s));
+        return Err(format!(
+            "Invalid hex color: '{}'. Expected #RGB or #RRGGBB",
+            s
+        ));
     }
 
     let (r, g, b) = if s.len() == 3 {
@@ -275,7 +277,8 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
                 NSPoint::new(PADDING, subtitle_y),
                 NSSize::new(content_width, SUBTITLE_HEIGHT),
             );
-            let subtitle_label = create_label(mtm, subtitle, subtitle_rect, SUBTITLE_FONT_SIZE, false);
+            let subtitle_label =
+                create_label(mtm, subtitle, subtitle_rect, SUBTITLE_FONT_SIZE, false);
             content_view.addSubview(&subtitle_label);
         }
     }
@@ -288,7 +291,8 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
         NSPoint::new(PADDING, msg_y),
         NSSize::new(content_width, actual_msg_height),
     );
-    let msg_label = create_label_with_wrap(mtm, &opts.message, msg_rect, MESSAGE_FONT_SIZE, false, true);
+    let msg_label =
+        create_label_with_wrap(mtm, &opts.message, msg_rect, MESSAGE_FONT_SIZE, false, true);
     content_view.addSubview(&msg_label);
 
     // Set content view
@@ -299,6 +303,8 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
 
     // Show window
     window.makeKeyAndOrderFront(None);
+
+    play_notification_sound(opts.sound.as_deref());
 
     // Animate fade-in
     animate_alpha(&window, opacity, 0.3);
@@ -334,6 +340,58 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
     window.close();
 
     Ok(())
+}
+
+fn play_notification_sound(sound: Option<&str>) {
+    let Some(name) = sound.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+
+    if name.eq_ignore_ascii_case("default") {
+        let _ = Command::new("osascript").args(["-e", "beep"]).status();
+        return;
+    }
+
+    if play_named_sound(name) {
+        return;
+    }
+
+    // Fallback to generic beep when named sound is unavailable.
+    let _ = Command::new("osascript").args(["-e", "beep"]).status();
+}
+
+fn play_named_sound(name: &str) -> bool {
+    let mut candidates = vec![name.to_string()];
+
+    if !name.contains('.') {
+        candidates.push(format!("{}.aiff", name));
+        candidates.push(format!("{}.wav", name));
+        candidates.push(format!("{}.caf", name));
+    }
+
+    let mut roots = vec![
+        PathBuf::from("/System/Library/Sounds"),
+        PathBuf::from("/Library/Sounds"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Library/Sounds"));
+    }
+
+    for root in &roots {
+        for candidate in &candidates {
+            let path = root.join(candidate);
+            if path.exists() {
+                let Ok(status) = Command::new("afplay").arg(&path).status() else {
+                    continue;
+                };
+                if status.success() {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 fn create_label(
@@ -474,9 +532,7 @@ fn calculate_position(
 
     // Horizontal position
     let x = match position {
-        Position::LeftTop | Position::LeftCenter | Position::LeftBottom => {
-            vis_x + margin
-        }
+        Position::LeftTop | Position::LeftCenter | Position::LeftBottom => vis_x + margin,
         Position::CenterTop | Position::CenterCenter | Position::CenterBottom => {
             screen_x + (screen_w - window_width) / 2.0
         }
@@ -495,9 +551,7 @@ fn calculate_position(
         Position::LeftCenter | Position::CenterCenter | Position::RightCenter => {
             vis_y + (vis_h - window_height) / 2.0
         }
-        Position::LeftBottom | Position::CenterBottom | Position::RightBottom => {
-            vis_y + margin
-        }
+        Position::LeftBottom | Position::CenterBottom | Position::RightBottom => vis_y + margin,
         Position::Menubar => unreachable!(), // Handled above
     };
 
@@ -511,14 +565,38 @@ mod tests {
     #[test]
     fn test_position_parse_full_names() {
         assert!(matches!(Position::parse("left-top"), Ok(Position::LeftTop)));
-        assert!(matches!(Position::parse("center-top"), Ok(Position::CenterTop)));
-        assert!(matches!(Position::parse("right-top"), Ok(Position::RightTop)));
-        assert!(matches!(Position::parse("left-center"), Ok(Position::LeftCenter)));
-        assert!(matches!(Position::parse("center-center"), Ok(Position::CenterCenter)));
-        assert!(matches!(Position::parse("right-center"), Ok(Position::RightCenter)));
-        assert!(matches!(Position::parse("left-bottom"), Ok(Position::LeftBottom)));
-        assert!(matches!(Position::parse("center-bottom"), Ok(Position::CenterBottom)));
-        assert!(matches!(Position::parse("right-bottom"), Ok(Position::RightBottom)));
+        assert!(matches!(
+            Position::parse("center-top"),
+            Ok(Position::CenterTop)
+        ));
+        assert!(matches!(
+            Position::parse("right-top"),
+            Ok(Position::RightTop)
+        ));
+        assert!(matches!(
+            Position::parse("left-center"),
+            Ok(Position::LeftCenter)
+        ));
+        assert!(matches!(
+            Position::parse("center-center"),
+            Ok(Position::CenterCenter)
+        ));
+        assert!(matches!(
+            Position::parse("right-center"),
+            Ok(Position::RightCenter)
+        ));
+        assert!(matches!(
+            Position::parse("left-bottom"),
+            Ok(Position::LeftBottom)
+        ));
+        assert!(matches!(
+            Position::parse("center-bottom"),
+            Ok(Position::CenterBottom)
+        ));
+        assert!(matches!(
+            Position::parse("right-bottom"),
+            Ok(Position::RightBottom)
+        ));
     }
 
     #[test]
@@ -546,8 +624,14 @@ mod tests {
     #[test]
     fn test_position_parse_case_insensitive() {
         assert!(matches!(Position::parse("LEFT-TOP"), Ok(Position::LeftTop)));
-        assert!(matches!(Position::parse("Right-Top"), Ok(Position::RightTop)));
-        assert!(matches!(Position::parse("CENTER"), Ok(Position::CenterCenter)));
+        assert!(matches!(
+            Position::parse("Right-Top"),
+            Ok(Position::RightTop)
+        ));
+        assert!(matches!(
+            Position::parse("CENTER"),
+            Ok(Position::CenterCenter)
+        ));
     }
 
     #[test]
@@ -571,7 +655,10 @@ mod tests {
         assert_eq!(parse_hex_color("#000"), Ok((0.0, 0.0, 0.0)));
         assert_eq!(parse_hex_color("#fff"), Ok((1.0, 1.0, 1.0)));
         assert_eq!(parse_hex_color("#f00"), Ok((1.0, 0.0, 0.0)));
-        assert_eq!(parse_hex_color("#222"), Ok((34.0 / 255.0, 34.0 / 255.0, 34.0 / 255.0)));
+        assert_eq!(
+            parse_hex_color("#222"),
+            Ok((34.0 / 255.0, 34.0 / 255.0, 34.0 / 255.0))
+        );
     }
 
     #[test]
