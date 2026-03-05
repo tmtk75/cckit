@@ -123,16 +123,16 @@ fn color_selection() -> Retained<NSColor> {
 fn status_color(status: &SessionStatus) -> Retained<NSColor> {
     match status {
         SessionStatus::Running => {
-            NSColor::colorWithRed_green_blue_alpha(0.133, 0.773, 0.369, 1.0) // green
+            NSColor::colorWithRed_green_blue_alpha(0.133, 0.773, 0.369, 1.0) // green - active
         }
         SessionStatus::AwaitingApproval => {
-            NSColor::colorWithRed_green_blue_alpha(0.984, 0.749, 0.141, 1.0) // yellow #FBBF24
+            NSColor::colorWithRed_green_blue_alpha(0.937, 0.267, 0.267, 1.0) // red #EF4444 - urgent
         }
         SessionStatus::WaitingInput => {
-            NSColor::colorWithRed_green_blue_alpha(0.961, 0.620, 0.043, 1.0) // amber #F59E0B
+            NSColor::colorWithRed_green_blue_alpha(0.475, 0.525, 0.596, 1.0) // slate #798798 - idle
         }
         SessionStatus::Stopped => {
-            NSColor::colorWithRed_green_blue_alpha(0.937, 0.267, 0.267, 1.0) // red #EF4444
+            NSColor::colorWithRed_green_blue_alpha(0.345, 0.388, 0.447, 1.0) // dark slate #586072 - done
         }
     }
 }
@@ -143,13 +143,13 @@ fn status_row_bg(status: &SessionStatus) -> Retained<NSColor> {
             NSColor::colorWithRed_green_blue_alpha(0.133, 0.773, 0.369, 0.10) // green tint
         }
         SessionStatus::AwaitingApproval => {
-            NSColor::colorWithRed_green_blue_alpha(0.984, 0.749, 0.141, 0.10) // yellow tint
-        }
-        SessionStatus::Stopped => {
-            NSColor::colorWithRed_green_blue_alpha(0.937, 0.267, 0.267, 0.07) // red tint
+            NSColor::colorWithRed_green_blue_alpha(0.937, 0.267, 0.267, 0.20) // red tint - urgent
         }
         SessionStatus::WaitingInput => {
-            NSColor::colorWithRed_green_blue_alpha(0.0, 0.0, 0.0, 0.0) // transparent
+            NSColor::colorWithRed_green_blue_alpha(0.0, 0.0, 0.0, 0.0) // transparent - idle
+        }
+        SessionStatus::Stopped => {
+            NSColor::colorWithRed_green_blue_alpha(0.0, 0.0, 0.0, 0.0) // transparent - done
         }
     }
 }
@@ -157,8 +157,9 @@ fn status_row_bg(status: &SessionStatus) -> Retained<NSColor> {
 // --- Data ---
 
 static SESSION_LIST: Mutex<Vec<Session>> = Mutex::new(Vec::new());
-static SELECTED_INDEX: Mutex<usize> = Mutex::new(0);
+static SELECTED_INDEX: Mutex<Option<usize>> = Mutex::new(None);
 static CONTENT_VIEW_PTR: Mutex<Option<usize>> = Mutex::new(None);
+static WINDOW_PTR: Mutex<Option<usize>> = Mutex::new(None);
 
 fn load_sessions() {
     let storage = Storage::new();
@@ -193,7 +194,10 @@ fn status_label(status: &SessionStatus) -> &'static str {
 
 fn focus_selected() {
     let sessions = SESSION_LIST.lock().unwrap();
-    let index = *SELECTED_INDEX.lock().unwrap();
+    let index = match *SELECTED_INDEX.lock().unwrap() {
+        Some(i) => i,
+        None => return,
+    };
 
     if let Some(session) = sessions.get(index) {
         let tty = session.tty.clone();
@@ -278,43 +282,47 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
     }
 
     let session_count = SESSION_LIST.lock().unwrap().len();
-    if session_count == 0 {
-        return;
-    }
-
-    let mut index = *SELECTED_INDEX.lock().unwrap();
+    let current = *SELECTED_INDEX.lock().unwrap();
 
     match key_code {
+        // Up arrow
         126 => {
-            if index > 0 {
-                index -= 1;
-            }
+            let idx = current.unwrap_or(1);
+            *SELECTED_INDEX.lock().unwrap() = Some(idx.saturating_sub(1));
         }
+        // Down arrow
         125 => {
-            if index + 1 < session_count {
-                index += 1;
+            if session_count == 0 {
+                return;
             }
+            let idx = current.map(|i| i + 1).unwrap_or(0);
+            *SELECTED_INDEX.lock().unwrap() = Some(idx.min(session_count - 1));
         }
+        // Enter
         36 => {
             focus_selected();
             return;
         }
+        // Esc - deselect and hide window
         53 => {
+            *SELECTED_INDEX.lock().unwrap() = None;
             let mtm = MainThreadMarker::new().unwrap();
             let app = NSApplication::sharedApplication(mtm);
-            app.terminate(None);
+            app.hide(None);
+            request_redraw();
             return;
         }
         _ => match char_str.as_str() {
             "k" => {
-                if index > 0 {
-                    index -= 1;
-                }
+                let idx = current.unwrap_or(1);
+                *SELECTED_INDEX.lock().unwrap() = Some(idx.saturating_sub(1));
             }
             "j" => {
-                if index + 1 < session_count {
-                    index += 1;
+                if session_count == 0 {
+                    return;
                 }
+                let idx = current.map(|i| i + 1).unwrap_or(0);
+                *SELECTED_INDEX.lock().unwrap() = Some(idx.min(session_count - 1));
             }
             "q" => {
                 let mtm = MainThreadMarker::new().unwrap();
@@ -325,14 +333,13 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
             c if c.len() == 1 && c.as_bytes()[0].is_ascii_digit() => {
                 let n = (c.as_bytes()[0] - b'0') as usize;
                 if n >= 1 && n <= session_count {
-                    index = n - 1;
+                    *SELECTED_INDEX.lock().unwrap() = Some(n - 1);
                 }
             }
             _ => return,
         },
     }
 
-    *SELECTED_INDEX.lock().unwrap() = index;
     request_redraw();
 }
 
@@ -395,8 +402,13 @@ fn rebuild_view(view: &NSView) {
         NSPoint::new(view_width - right_w - LEFT_PAD, 2.0),
         NSSize::new(right_w, HEADER_HEIGHT - 2.0),
     );
-    let hdr_right_label =
-        create_mono_label(mtm, &hdr_right, hdr_right_rect, &color_dim(), FONT_SIZE_SMALL);
+    let hdr_right_label = create_mono_label(
+        mtm,
+        &hdr_right,
+        hdr_right_rect,
+        &color_dim(),
+        FONT_SIZE_SMALL,
+    );
     let _: () = unsafe { msg_send![&*hdr_right_label, setAlignment: 1_isize] };
     view.addSubview(&hdr_right_label);
 
@@ -436,23 +448,29 @@ fn rebuild_view(view: &NSView) {
             NSPoint::new(4.0, y + 1.0),
             NSSize::new(view_width - 8.0, ROW_HEIGHT - 2.0),
         );
-        if i == selected {
+        if Some(i) == selected {
             view.addSubview(&create_colored_view(mtm, row_rect, &color_selection(), 4.0));
-        } else if session.status != SessionStatus::WaitingInput {
+        } else {
             let tint = status_row_bg(&session.status);
             view.addSubview(&create_colored_view(mtm, row_rect, &tint, 4.0));
         }
 
-        // Status dot
-        let dot_y = y + (ROW_HEIGHT - DOT_SIZE) / 2.0;
+        // Status dot (larger for states needing attention)
+        let needs_attention = matches!(
+            session.status,
+            SessionStatus::AwaitingApproval | SessionStatus::WaitingInput
+        );
+        let dot = if needs_attention {
+            DOT_SIZE + 2.0
+        } else {
+            DOT_SIZE
+        };
+        let dot_y = y + (ROW_HEIGHT - dot) / 2.0;
         view.addSubview(&create_colored_view(
             mtm,
-            NSRect::new(
-                NSPoint::new(LEFT_PAD, dot_y),
-                NSSize::new(DOT_SIZE, DOT_SIZE),
-            ),
+            NSRect::new(NSPoint::new(LEFT_PAD, dot_y), NSSize::new(dot, dot)),
             &status_color(&session.status),
-            DOT_SIZE / 2.0,
+            dot / 2.0,
         ));
 
         let project = session.project_name();
@@ -503,7 +521,8 @@ fn rebuild_view(view: &NSView) {
             NSPoint::new(view_width - right_w - LEFT_PAD, y + 2.0),
             NSSize::new(right_w, ROW_HEIGHT - 4.0),
         );
-        let right_label = create_mono_label(mtm, &right_text, right_rect, &text_color, FONT_SIZE_SMALL);
+        let right_label =
+            create_mono_label(mtm, &right_text, right_rect, &text_color, FONT_SIZE_SMALL);
         let _: () = unsafe { msg_send![&*right_label, setAlignment: 1_isize] }; // right
         view.addSubview(&right_label);
 
@@ -599,14 +618,77 @@ fn get_delegate_class() -> &'static AnyClass {
 // --- Timer callback ---
 
 fn update_sessions_and_redraw() {
+    // Snapshot previous statuses before loading new data
+    let prev = {
+        let sessions = SESSION_LIST.lock().unwrap();
+        let mut map = std::collections::HashMap::new();
+        for s in sessions.iter() {
+            map.insert(s.key(), s.status.clone());
+        }
+        map
+    };
+
     load_sessions();
+
+    // Detect state transitions
+    let (needs_approval, finished) = {
+        let sessions = SESSION_LIST.lock().unwrap();
+        let mut approval = false;
+        let mut done = false;
+        for s in sessions.iter() {
+            if prev.get(&s.key()) == Some(&SessionStatus::Running) {
+                if s.status == SessionStatus::AwaitingApproval {
+                    approval = true;
+                } else if s.status == SessionStatus::WaitingInput {
+                    done = true;
+                }
+            }
+        }
+        (approval, done)
+    };
+
+    if needs_approval {
+        bring_window_to_front();
+    } else if finished {
+        bounce_dock_icon();
+    }
+
     let count = SESSION_LIST.lock().unwrap().len();
     let mut idx = SELECTED_INDEX.lock().unwrap();
-    if *idx >= count && count > 0 {
-        *idx = count - 1;
+    if let Some(i) = *idx {
+        if i >= count && count > 0 {
+            *idx = Some(count - 1);
+        } else if count == 0 {
+            *idx = None;
+        }
     }
     drop(idx);
     request_redraw();
+}
+
+fn bring_window_to_front() {
+    let ptr = *WINDOW_PTR.lock().unwrap();
+    if let Some(ptr) = ptr {
+        let window = ptr as *mut AnyObject;
+        unsafe {
+            let _: () = msg_send![window, orderFrontRegardless];
+        }
+        if let Some(mtm) = MainThreadMarker::new() {
+            let app = NSApplication::sharedApplication(mtm);
+            #[allow(deprecated)]
+            app.activateIgnoringOtherApps(true);
+        }
+    }
+}
+
+fn bounce_dock_icon() {
+    if let Some(mtm) = MainThreadMarker::new() {
+        let app = NSApplication::sharedApplication(mtm);
+        // NSInformationalRequest = 10: single bounce
+        unsafe {
+            let _: isize = msg_send![&*app, requestUserAttention: 10_isize];
+        }
+    }
 }
 
 fn calculate_content_height() -> CGFloat {
@@ -775,7 +857,7 @@ fn setup_window(
     );
     footer.addSubview(&create_mono_label(
         mtm,
-        " \u{2191}\u{2193}/jk navigate   \u{23CE} focus   1-9 jump   q quit",
+        " \u{2191}\u{2193}/jk navigate   \u{23CE} focus   1-9 jump   esc hide   q quit",
         hint_rect,
         &color_dim(),
         HINT_FONT_SIZE,
@@ -839,6 +921,9 @@ fn setup_window(
     });
     let _timer =
         unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &block) };
+
+    // Store window pointer for bring-to-front on state transitions
+    *WINDOW_PTR.lock().unwrap() = Some(&*window as *const NSWindow as usize);
 
     // Keep delegate and window alive for the lifetime of the app.
     // They are moved into static storage since setup_window returns before app.run().

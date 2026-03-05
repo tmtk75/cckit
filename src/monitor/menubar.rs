@@ -157,7 +157,7 @@ fn trace_parent_for_terminal(mut pid: i32) -> Option<String> {
 }
 
 // Icon size configuration
-static ICON_SIZE: Mutex<f64> = Mutex::new(24.0); // Default: 24px
+static ICON_SIZE: Mutex<f64> = Mutex::new(16.0); // Default: 16px
 
 // Menu update interval configuration
 static MENU_UPDATE_INTERVAL_MS: Mutex<u64> = Mutex::new(2000); // Default: 2000ms
@@ -199,13 +199,13 @@ impl MenubarStyle {
         match self {
             Self::Emoji => {
                 let icon = if waiting > 0 {
-                    "💬"
+                    "🔵"
                 } else if tooling > 0 {
-                    "🛠️"
+                    "🟡"
                 } else if running > 0 {
-                    "▶️"
+                    "🟢"
                 } else {
-                    "⏹️"
+                    "⚫"
                 };
                 format!("{} {}/{}/{}", icon, running, tooling, total)
             }
@@ -239,6 +239,15 @@ impl MenubarStyle {
         }
     }
 
+    fn legend(&self) -> &'static str {
+        match self {
+            Self::Emoji => "run / approval / total",
+            Self::Terminal => "R=run  T=approval  total",
+            Self::Htop => "run / approval / total",
+            Self::Compact => "run · approval · total",
+        }
+    }
+
     fn session_label(&self, session: &Session) -> String {
         let project = session.project_name();
         let tool = session.last_tool.as_deref().unwrap_or("-");
@@ -247,10 +256,10 @@ impl MenubarStyle {
         match self {
             Self::Emoji => {
                 let icon = match session.status {
-                    SessionStatus::Running => "▶️",
-                    SessionStatus::AwaitingApproval => "🛠️",
-                    SessionStatus::WaitingInput => "💬",
-                    SessionStatus::Stopped => "⏹️",
+                    SessionStatus::Running => "🟢",
+                    SessionStatus::AwaitingApproval => "🟡",
+                    SessionStatus::WaitingInput => "🔵",
+                    SessionStatus::Stopped => "⚫",
                 };
                 format!("{} {} [{}] {}", icon, project, tool, session.short_cwd())
             }
@@ -562,6 +571,14 @@ impl MenubarApp {
             store_tui_tty(None);
         }
 
+        // Legend item (disabled, explains status bar format)
+        let style = current_style();
+        let legend_item = create_menu_item(self.mtm, style.legend(), None);
+        unsafe { let _: () = msg_send![&*legend_item, setEnabled: false]; }
+        menu.addItem(&legend_item);
+        let separator_legend = NSMenuItem::separatorItem(self.mtm);
+        menu.addItem(&separator_legend);
+
         let mut sessions: Vec<&Session> = store.sessions.values().collect();
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
@@ -670,8 +687,8 @@ impl MenubarApp {
     }
 }
 
-const MENU_FONT_SIZE: f64 = 13.0;
-const STATUS_FONT_SIZE: f64 = 12.0;
+const MENU_FONT_SIZE: f64 = 11.0;
+const STATUS_FONT_SIZE: f64 = 11.0;
 
 fn create_menu_item(mtm: MainThreadMarker, title: &str, key: Option<&str>) -> Retained<NSMenuItem> {
     let title_ns = NSString::from_str(title);
