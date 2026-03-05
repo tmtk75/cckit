@@ -352,11 +352,11 @@ disable_paths = [
 
 ## Mac App (macOS)
 
-CCKit can run as a standalone menubar app.
+CCKit can run as a standalone macOS app with a session window and menubar icon.
 
 ### Why?
 
-Keeping a TUI open in the terminal takes up screen space. The Mac App lives in your menubar—just click to check session status when needed.
+Keeping a TUI open in the terminal takes up screen space. The Mac App shows a dedicated window and menubar icon—just click to check session status when needed.
 
 Set it to launch at login and always stay aware of your Claude Code activity.
 
@@ -364,8 +364,7 @@ Set it to launch at login and always stay aware of your Claude Code activity.
 
 ```bash
 # Build the app bundle
-cargo build --release --bin cckit-app
-./scripts/build-app.sh  # or manually create CCKit.app
+mise run build-app  # or: ./scripts/macos/build_app.sh
 ```
 
 ### Usage
@@ -373,11 +372,17 @@ cargo build --release --bin cckit-app
 Double-click `CCKit.app` or run from terminal:
 
 ```bash
-# Run as menubar app
-./dist/CCKit.app/Contents/MacOS/cckit-app
+# Run as app (window + menubar)
+cckit app
 
-# Run with CLI arguments (acts as CLI)
-./dist/CCKit.app/Contents/MacOS/cckit-app session ls
+# Run with menubar only
+cckit app --menubar-only
+
+# Run with window only
+cckit app --window-only
+
+# From app bundle (auto-detects .app context, launches window + menubar)
+open dist/CCKit.app
 ```
 
 ## How it works

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 APP_NAME="CCKit"
 APP_DIR="$ROOT_DIR/dist/${APP_NAME}.app"
-BIN_NAME="cckit-app"
+BIN_NAME="cckit"
 
 cargo build --release --bin "$BIN_NAME"
 

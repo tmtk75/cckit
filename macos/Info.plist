@@ -9,7 +9,7 @@
     <key>CFBundleIdentifier</key>
     <string>com.tmtk75.cckit</string>
     <key>CFBundleExecutable</key>
-    <string>cckit-app</string>
+    <string>cckit</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>

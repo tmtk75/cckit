@@ -52,7 +52,7 @@ fn load_config() -> WindowConfig {
         // Create default config file
         let dir = path.parent().unwrap();
         let _ = std::fs::create_dir_all(dir);
-        let default = "# cckit-window configuration\n\
+        let default = "# cckit window configuration\n\
                         # Reload: Cmd+Shift+,   Open: Cmd+,\n\
                         \n\
                         # Background opacity (0.0 = fully transparent, 1.0 = opaque)\n\
@@ -598,13 +598,49 @@ fn calculate_content_height() -> CGFloat {
 
 // --- Main entry point ---
 
-pub fn run_window_app() -> Result<(), Box<dyn std::error::Error>> {
+/// Unified app entry point: shows window + menubar (default), or one of them.
+pub fn run_app(menubar_only: bool, window_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mtm = MainThreadMarker::new().ok_or("Must run on main thread")?;
-
     let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+
+    let show_window = !menubar_only;
+    let show_menubar = !window_only;
+
+    if show_window {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    } else {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    }
     app.finishLaunching();
 
+    // Menubar (kept alive via _menubar)
+    let _menubar = if show_menubar {
+        let menubar = std::rc::Rc::new(super::menubar::MenubarApp::new(mtm));
+        let menubar_for_timer = menubar.clone();
+        let block = block2::RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
+            menubar_for_timer.update_menu();
+        });
+        let _timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &block)
+        };
+        Some((menubar, _timer))
+    } else {
+        None
+    };
+
+    if show_window {
+        setup_window(mtm, &app)?;
+    }
+
+    app.run();
+    Ok(())
+}
+
+pub fn run_window_app() -> Result<(), Box<dyn std::error::Error>> {
+    run_app(false, true)
+}
+
+fn setup_window(mtm: MainThreadMarker, app: &NSApplication) -> Result<(), Box<dyn std::error::Error>> {
     load_sessions();
 
     let screen = NSScreen::mainScreen(mtm).ok_or("No main screen")?;
@@ -774,9 +810,6 @@ pub fn run_window_app() -> Result<(), Box<dyn std::error::Error>> {
     window.makeKeyAndOrderFront(None);
     window.makeFirstResponder(Some(&doc_view));
 
-    #[allow(deprecated)]
-    app.activateIgnoringOtherApps(true);
-
     // Periodic refresh
     let block = block2::RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
         update_sessions_and_redraw();
@@ -784,10 +817,13 @@ pub fn run_window_app() -> Result<(), Box<dyn std::error::Error>> {
     let _timer =
         unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &block) };
 
-    let _delegate = delegate;
-    let _window = window;
+    // Keep delegate and window alive for the lifetime of the app.
+    // They are moved into static storage since setup_window returns before app.run().
+    std::mem::forget(delegate);
+    std::mem::forget(window);
 
-    app.run();
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
 
     Ok(())
 }

@@ -28,9 +28,9 @@ mise run build-app              # runs scripts/macos/build_app.sh
 
 ## Architecture
 
-**Two binaries** defined in `Cargo.toml`:
-- `cckit` (default) — main CLI (`src/main.rs` → `src/cli.rs`)
-- `cckit-app` — macOS menubar app (`src/bin/cckit_app.rs`)
+**Single binary** `cckit` (`src/main.rs` → `src/cli.rs`):
+- CLI mode: all subcommands including TUI (`cckit session ls`)
+- App mode: `cckit app` runs macOS window + menubar (also auto-detected when launched from .app bundle)
 
 **CLI layer** (`src/cli.rs`, ~2000 lines): All subcommand definitions (clap derive), project scanning logic (`ls`, `prune`, `config`, `doctor`, `status`), and YAML frontmatter parsing for skills/agents/commands.
 
@@ -44,6 +44,7 @@ mise run build-app              # runs scripts/macos/build_app.sh
 | `setup.rs` | Install/uninstall hooks in `~/.claude/settings.json` |
 | `tui.rs` | ratatui-based interactive TUI |
 | `menubar.rs` | macOS NSStatusBar/NSMenu via objc2 |
+| `window.rs` | macOS NSWindow session monitor app via objc2 (`run_app` unifies window + menubar) |
 | `notification.rs` | macOS custom notification window via objc2 |
 | `focus.rs` | Terminal focus via AppleScript (iTerm2, Terminal.app, Ghostty) |
 

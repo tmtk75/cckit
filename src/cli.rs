@@ -113,6 +113,17 @@ enum Commands {
         execute: bool,
     },
 
+    /// Run as macOS app with window and/or menubar (macOS only)
+    App {
+        /// Show only menubar (no window)
+        #[arg(long, help = "Show only menubar")]
+        menubar_only: bool,
+
+        /// Show only window (no menubar)
+        #[arg(long, help = "Show only window")]
+        window_only: bool,
+    },
+
     /// Send a macOS notification (macOS only)
     Notify {
         /// Notification title
@@ -3005,6 +3016,18 @@ pub fn run() {
                     }
                 }
             }
+        }
+        #[cfg(target_os = "macos")]
+        Some(Commands::App { menubar_only, window_only }) => {
+            if let Err(e) = monitor::window::run_app(menubar_only, window_only) {
+                eprintln!("{}: {}", "Error running app".red(), e);
+                std::process::exit(1);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        Some(Commands::App { .. }) => {
+            eprintln!("App is only supported on macOS");
+            std::process::exit(1);
         }
         #[cfg(target_os = "macos")]
         Some(Commands::Notify { title, subtitle, message, sound, duration, width, height, position, margin, opacity, bgcolor }) => {
