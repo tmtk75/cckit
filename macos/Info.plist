@@ -10,6 +10,8 @@
     <string>com.tmtk75.cckit</string>
     <key>CFBundleExecutable</key>
     <string>cckit</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>

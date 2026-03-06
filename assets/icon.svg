@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2D1B4E"/>
+      <stop offset="100%" stop-color="#1A1A2E"/>
+    </linearGradient>
+    <linearGradient id="pulse" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#6C5CE7"/>
+      <stop offset="50%" stop-color="#A29BFE"/>
+      <stop offset="100%" stop-color="#6C5CE7"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#A29BFE" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#A29BFE" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="pulse-glow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="dot-glow">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect x="40" y="40" width="944" height="944" rx="210" ry="210" fill="url(#bg)"/>
+
+  <!-- Subtle grid lines -->
+  <g stroke="#A29BFE" stroke-opacity="0.08" stroke-width="1">
+    <line x1="160" y1="280" x2="864" y2="280"/>
+    <line x1="160" y1="400" x2="864" y2="400"/>
+    <line x1="160" y1="520" x2="864" y2="520"/>
+    <line x1="160" y1="640" x2="864" y2="640"/>
+    <line x1="160" y1="760" x2="864" y2="760"/>
+  </g>
+
+  <!-- Pulse/heartbeat line -->
+  <polyline
+    points="140,540 280,540 340,540 380,540 420,380 460,660 500,320 540,700 580,440 620,560 660,500 700,520 740,510 864,510"
+    fill="none"
+    stroke="url(#pulse)"
+    stroke-width="10"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    filter="url(#pulse-glow)"
+  />
+
+  <!-- Glow area under pulse -->
+  <polyline
+    points="140,540 280,540 340,540 380,540 420,380 460,660 500,320 540,700 580,440 620,560 660,500 700,520 740,510 864,510 864,760 140,760"
+    fill="url(#glow)"
+    opacity="0.5"
+  />
+
+  <!-- Status dots - representing sessions -->
+  <circle cx="220" cy="220" r="22" fill="#00B894" filter="url(#dot-glow)"/>
+  <circle cx="300" cy="220" r="22" fill="#FDCB6E" filter="url(#dot-glow)"/>
+  <circle cx="380" cy="220" r="22" fill="#6C5CE7" filter="url(#dot-glow)"/>
+
+  <!-- Terminal prompt -->
+  <text x="480" y="232" font-family="SF Mono, Menlo, monospace" font-size="56" font-weight="700" fill="#A29BFE" opacity="0.7">cckit</text>
+
+  <!-- Bottom bar indicators -->
+  <rect x="180" y="800" width="120" height="6" rx="3" fill="#00B894" opacity="0.6"/>
+  <rect x="330" y="800" width="80" height="6" rx="3" fill="#FDCB6E" opacity="0.6"/>
+  <rect x="440" y="800" width="200" height="6" rx="3" fill="#6C5CE7" opacity="0.4"/>
+  <rect x="670" y="800" width="60" height="6" rx="3" fill="#A29BFE" opacity="0.3"/>
+</svg>
