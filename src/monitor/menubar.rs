@@ -252,6 +252,7 @@ impl MenubarStyle {
         let project = session.project_name();
         let tool = session.last_tool.as_deref().unwrap_or("-");
         let elapsed = format_menu_elapsed(session.updated_at);
+        let stats = format_menu_stats(session);
 
         match self {
             Self::Emoji => {
@@ -261,7 +262,14 @@ impl MenubarStyle {
                     SessionStatus::WaitingInput => "🔵",
                     SessionStatus::Stopped => "⚫",
                 };
-                format!("{} {} [{}] {}", icon, project, tool, session.short_cwd())
+                format!(
+                    "{} {} [{}] {}{}",
+                    icon,
+                    project,
+                    tool,
+                    session.short_cwd(),
+                    stats
+                )
             }
             Self::Terminal => {
                 let dot = match session.status {
@@ -270,7 +278,10 @@ impl MenubarStyle {
                     SessionStatus::WaitingInput => "◇",
                     SessionStatus::Stopped => "×",
                 };
-                format!("{} {:<14} {:<6} {:>4}", dot, project, tool, elapsed)
+                format!(
+                    "{} {:<14} {:<6} {:>4}{}",
+                    dot, project, tool, elapsed, stats
+                )
             }
             Self::Htop => {
                 let tag = match session.status {
@@ -279,7 +290,10 @@ impl MenubarStyle {
                     SessionStatus::WaitingInput => "[WAIT]",
                     SessionStatus::Stopped => "[DONE]",
                 };
-                format!("{} {:<14} {:<6} {:>4}", tag, project, tool, elapsed)
+                format!(
+                    "{} {:<14} {:<6} {:>4}{}",
+                    tag, project, tool, elapsed, stats
+                )
             }
             Self::Compact => {
                 let dot = match session.status {
@@ -288,7 +302,7 @@ impl MenubarStyle {
                     SessionStatus::WaitingInput => "◇",
                     SessionStatus::Stopped => "·",
                 };
-                format!("{} {}:{} {}", dot, project, tool, elapsed)
+                format!("{} {}:{} {}{}", dot, project, tool, elapsed, stats)
             }
         }
     }
@@ -315,6 +329,21 @@ fn format_menu_elapsed(dt: chrono::DateTime<chrono::Utc>) -> String {
         format!("{}m", secs / 60)
     } else {
         format!("{}h", secs / 3600)
+    }
+}
+
+fn format_menu_stats(session: &Session) -> String {
+    let mut parts = Vec::new();
+    if session.prompt_count > 0 {
+        parts.push(format!("{}p", session.prompt_count));
+    }
+    if session.compact_count > 0 {
+        parts.push(format!("{}c", session.compact_count));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join("/"))
     }
 }
 

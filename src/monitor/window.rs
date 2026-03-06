@@ -183,6 +183,21 @@ fn format_elapsed(dt: chrono::DateTime<chrono::Utc>) -> String {
     }
 }
 
+fn format_session_stats(session: &Session) -> String {
+    let mut parts = Vec::new();
+    if session.prompt_count > 0 {
+        parts.push(format!("{}p", session.prompt_count));
+    }
+    if session.compact_count > 0 {
+        parts.push(format!("{}c", session.compact_count));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        parts.join("/")
+    }
+}
+
 fn status_label(status: &SessionStatus) -> &'static str {
     match status {
         SessionStatus::Running => "run",
@@ -505,7 +520,7 @@ fn rebuild_view(view: &NSView) {
 
         // Middle: path (dim, truncate middle)
         let path_x = TEXT_LEFT + 220.0;
-        let right_w = 110.0;
+        let right_w = 160.0;
         let path_w = (view_width - path_x - right_w - LEFT_PAD).max(40.0);
         let path_rect = NSRect::new(
             NSPoint::new(path_x, y + 2.0),
@@ -515,8 +530,9 @@ fn rebuild_view(view: &NSView) {
         let _: () = unsafe { msg_send![&*path_label, setLineBreakMode: 5_isize] };
         view.addSubview(&path_label);
 
-        // Right: tool + elapsed (right-aligned)
-        let right_text = format!("{:>6}  {:>5}", tool, elapsed);
+        // Right: stats + tool + elapsed (right-aligned)
+        let stats = format_session_stats(session);
+        let right_text = format!("{} {:>6}  {:>5}", stats, tool, elapsed);
         let right_rect = NSRect::new(
             NSPoint::new(view_width - right_w - LEFT_PAD, y + 2.0),
             NSSize::new(right_w, ROW_HEIGHT - 4.0),
