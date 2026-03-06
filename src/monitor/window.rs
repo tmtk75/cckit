@@ -164,10 +164,6 @@ static AF_LABEL_PTR: Mutex<Option<usize>> = Mutex::new(None);
 static NOTIFIED_APPROVALS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
-/// Global toggle for auto bring-to-front behavior (shared with menubar)
-pub static BRING_TO_FRONT_ENABLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
-
 /// Per-project auto-focus disabled set (cwd paths). Projects in this set won't trigger auto-focus.
 pub static AF_DISABLED_PROJECTS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
@@ -386,10 +382,33 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
                 *SELECTED_INDEX.lock().unwrap() = Some(idx.min(session_count - 1));
             }
             "f" => {
-                let prev = BRING_TO_FRONT_ENABLED
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                BRING_TO_FRONT_ENABLED
-                    .store(!prev, std::sync::atomic::Ordering::Relaxed);
+                if let Some(idx) = current {
+                    // Per-project toggle
+                    let sessions = SESSION_LIST.lock().unwrap();
+                    if let Some(session) = sessions.get(idx) {
+                        let cwd = session.cwd.clone();
+                        drop(sessions);
+                        let mut disabled = AF_DISABLED_PROJECTS.lock().unwrap();
+                        if !disabled.remove(&cwd) {
+                            disabled.insert(cwd);
+                        }
+                    }
+                } else {
+                    // Bulk toggle: if any project is enabled, disable all; otherwise enable all
+                    let sessions = SESSION_LIST.lock().unwrap();
+                    let cwds: Vec<String> = sessions.iter().map(|s| s.cwd.clone()).collect();
+                    drop(sessions);
+                    let mut disabled = AF_DISABLED_PROJECTS.lock().unwrap();
+                    let all_disabled = cwds.iter().all(|c| disabled.contains(c));
+                    if all_disabled {
+                        disabled.clear();
+                    } else {
+                        for c in cwds {
+                            disabled.insert(c);
+                        }
+                    }
+                }
+                persist_af_disabled();
             }
             "q" => {
                 let mtm = MainThreadMarker::new().unwrap();
@@ -419,15 +438,31 @@ fn request_redraw() {
     update_af_label();
 }
 
+fn persist_af_disabled() {
+    let disabled = AF_DISABLED_PROJECTS.lock().unwrap().clone();
+    let storage = Storage::new();
+    let _ = storage.save_af_disabled(&disabled);
+}
+
 fn update_af_label() {
     let ptr = *AF_LABEL_PTR.lock().unwrap();
     if let Some(ptr) = ptr {
-        let af_on = BRING_TO_FRONT_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
-        let text = if af_on { "AF:ON" } else { "AF:OFF" };
-        let color = if af_on { color_text() } else { color_dim() };
+        let sessions = SESSION_LIST.lock().unwrap();
+        let disabled = AF_DISABLED_PROJECTS.lock().unwrap();
+        let total = sessions.len();
+        let off_count = sessions.iter().filter(|s| disabled.contains(&s.cwd)).count();
+        drop(disabled);
+        drop(sessions);
+        let (text, color) = if total == 0 || off_count == 0 {
+            ("AF:ON".to_string(), color_text())
+        } else if off_count == total {
+            ("AF:OFF".to_string(), color_dim())
+        } else {
+            (format!("AF:{}/{}", total - off_count, total), color_dim())
+        };
         let label = ptr as *mut AnyObject;
         unsafe {
-            let ns_str = NSString::from_str(text);
+            let ns_str = NSString::from_str(&text);
             let _: () = msg_send![label, setStringValue: &*ns_str];
             let _: () = msg_send![label, setTextColor: &*color];
         }
@@ -479,8 +514,8 @@ fn rebuild_view(view: &NSView) {
         FONT_SIZE,
     ));
 
-    let right_w = 210.0;
-    let hdr_right = format!("{:>12} {:>6}  {:>5}", "STAT", "TOOL", "AGE");
+    let right_w = 230.0;
+    let hdr_right = format!("{:>12} {:>6}  {:>5}  {:<2}", "STAT", "TOOL", "AGE", "AF");
     let hdr_right_rect = NSRect::new(
         NSPoint::new(view_width - right_w - LEFT_PAD, 2.0),
         NSSize::new(right_w, HEADER_HEIGHT - 2.0),
@@ -588,7 +623,7 @@ fn rebuild_view(view: &NSView) {
 
         // Middle: path (dim, truncate middle)
         let path_x = TEXT_LEFT + 220.0;
-        let path_w = (view_width - path_x - 210.0 - LEFT_PAD).max(40.0);
+        let path_w = (view_width - path_x - 230.0 - LEFT_PAD).max(40.0);
         let path_rect = NSRect::new(
             NSPoint::new(path_x, y + 2.0),
             NSSize::new(path_w, ROW_HEIGHT - 4.0),
@@ -597,10 +632,12 @@ fn rebuild_view(view: &NSView) {
         let _: () = unsafe { msg_send![&*path_label, setLineBreakMode: 5_isize] };
         view.addSubview(&path_label);
 
-        // Right: stats + tool + elapsed (right-aligned)
+        // Right: stats + tool + elapsed + AF (right-aligned)
         let stats = format_session_stats(session);
-        let right_w = 210.0;
-        let right_text = format!("{:>12} {:>6}  {:>5}", stats, tool, elapsed);
+        let af_off = AF_DISABLED_PROJECTS.lock().unwrap().contains(&session.cwd);
+        let af_col = if af_off { "⏸" } else { "✓" };
+        let right_w = 230.0;
+        let right_text = format!("{:>12} {:>6}  {:>5}  {:<2}", stats, tool, elapsed, af_col);
         let right_rect = NSRect::new(
             NSPoint::new(view_width - right_w - LEFT_PAD, y + 2.0),
             NSSize::new(right_w, ROW_HEIGHT - 4.0),
@@ -727,7 +764,11 @@ fn update_sessions_and_redraw() {
                 .iter()
                 .any(|s| s.key() == *k && s.status == SessionStatus::AwaitingApproval)
         });
+        let disabled = AF_DISABLED_PROJECTS.lock().unwrap();
         for s in sessions.iter() {
+            if disabled.contains(&s.cwd) {
+                continue;
+            }
             if s.status == SessionStatus::AwaitingApproval && !notified.contains(&s.key()) {
                 if let Some(started) = s.tool_started_at {
                     let elapsed_ms = now.signed_duration_since(started).num_milliseconds();
@@ -748,12 +789,11 @@ fn update_sessions_and_redraw() {
                 }
             }
         }
+        drop(disabled);
         (approval, done)
     };
 
-    if (needs_approval || finished)
-        && BRING_TO_FRONT_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
-    {
+    if needs_approval || finished {
         bring_window_to_front();
     }
 
@@ -825,6 +865,13 @@ fn set_app_icon(app: &NSApplication) {
 }
 
 pub fn run_app(menubar_only: bool, window_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Load persisted AF disabled set
+    {
+        let storage = Storage::new();
+        let loaded = storage.load_af_disabled();
+        *AF_DISABLED_PROJECTS.lock().unwrap() = loaded;
+    }
+
     let mtm = MainThreadMarker::new().ok_or("Must run on main thread")?;
     let app = NSApplication::sharedApplication(mtm);
 
@@ -991,17 +1038,15 @@ fn setup_window(
     );
     footer.addSubview(&hint_label);
 
-    // Auto Focus indicator (right side of footer)
-    let af_on = BRING_TO_FRONT_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
-    let af_text = if af_on { "AF:ON" } else { "AF:OFF" };
+    // Auto Focus indicator (right side of footer, initially AF:ON)
     let af_rect = NSRect::new(
-        NSPoint::new(WINDOW_WIDTH - 70.0 - LEFT_PAD, 3.0),
-        NSSize::new(70.0, FOOTER_HEIGHT - 3.0),
+        NSPoint::new(WINDOW_WIDTH - 80.0 - LEFT_PAD, 3.0),
+        NSSize::new(80.0, FOOTER_HEIGHT - 3.0),
     );
-    let af_color = if af_on { color_text() } else { color_dim() };
+    let af_color = color_text();
     let af_label = create_mono_label(
         mtm,
-        af_text,
+        "AF:ON",
         af_rect,
         &af_color,
         HINT_FONT_SIZE,

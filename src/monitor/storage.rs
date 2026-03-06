@@ -9,6 +9,7 @@ use std::path::PathBuf;
 const SESSIONS_FILE: &str = "sessions.json";
 const LOCK_FILE: &str = "sessions.lock";
 const TUI_STATE_FILE: &str = "tui_state.json";
+const AF_CONFIG_FILE: &str = "af_disabled.json";
 
 fn get_data_dir() -> PathBuf {
     dirs::data_local_dir()
@@ -190,6 +191,22 @@ impl Storage {
         if tui_path.exists() {
             fs::remove_file(&tui_path)?;
         }
+        Ok(())
+    }
+
+    /// Load AF disabled projects set
+    pub fn load_af_disabled(&self) -> std::collections::HashSet<String> {
+        let af_path = self.path.parent().unwrap().join(AF_CONFIG_FILE);
+        let content = fs::read_to_string(&af_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or_default()
+    }
+
+    /// Save AF disabled projects set
+    pub fn save_af_disabled(&self, disabled: &std::collections::HashSet<String>) -> io::Result<()> {
+        self.ensure_dir()?;
+        let af_path = self.path.parent().unwrap().join(AF_CONFIG_FILE);
+        let content = serde_json::to_string_pretty(disabled)?;
+        fs::write(&af_path, content)?;
         Ok(())
     }
 }

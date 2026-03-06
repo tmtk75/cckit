@@ -462,16 +462,28 @@ extern "C" fn switch_style_action(_this: *mut AnyObject, _cmd: Sel, sender: *mut
     }
 }
 
-// Action handler to toggle bring-to-front behavior
+// Action handler to toggle bring-to-front behavior (bulk toggle all projects)
 extern "C" fn toggle_bring_to_front_action(
     _this: *mut AnyObject,
     _cmd: Sel,
     _sender: *mut AnyObject,
 ) {
-    use super::window::BRING_TO_FRONT_ENABLED;
-    use std::sync::atomic::Ordering;
-    let prev = BRING_TO_FRONT_ENABLED.load(Ordering::Relaxed);
-    BRING_TO_FRONT_ENABLED.store(!prev, Ordering::Relaxed);
+    use super::window::AF_DISABLED_PROJECTS;
+    let storage = Storage::new();
+    let store = storage.load();
+    let cwds: Vec<String> = store.sessions.values().map(|s| s.cwd.clone()).collect();
+    let mut disabled = AF_DISABLED_PROJECTS.lock().unwrap();
+    let all_disabled = cwds.iter().all(|c| disabled.contains(c));
+    if all_disabled {
+        disabled.clear();
+    } else {
+        for c in cwds {
+            disabled.insert(c);
+        }
+    }
+    let snapshot = disabled.clone();
+    drop(disabled);
+    let _ = Storage::new().save_af_disabled(&snapshot);
 }
 
 // Action handler called when quit menu item is clicked
@@ -689,11 +701,20 @@ impl MenubarApp {
         style_item.setSubmenu(Some(&style_menu));
         menu.addItem(&style_item);
 
-        // Bring-to-front toggle
+        // Bring-to-front toggle (bulk)
         {
-            use super::window::BRING_TO_FRONT_ENABLED;
-            let enabled = BRING_TO_FRONT_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
-            let check = if enabled { "✓ " } else { "   " };
+            use super::window::AF_DISABLED_PROJECTS;
+            let disabled = AF_DISABLED_PROJECTS.lock().unwrap();
+            let total = sessions.len();
+            let off_count = sessions.iter().filter(|s| disabled.contains(&s.cwd)).count();
+            drop(disabled);
+            let check = if total == 0 || off_count == 0 {
+                "✓ "
+            } else if off_count == total {
+                "   "
+            } else {
+                "◐ "
+            };
             let label = format!("{}Auto Focus", check);
             let toggle_item = create_menu_item(self.mtm, &label, None);
             unsafe {
