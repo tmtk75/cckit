@@ -45,8 +45,8 @@ stateDiagram-v2
 |-------|-----------------|--------------|
 | `SessionStart` | → `WaitingInput` | Creates new session |
 | `UserPromptSubmit` | → `Running` | Creates session if not exists, updates `cwd`, increments `prompt_count` |
-| `PreToolUse` | → `AwaitingApproval` | Updates `last_tool`, `last_tool_input`. Creates session if not exists |
-| `PostToolUse` | → `Running` | - |
+| `PreToolUse` | → `AwaitingApproval` | Updates `last_tool`, `last_tool_input`, sets `tool_started_at`, increments `tool_count`. Creates session if not exists |
+| `PostToolUse` | → `Running` | Calculates `last_tool_duration_ms` from `tool_started_at` |
 | `Stop` | → `WaitingInput` | - |
 | `SubagentStop` | → `WaitingInput` | Same as `Stop` |
 | `Notification` | (no change) | Updates `updated_at` only |
@@ -59,5 +59,6 @@ stateDiagram-v2
 - TTY deduplication: on every hook event, old sessions with the same TTY but different session_id are removed
 - `PreToolUse` records tool name and a summary of tool input (e.g., command for Bash, file_path for Read/Write/Edit)
 - `transcript_path` is captured from hook input on first event that provides it
-- Session stats (`prompt_count`, `compact_count`) are displayed in window app and menubar
+- Session stats (`prompt_count`, `tool_count`, `compact_count`) are displayed in window app and menubar
+- Tool duration is shown live while tool is running (AwaitingApproval), and as last duration otherwise
 - The `Stopped` status defined in `SessionStatus` enum is currently unused in hook transitions

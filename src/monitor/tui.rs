@@ -554,6 +554,9 @@ mod tests {
             prompt_count: 0,
             compact_count: 0,
             transcript_path: None,
+            tool_started_at: None,
+            last_tool_duration_ms: None,
+            tool_count: 0,
         }
     }
 

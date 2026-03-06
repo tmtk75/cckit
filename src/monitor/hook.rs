@@ -38,6 +38,8 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
         // Update transcript_path on every event if provided
         let transcript = hook_input.transcript_path.clone();
 
+        let now = Utc::now();
+
         match event {
             "SessionStart" => {
                 store.sessions.insert(
@@ -47,14 +49,17 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                         cwd: hook_input.cwd.clone(),
                         tty: tty.clone(),
                         status: SessionStatus::WaitingInput,
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
+                        created_at: now,
+                        updated_at: now,
                         last_tool: None,
                         last_tool_input: None,
                         pid,
                         prompt_count: 0,
                         compact_count: 0,
                         transcript_path: transcript.clone(),
+                        tool_started_at: None,
+                        last_tool_duration_ms: None,
+                        tool_count: 0,
                     },
                 );
             }
@@ -68,17 +73,20 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                         cwd: hook_input.cwd.clone(),
                         tty: tty.clone(),
                         status: SessionStatus::Running,
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
+                        created_at: now,
+                        updated_at: now,
                         last_tool: None,
                         last_tool_input: None,
                         pid,
                         prompt_count: 0,
                         compact_count: 0,
                         transcript_path: transcript.clone(),
+                        tool_started_at: None,
+                        last_tool_duration_ms: None,
+                        tool_count: 0,
                     });
                 session.status = SessionStatus::Running;
-                session.updated_at = Utc::now();
+                session.updated_at = now;
                 session.cwd = hook_input.cwd.clone();
                 session.prompt_count += 1;
                 if session.pid.is_none() {
@@ -91,7 +99,9 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                     session.status = SessionStatus::AwaitingApproval;
                     session.last_tool = hook_input.tool_name.clone();
                     session.last_tool_input = extract_tool_summary(&hook_input);
-                    session.updated_at = Utc::now();
+                    session.updated_at = now;
+                    session.tool_started_at = Some(now);
+                    session.tool_count += 1;
                     if session.pid.is_none() {
                         session.pid = pid;
                     }
@@ -103,14 +113,17 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                             cwd: hook_input.cwd.clone(),
                             tty: tty.clone(),
                             status: SessionStatus::AwaitingApproval,
-                            created_at: Utc::now(),
-                            updated_at: Utc::now(),
+                            created_at: now,
+                            updated_at: now,
                             last_tool: hook_input.tool_name.clone(),
                             last_tool_input: extract_tool_summary(&hook_input),
                             pid,
                             prompt_count: 0,
                             compact_count: 0,
                             transcript_path: transcript.clone(),
+                            tool_started_at: Some(now),
+                            last_tool_duration_ms: None,
+                            tool_count: 1,
                         },
                     );
                 }
@@ -119,27 +132,31 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
             "PostToolUse" => {
                 if let Some(session) = store.sessions.get_mut(&key) {
                     session.status = SessionStatus::Running;
-                    session.updated_at = Utc::now();
+                    session.updated_at = now;
+                    if let Some(started) = session.tool_started_at.take() {
+                        session.last_tool_duration_ms =
+                            Some(now.signed_duration_since(started).num_milliseconds());
+                    }
                 }
             }
 
             "Stop" | "SubagentStop" => {
                 if let Some(session) = store.sessions.get_mut(&key) {
                     session.status = SessionStatus::WaitingInput;
-                    session.updated_at = Utc::now();
+                    session.updated_at = now;
                 }
             }
 
             "Notification" => {
                 if let Some(session) = store.sessions.get_mut(&key) {
-                    session.updated_at = Utc::now();
+                    session.updated_at = now;
                 }
             }
 
             "PreCompact" => {
                 if let Some(session) = store.sessions.get_mut(&key) {
                     session.compact_count += 1;
-                    session.updated_at = Utc::now();
+                    session.updated_at = now;
                 }
             }
 

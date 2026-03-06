@@ -42,6 +42,15 @@ pub struct Session {
     pub compact_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
+    /// Timestamp when the current tool started (PreToolUse)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_started_at: Option<DateTime<Utc>>,
+    /// Duration of the last completed tool execution in milliseconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_tool_duration_ms: Option<i64>,
+    /// Total number of tool invocations in this session
+    #[serde(default)]
+    pub tool_count: u32,
 }
 
 impl Session {
@@ -107,6 +116,9 @@ mod tests {
             prompt_count: 0,
             compact_count: 0,
             transcript_path: None,
+            tool_started_at: None,
+            last_tool_duration_ms: None,
+            tool_count: 0,
         }
     }
 

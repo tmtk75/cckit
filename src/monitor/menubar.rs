@@ -337,6 +337,9 @@ fn format_menu_stats(session: &Session) -> String {
     if session.prompt_count > 0 {
         parts.push(format!("{}p", session.prompt_count));
     }
+    if session.tool_count > 0 {
+        parts.push(format!("{}t", session.tool_count));
+    }
     if session.compact_count > 0 {
         parts.push(format!("{}c", session.compact_count));
     }

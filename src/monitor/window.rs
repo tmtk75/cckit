@@ -9,7 +9,7 @@ use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{ClassType, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
-    NSColor, NSEvent, NSFont, NSScreen, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSColor, NSEvent, NSFont, NSImage, NSScreen, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
@@ -188,13 +188,48 @@ fn format_session_stats(session: &Session) -> String {
     if session.prompt_count > 0 {
         parts.push(format!("{}p", session.prompt_count));
     }
+    if session.tool_count > 0 {
+        parts.push(format!("{}t", session.tool_count));
+    }
     if session.compact_count > 0 {
         parts.push(format!("{}c", session.compact_count));
+    }
+    let dur = format_tool_duration(session);
+    if !dur.is_empty() {
+        parts.push(dur);
     }
     if parts.is_empty() {
         String::new()
     } else {
         parts.join("/")
+    }
+}
+
+fn format_tool_duration(session: &Session) -> String {
+    // Show live elapsed time if tool is currently running
+    if let Some(started) = session.tool_started_at {
+        if session.status == SessionStatus::AwaitingApproval {
+            let ms = chrono::Utc::now()
+                .signed_duration_since(started)
+                .num_milliseconds()
+                .max(0);
+            return format_duration_ms(ms);
+        }
+    }
+    // Otherwise show last completed tool duration
+    match session.last_tool_duration_ms {
+        Some(ms) => format_duration_ms(ms),
+        None => String::new(),
+    }
+}
+
+fn format_duration_ms(ms: i64) -> String {
+    if ms < 1000 {
+        format!("{}ms", ms)
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{:.0}m", ms as f64 / 60_000.0)
     }
 }
 
@@ -411,8 +446,8 @@ fn rebuild_view(view: &NSView) {
         FONT_SIZE,
     ));
 
-    let right_w = 110.0;
-    let hdr_right = format!("{:>6}  {:>5}", "TOOL", "AGE");
+    let right_w = 210.0;
+    let hdr_right = format!("{:>12} {:>6}  {:>5}", "STAT", "TOOL", "AGE");
     let hdr_right_rect = NSRect::new(
         NSPoint::new(view_width - right_w - LEFT_PAD, 2.0),
         NSSize::new(right_w, HEADER_HEIGHT - 2.0),
@@ -520,7 +555,7 @@ fn rebuild_view(view: &NSView) {
 
         // Middle: path (dim, truncate middle)
         let path_x = TEXT_LEFT + 220.0;
-        let right_w = 160.0;
+        let right_w = 210.0;
         let path_w = (view_width - path_x - right_w - LEFT_PAD).max(40.0);
         let path_rect = NSRect::new(
             NSPoint::new(path_x, y + 2.0),
@@ -532,7 +567,7 @@ fn rebuild_view(view: &NSView) {
 
         // Right: stats + tool + elapsed (right-aligned)
         let stats = format_session_stats(session);
-        let right_text = format!("{} {:>6}  {:>5}", stats, tool, elapsed);
+        let right_text = format!("{:>12} {:>6}  {:>5}", stats, tool, elapsed);
         let right_rect = NSRect::new(
             NSPoint::new(view_width - right_w - LEFT_PAD, y + 2.0),
             NSSize::new(right_w, ROW_HEIGHT - 4.0),
@@ -715,6 +750,26 @@ fn calculate_content_height() -> CGFloat {
 // --- Main entry point ---
 
 /// Unified app entry point: shows window + menubar (default), or one of them.
+fn set_app_icon(app: &NSApplication) {
+    static ICON_PNG: &[u8] = include_bytes!("../../assets/icon_512.png");
+    unsafe {
+        let data_cls = objc2::runtime::AnyClass::get(c"NSData").unwrap();
+        let bytes_ptr: *const std::ffi::c_void = ICON_PNG.as_ptr() as *const std::ffi::c_void;
+        let data: *mut AnyObject =
+            msg_send![data_cls, dataWithBytes: bytes_ptr, length: ICON_PNG.len()];
+        if data.is_null() {
+            return;
+        }
+        let image_cls = objc2::runtime::AnyClass::get(c"NSImage").unwrap();
+        let alloc: *mut AnyObject = msg_send![image_cls, alloc];
+        let image: *mut AnyObject = msg_send![alloc, initWithData: data];
+        if !image.is_null() {
+            let image_ref: &NSImage = &*(image as *const NSImage);
+            app.setApplicationIconImage(Some(image_ref));
+        }
+    }
+}
+
 pub fn run_app(menubar_only: bool, window_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mtm = MainThreadMarker::new().ok_or("Must run on main thread")?;
     let app = NSApplication::sharedApplication(mtm);
@@ -727,6 +782,8 @@ pub fn run_app(menubar_only: bool, window_only: bool) -> Result<(), Box<dyn std:
     } else {
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     }
+
+    set_app_icon(&app);
     app.finishLaunching();
 
     // Menubar (kept alive via _menubar)
