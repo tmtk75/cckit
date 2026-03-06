@@ -462,6 +462,18 @@ extern "C" fn switch_style_action(_this: *mut AnyObject, _cmd: Sel, sender: *mut
     }
 }
 
+// Action handler to toggle bring-to-front behavior
+extern "C" fn toggle_bring_to_front_action(
+    _this: *mut AnyObject,
+    _cmd: Sel,
+    _sender: *mut AnyObject,
+) {
+    use super::window::BRING_TO_FRONT_ENABLED;
+    use std::sync::atomic::Ordering;
+    let prev = BRING_TO_FRONT_ENABLED.load(Ordering::Relaxed);
+    BRING_TO_FRONT_ENABLED.store(!prev, Ordering::Relaxed);
+}
+
 // Action handler called when quit menu item is clicked
 extern "C" fn quit_app_action(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
     SHOULD_QUIT.store(true, Ordering::SeqCst);
@@ -493,6 +505,11 @@ fn get_handler_class() -> &'static AnyClass {
             builder.add_method(
                 sel!(switchStyle:),
                 switch_style_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(toggleBringToFront:),
+                toggle_bring_to_front_action
+                    as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
         }
 
@@ -671,6 +688,20 @@ impl MenubarApp {
         let style_item = create_menu_item(self.mtm, "Style", None);
         style_item.setSubmenu(Some(&style_menu));
         menu.addItem(&style_item);
+
+        // Bring-to-front toggle
+        {
+            use super::window::BRING_TO_FRONT_ENABLED;
+            let enabled = BRING_TO_FRONT_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+            let check = if enabled { "✓ " } else { "   " };
+            let label = format!("{}Auto Focus", check);
+            let toggle_item = create_menu_item(self.mtm, &label, None);
+            unsafe {
+                toggle_item.setAction(Some(objc2::sel!(toggleBringToFront:)));
+                toggle_item.setTarget(Some(&self.handler));
+            }
+            menu.addItem(&toggle_item);
+        }
 
         // Separator before quit
         let separator2 = NSMenuItem::separatorItem(self.mtm);

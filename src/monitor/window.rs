@@ -160,6 +160,17 @@ static SESSION_LIST: Mutex<Vec<Session>> = Mutex::new(Vec::new());
 static SELECTED_INDEX: Mutex<Option<usize>> = Mutex::new(None);
 static CONTENT_VIEW_PTR: Mutex<Option<usize>> = Mutex::new(None);
 static WINDOW_PTR: Mutex<Option<usize>> = Mutex::new(None);
+static AF_LABEL_PTR: Mutex<Option<usize>> = Mutex::new(None);
+static NOTIFIED_APPROVALS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+/// Global toggle for auto bring-to-front behavior (shared with menubar)
+pub static BRING_TO_FRONT_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Per-project auto-focus disabled set (cwd paths). Projects in this set won't trigger auto-focus.
+pub static AF_DISABLED_PROJECTS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
 fn load_sessions() {
     let storage = Storage::new();
@@ -374,6 +385,12 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
                 let idx = current.map(|i| i + 1).unwrap_or(0);
                 *SELECTED_INDEX.lock().unwrap() = Some(idx.min(session_count - 1));
             }
+            "f" => {
+                let prev = BRING_TO_FRONT_ENABLED
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                BRING_TO_FRONT_ENABLED
+                    .store(!prev, std::sync::atomic::Ordering::Relaxed);
+            }
             "q" => {
                 let mtm = MainThreadMarker::new().unwrap();
                 let app = NSApplication::sharedApplication(mtm);
@@ -398,6 +415,22 @@ fn request_redraw() {
     if let Some(ptr) = ptr {
         let view = ptr as *mut AnyObject;
         let _: () = unsafe { msg_send![view, setNeedsDisplay: true] };
+    }
+    update_af_label();
+}
+
+fn update_af_label() {
+    let ptr = *AF_LABEL_PTR.lock().unwrap();
+    if let Some(ptr) = ptr {
+        let af_on = BRING_TO_FRONT_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+        let text = if af_on { "AF:ON" } else { "AF:OFF" };
+        let color = if af_on { color_text() } else { color_dim() };
+        let label = ptr as *mut AnyObject;
+        unsafe {
+            let ns_str = NSString::from_str(text);
+            let _: () = msg_send![label, setStringValue: &*ns_str];
+            let _: () = msg_send![label, setTextColor: &*color];
+        }
     }
 }
 
@@ -555,8 +588,7 @@ fn rebuild_view(view: &NSView) {
 
         // Middle: path (dim, truncate middle)
         let path_x = TEXT_LEFT + 220.0;
-        let right_w = 210.0;
-        let path_w = (view_width - path_x - right_w - LEFT_PAD).max(40.0);
+        let path_w = (view_width - path_x - 210.0 - LEFT_PAD).max(40.0);
         let path_rect = NSRect::new(
             NSPoint::new(path_x, y + 2.0),
             NSSize::new(path_w, ROW_HEIGHT - 4.0),
@@ -567,6 +599,7 @@ fn rebuild_view(view: &NSView) {
 
         // Right: stats + tool + elapsed (right-aligned)
         let stats = format_session_stats(session);
+        let right_w = 210.0;
         let right_text = format!("{:>12} {:>6}  {:>5}", stats, tool, elapsed);
         let right_rect = NSRect::new(
             NSPoint::new(view_width - right_w - LEFT_PAD, y + 2.0),
@@ -684,13 +717,33 @@ fn update_sessions_and_redraw() {
     // Detect state transitions
     let (needs_approval, finished) = {
         let sessions = SESSION_LIST.lock().unwrap();
+        let now = chrono::Utc::now();
+        let mut notified = NOTIFIED_APPROVALS.lock().unwrap();
         let mut approval = false;
         let mut done = false;
+        // Clean up keys for sessions no longer awaiting approval
+        notified.retain(|k| {
+            sessions
+                .iter()
+                .any(|s| s.key() == *k && s.status == SessionStatus::AwaitingApproval)
+        });
         for s in sessions.iter() {
-            if prev.get(&s.key()) == Some(&SessionStatus::Running) {
-                if s.status == SessionStatus::AwaitingApproval {
-                    approval = true;
-                } else if s.status == SessionStatus::WaitingInput {
+            if s.status == SessionStatus::AwaitingApproval && !notified.contains(&s.key()) {
+                if let Some(started) = s.tool_started_at {
+                    let elapsed_ms = now.signed_duration_since(started).num_milliseconds();
+                    if elapsed_ms >= 3000 {
+                        approval = true;
+                        notified.insert(s.key());
+                    }
+                }
+            }
+            if let Some(prev_status) = prev.get(&s.key()) {
+                if s.status == SessionStatus::WaitingInput
+                    && matches!(
+                        prev_status,
+                        SessionStatus::Running | SessionStatus::AwaitingApproval
+                    )
+                {
                     done = true;
                 }
             }
@@ -698,10 +751,10 @@ fn update_sessions_and_redraw() {
         (approval, done)
     };
 
-    if needs_approval {
+    if (needs_approval || finished)
+        && BRING_TO_FRONT_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+    {
         bring_window_to_front();
-    } else if finished {
-        bounce_dock_icon();
     }
 
     let count = SESSION_LIST.lock().unwrap().len();
@@ -732,6 +785,7 @@ fn bring_window_to_front() {
     }
 }
 
+#[allow(dead_code)]
 fn bounce_dock_icon() {
     if let Some(mtm) = MainThreadMarker::new() {
         let app = NSApplication::sharedApplication(mtm);
@@ -928,13 +982,34 @@ fn setup_window(
         NSPoint::new(LEFT_PAD, 3.0),
         NSSize::new(WINDOW_WIDTH - LEFT_PAD * 2.0, FOOTER_HEIGHT - 3.0),
     );
-    footer.addSubview(&create_mono_label(
+    let hint_label = create_mono_label(
         mtm,
-        " \u{2191}\u{2193}/jk navigate   \u{23CE} focus   1-9 jump   esc hide   q quit",
+        " \u{2191}\u{2193}/jk navigate   \u{23CE} focus   f autofocus   1-9 jump   esc hide   q quit",
         hint_rect,
         &color_dim(),
         HINT_FONT_SIZE,
-    ));
+    );
+    footer.addSubview(&hint_label);
+
+    // Auto Focus indicator (right side of footer)
+    let af_on = BRING_TO_FRONT_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+    let af_text = if af_on { "AF:ON" } else { "AF:OFF" };
+    let af_rect = NSRect::new(
+        NSPoint::new(WINDOW_WIDTH - 70.0 - LEFT_PAD, 3.0),
+        NSSize::new(70.0, FOOTER_HEIGHT - 3.0),
+    );
+    let af_color = if af_on { color_text() } else { color_dim() };
+    let af_label = create_mono_label(
+        mtm,
+        af_text,
+        af_rect,
+        &af_color,
+        HINT_FONT_SIZE,
+    );
+    let _: () = unsafe { msg_send![&*af_label, setAlignment: 2_isize] }; // right-align
+    af_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+    *AF_LABEL_PTR.lock().unwrap() = Some(&*af_label as *const NSTextField as usize);
+    footer.addSubview(&af_label);
 
     let footer_sep = create_colored_view(
         mtm,
