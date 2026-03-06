@@ -240,9 +240,6 @@ enum SessionCommands {
 
     /// Dump Ghostty UI tree for debugging (macOS only)
     DumpUi,
-
-    /// Run menubar app (macOS only)
-    Menubar,
 }
 
 #[derive(Subcommand)]
@@ -2312,6 +2309,25 @@ fn status_command() {
     }
 }
 
+/// Check hooks and print a warning if not installed. Returns true if hooks are missing.
+fn warn_if_hooks_missing() -> bool {
+    let missing = monitor::setup::check_hooks_installed();
+    if missing.is_empty() {
+        return false;
+    }
+    eprintln!(
+        "{}: cckit hooks are not fully configured (missing: {})",
+        "Warning".yellow(),
+        missing.join(", ")
+    );
+    eprintln!(
+        "Run {} to install hooks, then restart Claude Code sessions.",
+        "cckit session install".cyan()
+    );
+    eprintln!();
+    true
+}
+
 fn doctor_command() {
     let home = match dirs::home_dir() {
         Some(h) => h,
@@ -2348,63 +2364,18 @@ fn doctor_command() {
         println!("{}", "ok".green());
 
         // Check hooks configuration
-        match fs::read_to_string(&settings_json) {
-            Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(settings) => {
-                    let hooks = settings.get("hooks");
-                    let hook_events = [
-                        "SessionStart",
-                        "SessionEnd",
-                        "UserPromptSubmit",
-                        "PreToolUse",
-                        "PostToolUse",
-                        "Stop",
-                    ];
-
-                    let mut missing_hooks = Vec::new();
-
-                    for event in hook_events {
-                        print!("Checking {} hook ... ", event);
-                        let has_hook = hooks
-                            .and_then(|h| h.get(event))
-                            .and_then(|arr| arr.as_array())
-                            .map(|arr| {
-                                arr.iter().any(|item| {
-                                    item.get("hooks")
-                                        .and_then(|h| h.as_array())
-                                        .map(|hooks| {
-                                            hooks.iter().any(|hook| {
-                                                hook.get("command")
-                                                    .and_then(|c| c.as_str())
-                                                    .map(|c| c.contains("cckit session hook"))
-                                                    .unwrap_or(false)
-                                            })
-                                        })
-                                        .unwrap_or(false)
-                                })
-                            })
-                            .unwrap_or(false);
-
-                        if has_hook {
-                            println!("{}", "ok".green());
-                        } else {
-                            println!("{}", "not configured".yellow());
-                            missing_hooks.push(event);
-                        }
-                    }
-
-                    if !missing_hooks.is_empty() {
-                        issues.push(format!("Missing hooks: {}", missing_hooks.join(", ")));
-                        issues.push("  Run: cckit session install".to_string());
-                    }
-                }
-                Err(e) => {
-                    issues.push(format!("Failed to parse settings.json: {}", e));
-                }
-            },
-            Err(e) => {
-                issues.push(format!("Failed to read settings.json: {}", e));
+        let missing_hooks = monitor::setup::check_hooks_installed();
+        for event in monitor::setup::hook_events() {
+            print!("Checking {} hook ... ", event);
+            if missing_hooks.contains(event) {
+                println!("{}", "not configured".yellow());
+            } else {
+                println!("{}", "ok".green());
             }
+        }
+        if !missing_hooks.is_empty() {
+            issues.push(format!("Missing hooks: {}", missing_hooks.join(", ")));
+            issues.push("  Run: cckit session install".to_string());
         }
     }
 
@@ -2978,6 +2949,8 @@ pub fn run() {
                 }) => {
                     if text {
                         monitor::print_sessions_list();
+                    } else if warn_if_hooks_missing() {
+                        std::process::exit(1);
                     } else if no_tui {
                         #[cfg(target_os = "macos")]
                         {
@@ -3086,20 +3059,11 @@ pub fn run() {
                     eprintln!("DumpUi is only supported on macOS");
                     std::process::exit(1);
                 }
-                #[cfg(target_os = "macos")]
-                Some(SessionCommands::Menubar) => {
-                    if let Err(e) = monitor::menubar::run_menubar() {
-                        eprintln!("{}: {}", "Error running menubar".red(), e);
-                        std::process::exit(1);
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
-                Some(SessionCommands::Menubar) => {
-                    eprintln!("Menubar is only supported on macOS");
-                    std::process::exit(1);
-                }
                 None => {
                     // Default: same as `session ls -m`
+                    if warn_if_hooks_missing() {
+                        std::process::exit(1);
+                    }
                     #[cfg(target_os = "macos")]
                     {
                         monitor::menubar::set_icon_size(24.0);
@@ -3127,6 +3091,9 @@ pub fn run() {
             window_only,
             style,
         }) => {
+            if warn_if_hooks_missing() {
+                std::process::exit(1);
+            }
             if let Some(s) = monitor::menubar::MenubarStyle::from_str(&style) {
                 monitor::menubar::set_style(s);
             } else {

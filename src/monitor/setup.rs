@@ -11,6 +11,9 @@ const HOOK_EVENTS: &[&str] = &[
     "PreToolUse",
     "PostToolUse",
     "Stop",
+    "SubagentStop",
+    "Notification",
+    "PreCompact",
 ];
 
 fn get_settings_path() -> PathBuf {
@@ -246,6 +249,44 @@ pub fn run_install(force: bool) -> io::Result<()> {
     );
 
     Ok(())
+}
+
+/// Check if all required hooks are installed. Returns list of missing hook event names.
+pub fn check_hooks_installed() -> Vec<&'static str> {
+    let settings_path = get_settings_path();
+
+    if !settings_path.exists() {
+        return HOOK_EVENTS.to_vec();
+    }
+
+    let content = match fs::read_to_string(&settings_path) {
+        Ok(c) => c,
+        Err(_) => return HOOK_EVENTS.to_vec(),
+    };
+
+    let settings: Value = match parse_settings(&content) {
+        Ok(s) => s,
+        Err(_) => return HOOK_EVENTS.to_vec(),
+    };
+
+    let hooks = settings.get("hooks").cloned().unwrap_or_else(|| json!({}));
+
+    let mut missing = Vec::new();
+    for event in HOOK_EVENTS {
+        if let Some(hook_array) = hooks.get(*event) {
+            if !has_cckit_hook(hook_array) {
+                missing.push(*event);
+            }
+        } else {
+            missing.push(*event);
+        }
+    }
+    missing
+}
+
+/// Returns the list of hook events that cckit requires.
+pub fn hook_events() -> &'static [&'static str] {
+    HOOK_EVENTS
 }
 
 pub fn show_status() -> io::Result<()> {

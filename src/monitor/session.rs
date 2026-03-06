@@ -36,6 +36,12 @@ pub struct Session {
     pub last_tool_input: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub prompt_count: u32,
+    #[serde(default)]
+    pub compact_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
 }
 
 impl Session {
@@ -98,6 +104,9 @@ mod tests {
             last_tool: None,
             last_tool_input: None,
             pid: Some(12345),
+            prompt_count: 0,
+            compact_count: 0,
+            transcript_path: None,
         }
     }
 

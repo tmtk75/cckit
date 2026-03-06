@@ -551,6 +551,9 @@ mod tests {
             last_tool: None,
             last_tool_input: None,
             pid: Some(12345),
+            prompt_count: 0,
+            compact_count: 0,
+            transcript_path: None,
         }
     }
 

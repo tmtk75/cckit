@@ -35,6 +35,9 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
         // Remove old sessions with the same TTY but different session_id
         store.sessions.retain(|k, s| s.tty != tty || k == &key);
 
+        // Update transcript_path on every event if provided
+        let transcript = hook_input.transcript_path.clone();
+
         match event {
             "SessionStart" => {
                 store.sessions.insert(
@@ -49,6 +52,9 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                         last_tool: None,
                         last_tool_input: None,
                         pid,
+                        prompt_count: 0,
+                        compact_count: 0,
+                        transcript_path: transcript.clone(),
                     },
                 );
             }
@@ -67,10 +73,14 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                         last_tool: None,
                         last_tool_input: None,
                         pid,
+                        prompt_count: 0,
+                        compact_count: 0,
+                        transcript_path: transcript.clone(),
                     });
                 session.status = SessionStatus::Running;
                 session.updated_at = Utc::now();
                 session.cwd = hook_input.cwd.clone();
+                session.prompt_count += 1;
                 if session.pid.is_none() {
                     session.pid = pid;
                 }
@@ -86,7 +96,6 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                         session.pid = pid;
                     }
                 } else {
-                    // Create new session if not exists
                     store.sessions.insert(
                         key.clone(),
                         Session {
@@ -99,6 +108,9 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                             last_tool: hook_input.tool_name.clone(),
                             last_tool_input: extract_tool_summary(&hook_input),
                             pid,
+                            prompt_count: 0,
+                            compact_count: 0,
+                            transcript_path: transcript.clone(),
                         },
                     );
                 }
@@ -111,9 +123,22 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            "Stop" => {
+            "Stop" | "SubagentStop" => {
                 if let Some(session) = store.sessions.get_mut(&key) {
                     session.status = SessionStatus::WaitingInput;
+                    session.updated_at = Utc::now();
+                }
+            }
+
+            "Notification" => {
+                if let Some(session) = store.sessions.get_mut(&key) {
+                    session.updated_at = Utc::now();
+                }
+            }
+
+            "PreCompact" => {
+                if let Some(session) = store.sessions.get_mut(&key) {
+                    session.compact_count += 1;
                     session.updated_at = Utc::now();
                 }
             }
@@ -124,6 +149,15 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
 
             _ => {
                 // Ignore unknown events
+            }
+        }
+
+        // Update transcript_path if provided (may arrive on any event)
+        if let Some(ref tp) = transcript {
+            if let Some(session) = store.sessions.get_mut(&key) {
+                if session.transcript_path.is_none() {
+                    session.transcript_path = Some(tp.clone());
+                }
             }
         }
 
