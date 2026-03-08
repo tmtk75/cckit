@@ -119,19 +119,38 @@ impl Storage {
 
     /// Check if a process is alive
     fn pid_alive(pid: u32) -> bool {
-        // kill(pid, 0) checks existence without sending a signal
         unsafe { libc::kill(pid as i32, 0) == 0 }
     }
 
-    /// Check if a session is stale (TTY gone or process dead)
+    /// Check if a claude process is running under the given parent PID's TTY
+    fn has_claude_on_tty(tty: &str) -> bool {
+        // Strip /dev/ prefix for ps TTY matching
+        let tty_short = tty.strip_prefix("/dev/").unwrap_or(tty);
+        if let Ok(output) = std::process::Command::new("ps")
+            .args(["-t", tty_short, "-o", "comm="])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.lines().any(|line| {
+                let cmd = line.trim();
+                cmd.contains("claude") || cmd.contains("Claude")
+            })
+        } else {
+            true // If ps fails, assume alive to be safe
+        }
+    }
+
+    /// Check if a session is stale (TTY gone, process dead, or no claude on TTY)
     fn is_stale(session: &super::session::Session) -> bool {
         if !Self::tty_exists(&session.tty) {
             return true;
         }
         if let Some(pid) = session.pid {
-            return !Self::pid_alive(pid);
+            if !Self::pid_alive(pid) {
+                return true;
+            }
         }
-        false
+        !Self::has_claude_on_tty(&session.tty)
     }
 
     /// Find stale sessions (TTY gone or process dead)
