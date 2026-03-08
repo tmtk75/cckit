@@ -117,12 +117,7 @@ impl Storage {
         std::path::Path::new(tty).exists()
     }
 
-    /// Check if a process is alive
-    fn pid_alive(pid: u32) -> bool {
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-
-    /// Check if a claude process is running under the given parent PID's TTY
+    /// Check if a claude process is running on the given TTY
     fn has_claude_on_tty(tty: &str) -> bool {
         // Strip /dev/ prefix for ps TTY matching
         let tty_short = tty.strip_prefix("/dev/").unwrap_or(tty);
@@ -140,15 +135,14 @@ impl Storage {
         }
     }
 
-    /// Check if a session is stale (TTY gone, process dead, or no claude on TTY)
+    /// Check if a session is stale (TTY gone or no claude process on TTY)
+    ///
+    /// Note: We don't use PID-based checks because the stored PID is the hook's
+    /// parent shell process (short-lived /bin/sh), not the claude process itself.
+    /// Instead, we check if any claude process is running on the session's TTY.
     fn is_stale(session: &super::session::Session) -> bool {
         if !Self::tty_exists(&session.tty) {
             return true;
-        }
-        if let Some(pid) = session.pid {
-            if !Self::pid_alive(pid) {
-                return true;
-            }
         }
         !Self::has_claude_on_tty(&session.tty)
     }
@@ -237,12 +231,28 @@ impl Storage {
         serde_json::from_str(&content).unwrap_or_default()
     }
 
-    /// Save AF disabled projects set
+    /// Save AF disabled projects set (atomic write via tmp + rename)
     pub fn save_af_disabled(&self, disabled: &std::collections::HashSet<String>) -> io::Result<()> {
         self.ensure_dir()?;
-        let af_path = self.path.parent().unwrap().join(AF_CONFIG_FILE);
+        let dir = self
+            .path
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid data path"))?;
+        let af_path = dir.join(AF_CONFIG_FILE);
+        let tmp_path = dir.join(format!("{}.tmp.{}", AF_CONFIG_FILE, std::process::id()));
         let content = serde_json::to_string_pretty(disabled)?;
-        fs::write(&af_path, content)?;
+
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+        }
+
+        fs::rename(&tmp_path, &af_path)?;
         Ok(())
     }
 }

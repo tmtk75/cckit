@@ -1543,7 +1543,7 @@ fn run_sync(execute: bool) {
     }
 
     println!(
-        "Found {} stale sessions (TTY no longer exists):",
+        "Found {} stale sessions (TTY gone or no claude process):",
         stale_sessions.len().to_string().yellow()
     );
 
@@ -2309,16 +2309,28 @@ fn status_command() {
     }
 }
 
-/// Check hooks and print a warning if not installed. Returns true if hooks are missing.
+/// Check hooks and print a warning if not installed.
+/// Returns true if core hooks are missing (should block startup).
+/// Extended hooks only produce a warning.
 fn warn_if_hooks_missing() -> bool {
-    let missing = monitor::setup::check_hooks_installed();
-    if missing.is_empty() {
+    let (missing_core, missing_extended) = monitor::setup::check_hooks_installed();
+
+    if !missing_extended.is_empty() {
+        eprintln!(
+            "{}: optional hooks not configured ({}). Run {} to add them.",
+            "Note".dimmed(),
+            missing_extended.join(", "),
+            "cckit session install".cyan()
+        );
+    }
+
+    if missing_core.is_empty() {
         return false;
     }
     eprintln!(
-        "{}: cckit hooks are not fully configured (missing: {})",
+        "{}: cckit core hooks are not configured (missing: {})",
         "Warning".yellow(),
-        missing.join(", ")
+        missing_core.join(", ")
     );
     eprintln!(
         "Run {} to install hooks, then restart Claude Code sessions.",
@@ -2364,18 +2376,27 @@ fn doctor_command() {
         println!("{}", "ok".green());
 
         // Check hooks configuration
-        let missing_hooks = monitor::setup::check_hooks_installed();
+        let (missing_core, missing_extended) = monitor::setup::check_hooks_installed();
         for event in monitor::setup::hook_events() {
             print!("Checking {} hook ... ", event);
-            if missing_hooks.contains(event) {
-                println!("{}", "not configured".yellow());
+            if missing_core.contains(event) {
+                println!("{}", "not configured".red());
+            } else if missing_extended.contains(event) {
+                println!("{}", "not configured (optional)".yellow());
             } else {
                 println!("{}", "ok".green());
             }
         }
-        if !missing_hooks.is_empty() {
-            issues.push(format!("Missing hooks: {}", missing_hooks.join(", ")));
+        if !missing_core.is_empty() {
+            issues.push(format!("Missing core hooks: {}", missing_core.join(", ")));
             issues.push("  Run: cckit session install".to_string());
+        }
+        if !missing_extended.is_empty() {
+            warnings.push(format!(
+                "Missing optional hooks: {}",
+                missing_extended.join(", ")
+            ));
+            warnings.push("  Run: cckit session install".to_string());
         }
     }
 
@@ -2738,15 +2759,35 @@ fn ls_command(opts: LsOptions) {
     }
 }
 
-fn parse_hook_notification(hook_json: &serde_json::Value, default_title: &str) -> (String, String) {
+fn parse_hook_notification(
+    hook_json: &serde_json::Value,
+    default_title: &str,
+    subtitle_override: &Option<String>,
+) -> (String, Option<String>, String) {
+    let cwd = hook_json.get("cwd").and_then(|v| v.as_str());
+
     // Extract project name from cwd
-    let title = hook_json
-        .get("cwd")
-        .and_then(|v| v.as_str())
+    let title = cwd
         .and_then(|cwd| std::path::Path::new(cwd).file_name())
         .and_then(|name| name.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| default_title.to_string());
+
+    // Build subtitle: use override if provided, otherwise show shortened path
+    let subtitle = if subtitle_override.is_some() {
+        subtitle_override.clone()
+    } else {
+        cwd.map(|cwd| {
+            // Shorten path: replace home dir with ~
+            if let Some(home) = dirs::home_dir() {
+                let home_str = home.to_string_lossy().to_string();
+                if cwd.starts_with(&home_str) {
+                    return cwd.replacen(&home_str, "~", 1);
+                }
+            }
+            cwd.to_string()
+        })
+    };
 
     let event = hook_json
         .get("hook_event_name")
@@ -2761,7 +2802,7 @@ fn parse_hook_notification(hook_json: &serde_json::Value, default_title: &str) -
         _ => format!("Event: {}", event),
     };
 
-    (title, message)
+    (title, subtitle, message)
 }
 
 fn build_stop_message(hook_json: &serde_json::Value) -> String {
@@ -3086,6 +3127,13 @@ pub fn run() {
             window_only,
             style,
         }) => {
+            if menubar_only && window_only {
+                eprintln!(
+                    "{}: --menubar-only and --window-only cannot be used together",
+                    "Error".red()
+                );
+                std::process::exit(1);
+            }
             if warn_if_hooks_missing() {
                 std::process::exit(1);
             }
@@ -3123,9 +3171,9 @@ pub fn run() {
             bgcolor,
         }) => {
             // Determine message: use -m if provided, otherwise read from stdin
-            let (final_title, final_message) = if let Some(m) = message {
+            let (final_title, final_subtitle, final_message) = if let Some(m) = message {
                 // Explicit message provided, use as-is
-                (title, m)
+                (title, subtitle, m)
             } else {
                 // Read stdin only when -m is not provided
                 use std::io::Read;
@@ -3139,14 +3187,14 @@ pub fn run() {
                     {
                         if hook_json.get("hook_event_name").is_some() {
                             // It's a hook JSON, parse it nicely
-                            parse_hook_notification(&hook_json, &title)
+                            parse_hook_notification(&hook_json, &title, &subtitle)
                         } else {
                             // Regular JSON, just display as message
-                            (title, stdin_content.to_string())
+                            (title, subtitle, stdin_content.to_string())
                         }
                     } else {
                         // Not JSON, use as plain message
-                        (title, stdin_content.to_string())
+                        (title, subtitle, stdin_content.to_string())
                     }
                 } else {
                     eprintln!(
@@ -3166,7 +3214,7 @@ pub fn run() {
             };
             let opts = monitor::notification::NotifyOptions {
                 title: final_title,
-                subtitle,
+                subtitle: final_subtitle,
                 message: final_message,
                 sound,
                 duration_ms: duration,

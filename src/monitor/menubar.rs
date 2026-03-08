@@ -520,8 +520,7 @@ fn get_handler_class() -> &'static AnyClass {
             );
             builder.add_method(
                 sel!(toggleBringToFront:),
-                toggle_bring_to_front_action
-                    as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+                toggle_bring_to_front_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
         }
 
@@ -635,7 +634,9 @@ impl MenubarApp {
         // Legend item (disabled, explains status bar format)
         let style = current_style();
         let legend_item = create_menu_item(self.mtm, style.legend(), None);
-        unsafe { let _: () = msg_send![&*legend_item, setEnabled: false]; }
+        unsafe {
+            let _: () = msg_send![&*legend_item, setEnabled: false];
+        }
         menu.addItem(&legend_item);
         let separator_legend = NSMenuItem::separatorItem(self.mtm);
         menu.addItem(&separator_legend);
@@ -706,7 +707,10 @@ impl MenubarApp {
             use super::window::AF_DISABLED_PROJECTS;
             let disabled = AF_DISABLED_PROJECTS.lock().unwrap();
             let total = sessions.len();
-            let off_count = sessions.iter().filter(|s| disabled.contains(&s.cwd)).count();
+            let off_count = sessions
+                .iter()
+                .filter(|s| disabled.contains(&s.cwd))
+                .count();
             drop(disabled);
             let check = if total == 0 || off_count == 0 {
                 "✓ "

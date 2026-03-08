@@ -450,7 +450,10 @@ fn update_af_label() {
         let sessions = SESSION_LIST.lock().unwrap();
         let disabled = AF_DISABLED_PROJECTS.lock().unwrap();
         let total = sessions.len();
-        let off_count = sessions.iter().filter(|s| disabled.contains(&s.cwd)).count();
+        let off_count = sessions
+            .iter()
+            .filter(|s| disabled.contains(&s.cwd))
+            .count();
         drop(disabled);
         drop(sessions);
         let (text, color) = if total == 0 || off_count == 0 {
@@ -1044,13 +1047,7 @@ fn setup_window(
         NSSize::new(80.0, FOOTER_HEIGHT - 3.0),
     );
     let af_color = color_text();
-    let af_label = create_mono_label(
-        mtm,
-        "AF:ON",
-        af_rect,
-        &af_color,
-        HINT_FONT_SIZE,
-    );
+    let af_label = create_mono_label(mtm, "AF:ON", af_rect, &af_color, HINT_FONT_SIZE);
     let _: () = unsafe { msg_send![&*af_label, setAlignment: 2_isize] }; // right-align
     af_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
     *AF_LABEL_PTR.lock().unwrap() = Some(&*af_label as *const NSTextField as usize);

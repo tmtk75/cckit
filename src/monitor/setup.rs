@@ -4,6 +4,20 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+/// Core hook events required for basic session tracking
+const CORE_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+];
+
+/// Extended hook events for additional features (not required for basic operation)
+const EXTENDED_HOOK_EVENTS: &[&str] = &["SubagentStop", "Notification", "PreCompact"];
+
+/// All hook events (core + extended)
 const HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "SessionEnd",
@@ -251,37 +265,42 @@ pub fn run_install(force: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Check if all required hooks are installed. Returns list of missing hook event names.
-pub fn check_hooks_installed() -> Vec<&'static str> {
+/// Check which hooks are missing. Returns (missing_core, missing_extended).
+pub fn check_hooks_installed() -> (Vec<&'static str>, Vec<&'static str>) {
     let settings_path = get_settings_path();
 
     if !settings_path.exists() {
-        return HOOK_EVENTS.to_vec();
+        return (CORE_HOOK_EVENTS.to_vec(), EXTENDED_HOOK_EVENTS.to_vec());
     }
 
     let content = match fs::read_to_string(&settings_path) {
         Ok(c) => c,
-        Err(_) => return HOOK_EVENTS.to_vec(),
+        Err(_) => return (CORE_HOOK_EVENTS.to_vec(), EXTENDED_HOOK_EVENTS.to_vec()),
     };
 
     let settings: Value = match parse_settings(&content) {
         Ok(s) => s,
-        Err(_) => return HOOK_EVENTS.to_vec(),
+        Err(_) => return (CORE_HOOK_EVENTS.to_vec(), EXTENDED_HOOK_EVENTS.to_vec()),
     };
 
     let hooks = settings.get("hooks").cloned().unwrap_or_else(|| json!({}));
 
-    let mut missing = Vec::new();
-    for event in HOOK_EVENTS {
-        if let Some(hook_array) = hooks.get(*event) {
-            if !has_cckit_hook(hook_array) {
-                missing.push(*event);
-            }
-        } else {
-            missing.push(*event);
-        }
-    }
-    missing
+    let check_events = |events: &[&'static str]| -> Vec<&'static str> {
+        events
+            .iter()
+            .filter(|event| {
+                hooks
+                    .get(**event)
+                    .map_or(true, |hook_array| !has_cckit_hook(hook_array))
+            })
+            .copied()
+            .collect()
+    };
+
+    (
+        check_events(CORE_HOOK_EVENTS),
+        check_events(EXTENDED_HOOK_EVENTS),
+    )
 }
 
 /// Returns the list of hook events that cckit requires.
