@@ -2765,12 +2765,7 @@ fn parse_hook_notification(hook_json: &serde_json::Value, default_title: &str) -
 }
 
 fn build_stop_message(hook_json: &serde_json::Value) -> String {
-    let mut parts = Vec::new();
-
-    // Add cwd (shortened)
-    if let Some(cwd) = hook_json.get("cwd").and_then(|v| v.as_str()) {
-        parts.push(format!("📁 {}", shorten_path(cwd)));
-    }
+    let mut lines = Vec::new();
 
     // Get session info from storage
     let session_id = hook_json.get("session_id").and_then(|v| v.as_str());
@@ -2778,26 +2773,26 @@ fn build_stop_message(hook_json: &serde_json::Value) -> String {
         let storage = monitor::storage::Storage::new();
         let store = storage.load();
 
-        // Find session by exact session_id.
         if let Some(session) = store.sessions.values().find(|s| s.session_id == sid) {
-            // Duration
+            // Stats line: duration + prompts + tools
             let duration = chrono::Utc::now().signed_duration_since(session.created_at);
-            let duration_str = format_duration(duration);
-            parts.push(format!("⏱ {}", duration_str));
+            let mut stats = vec![format_duration(duration)];
+            if session.prompt_count > 0 {
+                stats.push(format!("{}p", session.prompt_count));
+            }
+            if session.tool_count > 0 {
+                stats.push(format!("{}t", session.tool_count));
+            }
+            lines.push(stats.join(" / "));
 
             // Last tool
             if let Some(ref tool) = session.last_tool {
-                let tool_info = if let Some(ref input) = session.last_tool_input {
-                    format!("[{}] {}", tool, input)
+                let tool_line = if let Some(ref input) = session.last_tool_input {
+                    format!("{} > {}", tool, input)
                 } else {
-                    format!("[{}]", tool)
+                    tool.clone()
                 };
-                parts.push(tool_info);
-            }
-
-            // PID
-            if let Some(pid) = session.pid {
-                parts.push(format!("pid:{}", pid));
+                lines.push(tool_line);
             }
         }
     }
@@ -2805,14 +2800,14 @@ fn build_stop_message(hook_json: &serde_json::Value) -> String {
     // Get last assistant message from transcript
     if let Some(transcript_path) = hook_json.get("transcript_path").and_then(|v| v.as_str()) {
         if let Some(msg) = get_last_assistant_message(transcript_path) {
-            parts.push(msg);
+            lines.push(msg);
         }
     }
 
-    if parts.is_empty() {
+    if lines.is_empty() {
         "Done".to_string()
     } else {
-        parts.join("\n")
+        lines.join("\n")
     }
 }
 

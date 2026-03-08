@@ -157,20 +157,20 @@ impl Default for NotifyOptions {
     }
 }
 
-const DEFAULT_WIDTH: CGFloat = 320.0;
-const MIN_HEIGHT: CGFloat = 60.0;
-const MAX_HEIGHT: CGFloat = 300.0;
-const DEFAULT_MARGIN: CGFloat = 8.0;
-const DEFAULT_OPACITY: CGFloat = 0.84;
-const DEFAULT_BGCOLOR: &str = "#333";
-const CORNER_RADIUS: CGFloat = 4.0;
-const PADDING: CGFloat = 8.0;
+const DEFAULT_WIDTH: CGFloat = 340.0;
+const MIN_HEIGHT: CGFloat = 68.0;
+const MAX_HEIGHT: CGFloat = 320.0;
+const DEFAULT_MARGIN: CGFloat = 10.0;
+const DEFAULT_OPACITY: CGFloat = 0.92;
+const DEFAULT_BGCOLOR: &str = "#1a1a2e";
+const CORNER_RADIUS: CGFloat = 8.0;
+const PADDING: CGFloat = 14.0;
 
-const TITLE_HEIGHT: CGFloat = 20.0;
-const SUBTITLE_HEIGHT: CGFloat = 16.0;
-const TITLE_FONT_SIZE: CGFloat = 14.0;
-const SUBTITLE_FONT_SIZE: CGFloat = 12.0;
-const MESSAGE_FONT_SIZE: CGFloat = 12.0;
+const TITLE_HEIGHT: CGFloat = 18.0;
+const SUBTITLE_HEIGHT: CGFloat = 15.0;
+const TITLE_FONT_SIZE: CGFloat = 11.5;
+const SUBTITLE_FONT_SIZE: CGFloat = 10.0;
+const MESSAGE_FONT_SIZE: CGFloat = 10.5;
 
 pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>> {
     let mtm = MainThreadMarker::new().ok_or("Must run on main thread")?;
@@ -261,12 +261,28 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
     // Calculate vertical positions
     let title_y = window_height - TITLE_HEIGHT - PADDING;
 
-    // Create title label
+    // Accent bar (left edge)
+    let accent_bar = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(3.0, window_height)),
+    );
+    accent_bar.setWantsLayer(true);
+    if let Some(layer) = accent_bar.layer() {
+        let accent_color = NSColor::colorWithRed_green_blue_alpha(0.424, 0.361, 0.906, 1.0); // #6C5CE7
+        layer.setBackgroundColor(Some(&accent_color.CGColor()));
+    }
+    content_view.addSubview(&accent_bar);
+
+    // Title label with accent color
     let title_rect = NSRect::new(
         NSPoint::new(PADDING, title_y),
         NSSize::new(content_width, TITLE_HEIGHT),
     );
     let title_label = create_label(mtm, &opts.title, title_rect, TITLE_FONT_SIZE, true);
+    let title_mono = NSFont::monospacedSystemFontOfSize_weight(TITLE_FONT_SIZE, 0.5); // medium weight
+    title_label.setFont(Some(&title_mono));
+    let title_color = NSColor::colorWithRed_green_blue_alpha(0.635, 0.608, 0.996, 1.0); // #A29BFE
+    title_label.setTextColor(Some(&title_color));
     content_view.addSubview(&title_label);
 
     // Create subtitle label if present
@@ -279,20 +295,47 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
             );
             let subtitle_label =
                 create_label(mtm, subtitle, subtitle_rect, SUBTITLE_FONT_SIZE, false);
+            let sub_color = NSColor::colorWithRed_green_blue_alpha(0.55, 0.58, 0.65, 1.0);
+            subtitle_label.setTextColor(Some(&sub_color));
             content_view.addSubview(&subtitle_label);
         }
     }
 
-    // Create message label - fill remaining space
-    let msg_top = if has_subtitle { subtitle_y } else { title_y } - PADDING;
+    // Separator line
+    let sep_y = if has_subtitle {
+        subtitle_y - 6.0
+    } else {
+        title_y - 6.0
+    };
+    let sep_view = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(PADDING, sep_y),
+            NSSize::new(content_width, 1.0),
+        ),
+    );
+    sep_view.setWantsLayer(true);
+    if let Some(layer) = sep_view.layer() {
+        let sep_color = NSColor::colorWithRed_green_blue_alpha(1.0, 1.0, 1.0, 0.08);
+        layer.setBackgroundColor(Some(&sep_color.CGColor()));
+    }
+    content_view.addSubview(&sep_view);
+
+    // Message label (monospace) - fill remaining space
+    let msg_top = sep_y - 6.0;
     let msg_y = PADDING;
-    let actual_msg_height = msg_top - msg_y;
+    let actual_msg_height = (msg_top - msg_y).max(TITLE_HEIGHT);
     let msg_rect = NSRect::new(
         NSPoint::new(PADDING, msg_y),
         NSSize::new(content_width, actual_msg_height),
     );
     let msg_label =
         create_label_with_wrap(mtm, &opts.message, msg_rect, MESSAGE_FONT_SIZE, false, true);
+    // Use monospace font for message
+    let mono_font = NSFont::monospacedSystemFontOfSize_weight(MESSAGE_FONT_SIZE, 0.0);
+    msg_label.setFont(Some(&mono_font));
+    let msg_color = NSColor::colorWithRed_green_blue_alpha(0.85, 0.87, 0.90, 1.0); // softer white
+    msg_label.setTextColor(Some(&msg_color));
     content_view.addSubview(&msg_label);
 
     // Set content view

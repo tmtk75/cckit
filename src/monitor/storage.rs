@@ -117,23 +117,40 @@ impl Storage {
         std::path::Path::new(tty).exists()
     }
 
-    /// Find sessions with non-existent TTYs
+    /// Check if a process is alive
+    fn pid_alive(pid: u32) -> bool {
+        // kill(pid, 0) checks existence without sending a signal
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    /// Check if a session is stale (TTY gone or process dead)
+    fn is_stale(session: &super::session::Session) -> bool {
+        if !Self::tty_exists(&session.tty) {
+            return true;
+        }
+        if let Some(pid) = session.pid {
+            return !Self::pid_alive(pid);
+        }
+        false
+    }
+
+    /// Find stale sessions (TTY gone or process dead)
     pub fn find_stale_sessions(&self) -> io::Result<Vec<(String, super::session::Session)>> {
         let store = self.load_internal()?;
         Ok(store
             .sessions
             .into_iter()
-            .filter(|(_, session)| !Self::tty_exists(&session.tty))
+            .filter(|(_, session)| Self::is_stale(session))
             .collect())
     }
 
-    /// Remove sessions with non-existent TTYs
+    /// Remove stale sessions (TTY gone or process dead)
     pub fn sync_sessions(&self) -> io::Result<Vec<String>> {
         self.with_lock(|store| {
             let stale_keys: Vec<String> = store
                 .sessions
                 .iter()
-                .filter(|(_, session)| !Self::tty_exists(&session.tty))
+                .filter(|(_, session)| Self::is_stale(session))
                 .map(|(key, _)| key.clone())
                 .collect();
 

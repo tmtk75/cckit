@@ -1,0 +1,6 @@
+{
+  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "cwd": "/path/to/my-project",
+  "hook_event_name": "Stop",
+  "transcript_path": "/path/to/.claude/projects/-path-to-my-project/00abc.jsonl"
+}
