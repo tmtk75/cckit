@@ -9,7 +9,8 @@ use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{ClassType, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
-    NSColor, NSEvent, NSFont, NSImage, NSScreen, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSColor, NSEvent, NSFont, NSImage, NSMenu, NSMenuItem, NSScreen, NSTextField, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
@@ -916,6 +917,72 @@ pub fn run_window_app() -> Result<(), Box<dyn std::error::Error>> {
     run_app(false, true)
 }
 
+fn setup_main_menu(mtm: MainThreadMarker, app: &NSApplication) {
+    unsafe {
+        let menu_bar = NSMenu::new(mtm);
+
+        // Application menu (first item is the app menu)
+        let app_menu_item = NSMenuItem::new(mtm);
+        let app_menu = NSMenu::new(mtm);
+
+        let hide = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Hide cckit"),
+            Some(sel!(hide:)),
+            &NSString::from_str("h"),
+        );
+        app_menu.addItem(&hide);
+
+        let hide_others = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Hide Others"),
+            Some(sel!(hideOtherApplications:)),
+            &NSString::from_str("h"),
+        );
+        let _: () = msg_send![&*hide_others, setKeyEquivalentModifierMask: 0x180000_usize]; // Cmd+Option
+        app_menu.addItem(&hide_others);
+
+        let show_all = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Show All"),
+            Some(sel!(unhideAllApplications:)),
+            &NSString::from_str(""),
+        );
+        app_menu.addItem(&show_all);
+
+        app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+        let quit = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Quit cckit"),
+            Some(sel!(terminate:)),
+            &NSString::from_str("q"),
+        );
+        app_menu.addItem(&quit);
+
+        app_menu_item.setSubmenu(Some(&app_menu));
+        menu_bar.addItem(&app_menu_item);
+
+        // Window menu
+        let window_menu_item = NSMenuItem::new(mtm);
+        let window_menu =
+            NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Window"));
+
+        let minimize = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Minimize"),
+            Some(sel!(performMiniaturize:)),
+            &NSString::from_str("m"),
+        );
+        window_menu.addItem(&minimize);
+
+        window_menu_item.setSubmenu(Some(&window_menu));
+        menu_bar.addItem(&window_menu_item);
+
+        app.setMainMenu(Some(&menu_bar));
+    }
+}
+
 fn setup_window(
     mtm: MainThreadMarker,
     app: &NSApplication,
@@ -1102,6 +1169,10 @@ fn setup_window(
 
     scroll_view.setDocumentView(Some(&doc_view));
     root.addSubview(&scroll_view);
+
+    // Set up standard application menu (provides Cmd+H hide, Cmd+Q quit, Cmd+M minimize)
+    setup_main_menu(mtm, app);
+
     window.makeKeyAndOrderFront(None);
     window.makeFirstResponder(Some(&doc_view));
 
