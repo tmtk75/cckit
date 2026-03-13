@@ -385,6 +385,23 @@ cckit app --window-only
 open dist/CCKit.app
 ```
 
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `↑↓` / `jk` | Navigate sessions |
+| `⏎` | Focus selected session's terminal |
+| `1-9` | Jump to session by number |
+| `f` | Toggle auto-focus for selected project (or all if none selected) |
+| `Esc` | Deselect and hide window |
+| `Cmd+H` | Hide window |
+| `Cmd+Opt+H` | Hide other apps |
+| `Cmd+M` | Minimize window |
+| `Cmd+Q` | Quit |
+| `Cmd+,` | Open config file |
+| `Cmd+Shift+,` | Reload config |
+| `q` | Quit |
+
 ## How it works
 
 ### session command

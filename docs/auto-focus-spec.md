@@ -1,37 +1,37 @@
-# ウィンドウ前面表示（Auto-Focus）要求仕様
+# Auto-Focus Specification
 
-## 目的
+## Purpose
 
-Claudeがユーザー入力を必要とするとき、cckit appウィンドウを自動的に前面に出す。
+Automatically bring the cckit app window to the front when Claude requires user input.
 
-## トリガーパターン（3種類）
+## Trigger Patterns (3 types)
 
-| # | パターン | 状態遷移 | デフォルト遅延 | 設定キー |
-|---|---------|---------|-------------|---------|
-| 1 | **パーミッション要求** | → `AwaitingApproval` | **3秒** | 個別設定可 |
-| 2 | **AskUserQuestion** | （検知方法未定） | **即座（0秒）** | 個別設定可 |
-| 3 | **タスク完了（入力待ち）** | `Running`/`AwaitingApproval` → `WaitingInput` | **3秒** | 個別設定可 |
+| # | Pattern | State Transition | Default Delay | Configurable |
+|---|---------|-----------------|---------------|-------------|
+| 1 | **Permission request** | → `AwaitingApproval` | **3s** | Yes |
+| 2 | **AskUserQuestion** | (detection method TBD) | **0s (immediate)** | Yes |
+| 3 | **Task complete (waiting for input)** | `Running`/`AwaitingApproval` → `WaitingInput` | **3s** | Yes |
 
-### 遅延の意図
+### Delay Rationale
 
-- **パーミッション要求（3秒）**: 自動承認で通過するケースが多いため、待ってから表示
-- **AskUserQuestion（0秒）**: Claudeが明示的に質問しており、即座に通知すべき
-- **タスク完了（3秒）**: 短時間タスクで頻繁にウィンドウが前面に来るのを防ぐ
+- **Permission request (3s)**: Many requests are auto-approved, so wait before bringing window forward
+- **AskUserQuestion (0s)**: Claude is explicitly asking a question; notify immediately
+- **Task complete (3s)**: Prevent frequent window activation for short-lived tasks
 
-## 制御
+## Controls
 
-- **粒度**: プロジェクト単位のON/OFF（現状維持）
-- **遅延設定**: パターンごとに個別設定可能（設定ファイルで管理）
-- **通知方法**: ウィンドウ前面表示のみ（サウンド・macOS通知は不要）
+- **Granularity**: Per-project ON/OFF toggle
+- **Delay settings**: Configurable per pattern (managed via config file)
+- **Notification method**: Window bring-to-front only (no sound or macOS notifications)
 
-## 未実装事項（後回し）
+## Not Yet Implemented (deferred)
 
-- AskUserQuestionの検知方法（現在のHookイベントでは検知不可）
-  - 将来的にClaude Code側のHook拡張、またはstdout監視等で対応検討
+- AskUserQuestion detection (not detectable with current Hook events)
+  - Future consideration: Claude Code Hook extensions or stdout monitoring
 
-## 現在の実装状況（参考）
+## Current Implementation (reference)
 
-- `bring_window_to_front()`: `window.rs` L816-829 (`orderFrontRegardless` + `activateIgnoringOtherApps`)
-- タイマー: 2秒ごとに `update_sessions_and_redraw()` で状態変化を検出
-- AF無効化ストレージ: `~/.local/share/cckit/af_disabled.json`
-- UIトグル: `f` キー（行選択時は個別、未選択時は一括）
+- `bring_window_to_front()`: `window.rs` (`orderFrontRegardless` + `activateIgnoringOtherApps`)
+- Timer: state change detection via `update_sessions_and_redraw()` every 2 seconds
+- AF disabled storage: `~/.local/share/cckit/af_disabled.json`
+- UI toggle: `f` key (per-project when a row is selected, bulk toggle when none selected)
