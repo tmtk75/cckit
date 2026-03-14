@@ -338,6 +338,19 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
         open_config_file();
         return;
     }
+    // Cmd+0 → fit window height to content
+    if cmd && char_str == "0" {
+        fit_window_to_content();
+        return;
+    }
+    // Cmd+1-9 → move window (numpad layout: 7=top-left, 8=top-center, 9=top-right, ...)
+    if cmd && char_str.len() == 1 && char_str.as_bytes()[0].is_ascii_digit() {
+        let n = char_str.as_bytes()[0] - b'0';
+        if (1..=9).contains(&n) {
+            move_window_to_position(n);
+            return;
+        }
+    }
 
     let session_count = SESSION_LIST.lock().unwrap().len();
     let current = *SELECTED_INDEX.lock().unwrap();
@@ -719,6 +732,24 @@ extern "C" fn window_will_close(_this: *mut AnyObject, _sel: Sel, _notification:
     app.terminate(None);
 }
 
+extern "C" fn window_did_move(_this: *mut AnyObject, _sel: Sel, _notification: *mut AnyObject) {
+    save_window_frame();
+}
+
+extern "C" fn window_did_resize(_this: *mut AnyObject, _sel: Sel, _notification: *mut AnyObject) {
+    save_window_frame();
+}
+
+fn save_window_frame() {
+    let ptr = *WINDOW_PTR.lock().unwrap();
+    if let Some(ptr) = ptr {
+        let window = unsafe { &*(ptr as *const NSWindow) };
+        let f = window.frame();
+        let storage = Storage::new();
+        let _ = storage.save_window_frame((f.origin.x, f.origin.y, f.size.width, f.size.height));
+    }
+}
+
 fn get_delegate_class() -> &'static AnyClass {
     REGISTER_DELEGATE_CLASS.call_once(|| {
         let superclass = NSObject::class();
@@ -728,6 +759,14 @@ fn get_delegate_class() -> &'static AnyClass {
             builder.add_method(
                 sel!(windowWillClose:),
                 window_will_close as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(windowDidMove:),
+                window_did_move as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(windowDidResize:),
+                window_did_resize as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
         }
 
@@ -838,6 +877,97 @@ fn bounce_dock_icon() {
             let _: isize = msg_send![&*app, requestUserAttention: 10_isize];
         }
     }
+}
+
+/// Move window to a grid position (numpad layout: 1=bottom-left .. 9=top-right)
+fn move_window_to_position(position: u8) {
+    let ptr = *WINDOW_PTR.lock().unwrap();
+    let ptr = match ptr {
+        Some(p) => p,
+        None => return,
+    };
+    let window = unsafe { &*(ptr as *const NSWindow) };
+    let mtm = match MainThreadMarker::new() {
+        Some(m) => m,
+        None => return,
+    };
+    let screen = match NSScreen::mainScreen(mtm) {
+        Some(s) => s,
+        None => return,
+    };
+    let sf = screen.visibleFrame();
+    let win_frame = window.frame();
+    let w = win_frame.size.width;
+    let h = win_frame.size.height;
+
+    let (col, row) = match position {
+        1 => (0, 2), // top-left
+        2 => (1, 2), // top-center
+        3 => (2, 2), // top-right
+        4 => (0, 1), // middle-left
+        5 => (1, 1), // center
+        6 => (2, 1), // middle-right
+        7 => (0, 0), // bottom-left
+        8 => (1, 0), // bottom-center
+        9 => (2, 0), // bottom-right
+        _ => return,
+    };
+
+    let margin = 20.0;
+    let x = match col {
+        0 => sf.origin.x + margin,
+        1 => sf.origin.x + (sf.size.width - w) / 2.0,
+        _ => sf.origin.x + sf.size.width - w - margin,
+    };
+    let y = match row {
+        0 => sf.origin.y + margin,
+        1 => sf.origin.y + (sf.size.height - h) / 2.0,
+        _ => sf.origin.y + sf.size.height - h - margin,
+    };
+
+    let new_frame = NSRect::new(NSPoint::new(x, y), win_frame.size);
+    window.setFrame_display(new_frame, true);
+    save_window_frame();
+}
+
+/// Resize window height to fit content
+fn fit_window_to_content() {
+    let ptr = *WINDOW_PTR.lock().unwrap();
+    let ptr = match ptr {
+        Some(p) => p,
+        None => return,
+    };
+    let window = unsafe { &*(ptr as *const NSWindow) };
+    let mtm = match MainThreadMarker::new() {
+        Some(m) => m,
+        None => return,
+    };
+
+    let screen = match NSScreen::mainScreen(mtm) {
+        Some(s) => s,
+        None => return,
+    };
+    let sf = screen.visibleFrame();
+    let max_h = sf.size.height * 0.8;
+
+    // Probe titlebar height
+    let probe_style = NSWindowStyleMask::Titled;
+    let probe = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WINDOW_WIDTH, 100.0));
+    let probe_frame = NSWindow::frameRectForContentRect_styleMask(probe, probe_style, mtm);
+    let titlebar_h = probe_frame.size.height - 100.0;
+
+    let content_h = calculate_content_height();
+    let new_content_h = (content_h + titlebar_h).clamp(MIN_WINDOW_HEIGHT, max_h);
+
+    let old_frame = window.frame();
+    // Keep top edge fixed: adjust origin.y by height difference
+    let dy = new_content_h - old_frame.size.height;
+    let new_frame = NSRect::new(
+        NSPoint::new(old_frame.origin.x, old_frame.origin.y - dy),
+        NSSize::new(old_frame.size.width, new_content_h),
+    );
+    window.setFrame_display_animate(new_frame, true, true);
+    save_window_frame();
 }
 
 fn calculate_content_height() -> CGFloat {
@@ -1008,24 +1138,51 @@ fn setup_window(
 
     let content_rect_h = (needed_h + titlebar_h).clamp(MIN_WINDOW_HEIGHT, max_window_h);
 
-    // Frame height for centering on screen
-    let frame_probe = NSRect::new(
-        NSPoint::new(0.0, 0.0),
-        NSSize::new(WINDOW_WIDTH, content_rect_h),
-    );
-    let frame_rect = NSWindow::frameRectForContentRect_styleMask(frame_probe, style_mask, mtm);
-    let frame_h = frame_rect.size.height;
-
-    let x = sf.origin.x + (sf.size.width - WINDOW_WIDTH) / 2.0;
-    let y = sf.origin.y + (sf.size.height - frame_h) / 2.0;
+    // Restore saved window frame, or center on screen
+    let storage = Storage::new();
+    let (x, y, win_w, win_h) = if let Some((sx, sy, sw, sh)) = storage.load_window_frame() {
+        // Validate saved frame is within current screen bounds
+        if sx >= sf.origin.x - 100.0
+            && sx <= sf.origin.x + sf.size.width
+            && sy >= sf.origin.y - 100.0
+            && sy <= sf.origin.y + sf.size.height
+            && sw >= 200.0
+            && sh >= MIN_WINDOW_HEIGHT
+        {
+            (sx, sy, sw, sh)
+        } else {
+            let frame_probe = NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(WINDOW_WIDTH, content_rect_h),
+            );
+            let frame_rect =
+                NSWindow::frameRectForContentRect_styleMask(frame_probe, style_mask, mtm);
+            (
+                sf.origin.x + (sf.size.width - WINDOW_WIDTH) / 2.0,
+                sf.origin.y + (sf.size.height - frame_rect.size.height) / 2.0,
+                WINDOW_WIDTH,
+                content_rect_h,
+            )
+        }
+    } else {
+        let frame_probe = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(WINDOW_WIDTH, content_rect_h),
+        );
+        let frame_rect =
+            NSWindow::frameRectForContentRect_styleMask(frame_probe, style_mask, mtm);
+        (
+            sf.origin.x + (sf.size.width - WINDOW_WIDTH) / 2.0,
+            sf.origin.y + (sf.size.height - frame_rect.size.height) / 2.0,
+            WINDOW_WIDTH,
+            content_rect_h,
+        )
+    };
 
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            NSRect::new(
-                NSPoint::new(x, y),
-                NSSize::new(WINDOW_WIDTH, content_rect_h),
-            ),
+            NSRect::new(NSPoint::new(x, y), NSSize::new(win_w, win_h)),
             style_mask,
             NSBackingStoreType(2),
             false,

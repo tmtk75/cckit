@@ -10,6 +10,7 @@ const SESSIONS_FILE: &str = "sessions.json";
 const LOCK_FILE: &str = "sessions.lock";
 const TUI_STATE_FILE: &str = "tui_state.json";
 const AF_CONFIG_FILE: &str = "af_disabled.json";
+const WINDOW_FRAME_FILE: &str = "window_frame.json";
 
 fn get_data_dir() -> PathBuf {
     dirs::data_local_dir()
@@ -253,6 +254,38 @@ impl Storage {
         }
 
         fs::rename(&tmp_path, &af_path)?;
+        Ok(())
+    }
+
+    /// Load saved window frame (x, y, width, height)
+    pub fn load_window_frame(&self) -> Option<(f64, f64, f64, f64)> {
+        let path = self.path.parent()?.join(WINDOW_FRAME_FILE);
+        let content = fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// Save window frame (atomic write via tmp + rename)
+    pub fn save_window_frame(&self, frame: (f64, f64, f64, f64)) -> io::Result<()> {
+        self.ensure_dir()?;
+        let dir = self
+            .path
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid data path"))?;
+        let path = dir.join(WINDOW_FRAME_FILE);
+        let tmp_path = dir.join(format!("{}.tmp.{}", WINDOW_FRAME_FILE, std::process::id()));
+        let content = serde_json::to_string(&frame)?;
+
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+        }
+
+        fs::rename(&tmp_path, &path)?;
         Ok(())
     }
 }
