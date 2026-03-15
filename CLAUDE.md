@@ -8,6 +8,8 @@ cckit (Claude Code Kit) is a Rust CLI toolkit for managing Claude Code environme
 
 ## Build & Development Commands
 
+**Prerequisites:** `mise` (manages Rust toolchain and tasks — see `mise.toml`)
+
 ```bash
 # Build
 cargo build --release --bins    # or: mise run build
@@ -21,6 +23,10 @@ cargo fmt --check
 
 # Install locally
 cargo install --path .          # or: mise run install
+
+# Run during development
+cargo run -- session ls          # list sessions
+cargo run -- app                 # run macOS window app
 
 # macOS app bundle
 mise run build-app              # runs scripts/macos/build_app.sh
@@ -52,6 +58,7 @@ mise run build-app              # runs scripts/macos/build_app.sh
 
 ## Key Conventions
 
+- **CI**: GitHub Actions runs `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check` on all branches. Release workflow triggers on `v*` tags.
 - **Rust edition 2024**, targets macOS primarily (conditional deps for macOS-only features)
 - **Version**: embedded via `build.rs` running `git describe --always --dirty`
 - **Data directory**: `~/Library/Application Support/cckit/` (macOS) or `~/.local/share/cckit/` (Linux)
