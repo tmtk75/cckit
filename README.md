@@ -352,6 +352,8 @@ disable_paths = [
 
 ## Mac App (macOS)
 
+<img src="assets/app.png" width="77%">
+
 CCKit can run as a standalone macOS app with a session window and menubar icon.
 
 ### Why?
