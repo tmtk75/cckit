@@ -251,7 +251,7 @@ fn run_tui_core(
                     }
 
                     match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
+                        KeyCode::Esc => {
                             app.should_quit = true;
                         }
                         KeyCode::Up | KeyCode::Char('k') => app.select_previous(),

@@ -424,12 +424,6 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
                 }
                 persist_af_disabled();
             }
-            "q" => {
-                let mtm = MainThreadMarker::new().unwrap();
-                let app = NSApplication::sharedApplication(mtm);
-                app.terminate(None);
-                return;
-            }
             c if c.len() == 1 && c.as_bytes()[0].is_ascii_digit() => {
                 let n = (c.as_bytes()[0] - b'0') as usize;
                 if n >= 1 && n <= session_count {
@@ -1258,7 +1252,7 @@ fn setup_window(
     );
     let hint_label = create_mono_label(
         mtm,
-        " \u{2191}\u{2193}/jk navigate   \u{23CE} focus   f autofocus   1-9 jump   esc hide   q quit",
+        " \u{2191}\u{2193}/jk navigate   \u{23CE} focus   f autofocus   1-9 jump   esc hide",
         hint_rect,
         &color_dim(),
         HINT_FONT_SIZE,

@@ -402,7 +402,6 @@ open dist/CCKit.app
 | `Cmd+Q` | Quit |
 | `Cmd+,` | Open config file |
 | `Cmd+Shift+,` | Reload config |
-| `q` | Quit |
 
 ## How it works
 
