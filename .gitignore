@@ -3,3 +3,5 @@
 /.claude/settings.local.json
 ccview.toml
 .DS_Store
+.claude/skill-promote-backup
+

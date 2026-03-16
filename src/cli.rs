@@ -258,6 +258,21 @@ enum SkillCommands {
         #[arg(long, help = "Overwrite existing skill without confirmation")]
         force: bool,
     },
+
+    /// Promote a project skill to user scope (~/.claude/skills/)
+    Promote {
+        #[arg(short, long, help = "Filter skills by name pattern")]
+        filter: Option<String>,
+
+        #[arg(short, long, help = "Skill name (skip interactive selection)")]
+        name: Option<String>,
+
+        #[arg(long, help = "Skip confirmation prompts")]
+        force: bool,
+
+        #[arg(long, help = "Show what would be done without making changes")]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -320,7 +335,7 @@ struct McpServerInfo {
     source: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SkillInfo {
     name: String,
     description: Option<String>,
@@ -405,7 +420,7 @@ fn scan_skills(dir: &Path) -> Vec<SkillInfo> {
     skills
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SkillSource {
     project_display: String,
     skill_dir: std::path::PathBuf,
@@ -749,6 +764,407 @@ fn skill_copy_command(
             std::process::exit(1);
         }
     }
+}
+
+/// Collect project-only skills (excluding global ~/.claude/skills/).
+/// Groups by skill name and returns (unique_name, Vec<SkillSource>).
+fn collect_project_skills_grouped() -> Vec<(String, Vec<SkillSource>)> {
+    use std::collections::BTreeMap;
+
+    let home = dirs::home_dir().expect("Could not find home directory");
+    let mut all_skills = Vec::new();
+
+    if let Ok(config) = load_claude_config() {
+        if let Some(projects) = config.projects {
+            for project_path in projects.keys() {
+                let claude_dir = Path::new(project_path).join(".claude");
+                let display = shorten_path(project_path);
+                for mut skill in scan_skills_with_paths(&claude_dir) {
+                    skill.project_display = display.clone();
+                    all_skills.push(skill);
+                }
+            }
+        }
+    }
+
+    // Also include global skills for diff comparison (marked specially)
+    let global_claude = home.join(".claude");
+    for mut skill in scan_skills_with_paths(&global_claude) {
+        skill.project_display = "~/.claude (global)".to_string();
+        all_skills.push(skill);
+    }
+
+    // Group by dir_name (canonical skill identifier)
+    let mut groups: BTreeMap<String, Vec<SkillSource>> = BTreeMap::new();
+    for skill in all_skills {
+        groups
+            .entry(skill.dir_name.clone())
+            .or_default()
+            .push(skill);
+    }
+
+    // Sort: skills in multiple projects first, then alphabetical
+    let mut sorted: Vec<_> = groups.into_iter().collect();
+    sorted.sort_by(|a, b| {
+        let a_project_count = a.1.iter().filter(|s| s.project_display != "~/.claude (global)").count();
+        let b_project_count = b.1.iter().filter(|s| s.project_display != "~/.claude (global)").count();
+        b_project_count.cmp(&a_project_count).then(a.0.cmp(&b.0))
+    });
+    sorted
+}
+
+/// Check if a skill directory is an npx-installed skill (symlink to ~/.agents/ or in .skill-lock.json).
+fn check_npx_installed(skill_dir: &Path, dir_name: &str) -> Option<String> {
+    // Check if it's a symlink pointing to ~/.agents/
+    if let Ok(target) = fs::read_link(skill_dir) {
+        let target_str = target.to_string_lossy();
+        if target_str.contains(".agents/") || target_str.contains("/.agents/") {
+            return Some(format!("claude /uninstall-skill {}", dir_name));
+        }
+    }
+
+    // Check ~/.agents/.skill-lock.json
+    if let Some(home) = dirs::home_dir() {
+        let lock_file = home.join(".agents").join(".skill-lock.json");
+        if let Ok(content) = fs::read_to_string(&lock_file) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(skills) = json.get("skills").and_then(|s| s.as_object()) {
+                    if skills.contains_key(dir_name) {
+                        return Some(format!("claude /uninstall-skill {}", dir_name));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Compare skill directories and return diff summary. Returns None if identical.
+fn diff_skill_dirs(dirs: &[&Path]) -> Option<String> {
+    if dirs.len() < 2 {
+        return None;
+    }
+
+    let base = dirs[0];
+    let mut diffs = Vec::new();
+
+    for other in &dirs[1..] {
+        let output = Command::new("diff")
+            .args(["-rq"])
+            .arg(base)
+            .arg(other)
+            .output();
+
+        if let Ok(output) = output {
+            if !output.status.success() {
+                let diff_text = String::from_utf8_lossy(&output.stdout);
+                for line in diff_text.lines() {
+                    if !diffs.contains(&line.to_string()) {
+                        diffs.push(line.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if diffs.is_empty() {
+        None
+    } else {
+        Some(diffs.join("\n"))
+    }
+}
+
+/// Create a slug from a project display path (e.g., "~/proj-a" -> "proj-a")
+fn project_slug(display: &str) -> String {
+    display
+        .trim_start_matches("~/")
+        .trim_start_matches("~/.claude (global)")
+        .replace('/', "--")
+        .replace(' ', "-")
+}
+
+fn skill_promote_command(
+    filter: Option<String>,
+    name: Option<String>,
+    force: bool,
+    dry_run: bool,
+) {
+    use std::io::{self, BufRead, Write};
+
+    let home = dirs::home_dir().expect("Could not find home directory");
+    let global_skills_dir = home.join(".claude").join("skills");
+
+    let mut groups = collect_project_skills_grouped();
+
+    // Apply filter
+    if let Some(ref pattern) = filter {
+        groups.retain(|(name, _)| name.contains(pattern.as_str()));
+    }
+
+    // For selection, only show skills that have at least one project-level copy
+    groups.retain(|(_, sources)| {
+        sources.iter().any(|s| s.project_display != "~/.claude (global)")
+    });
+
+    if groups.is_empty() {
+        println!("{}", "No project-level skills found to promote.".yellow());
+        return;
+    }
+
+    // Select skill
+    let selected_name = if let Some(ref skill_name) = name {
+        match groups.iter().position(|(n, _)| n == skill_name) {
+            Some(_) => skill_name.clone(),
+            None => {
+                eprintln!("{}: skill '{}' not found in any project", "Error".red(), skill_name);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Build a flat list for selection
+        let flat: Vec<SkillSource> = groups
+            .iter()
+            .map(|(_, sources)| {
+                let project_count = sources.iter().filter(|s| s.project_display != "~/.claude (global)").count();
+                let has_global = sources.iter().any(|s| s.project_display == "~/.claude (global)");
+                let mut representative = sources.iter()
+                    .find(|s| s.project_display != "~/.claude (global)")
+                    .unwrap()
+                    .clone();
+                // Annotate display with count info
+                let suffix = if project_count > 1 {
+                    format!("{} projects", project_count)
+                } else {
+                    sources.iter()
+                        .find(|s| s.project_display != "~/.claude (global)")
+                        .map(|s| s.project_display.clone())
+                        .unwrap_or_default()
+                };
+                let global_marker = if has_global { " +global" } else { "" };
+                representative.project_display = format!("{}{}", suffix, global_marker);
+                representative
+            })
+            .collect();
+
+        match select_skill(&flat, filter.as_deref()) {
+            Some(idx) => flat[idx].dir_name.clone(),
+            None => {
+                println!("Cancelled.");
+                return;
+            }
+        }
+    };
+
+    let (_, sources) = groups.iter().find(|(n, _)| *n == selected_name).unwrap();
+
+    // Separate project sources and global
+    let project_sources: Vec<&SkillSource> = sources.iter()
+        .filter(|s| s.project_display != "~/.claude (global)")
+        .collect();
+    let global_source: Option<&SkillSource> = sources.iter()
+        .find(|s| s.project_display == "~/.claude (global)");
+
+    let skill_display_name = &sources[0].info.name;
+
+    println!("\n{} '{}'", "Promoting skill:".bold(), skill_display_name.green());
+    println!("  Found in {} project(s){}",
+        project_sources.len(),
+        if global_source.is_some() { " + global" } else { "" }
+    );
+
+    // --- Step 1: Diff check ---
+    let all_dirs: Vec<&Path> = sources.iter().map(|s| s.skill_dir.as_path()).collect();
+    let has_diff = diff_skill_dirs(&all_dirs);
+
+    let chosen_source = if let Some(ref diff_summary) = has_diff {
+        println!("\n{}", "Differences detected:".yellow().bold());
+        for (i, src) in sources.iter().enumerate() {
+            // Get last modified time of SKILL.md
+            let modified = fs::metadata(src.skill_dir.join("SKILL.md"))
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|t| {
+                    let dt: chrono::DateTime<chrono::Local> = t.into();
+                    dt.format("%Y-%m-%d %H:%M").to_string()
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            println!("  [{}] {}  (modified: {})", i + 1, shorten_path(&src.skill_dir.to_string_lossy()), modified);
+        }
+        println!("\n{}", "File differences:".dimmed());
+        for line in diff_summary.lines().take(20) {
+            println!("  {}", line.dimmed());
+        }
+        if diff_summary.lines().count() > 20 {
+            println!("  {} ...", "(truncated)".dimmed());
+        }
+
+        if dry_run {
+            // In dry-run, just show the diff info and exit
+            println!("\n{}", "[dry-run] Run without --dry-run to select a version and promote.".cyan().bold());
+            return;
+        } else if force {
+            // With --force, pick the most recently modified
+            sources.iter()
+                .max_by_key(|s| {
+                    fs::metadata(s.skill_dir.join("SKILL.md"))
+                        .and_then(|m| m.modified())
+                        .ok()
+                })
+                .unwrap()
+        } else {
+            println!();
+            print!("{}", format!("Which version to promote? [1-{}]: ", sources.len()).bold());
+            io::stdout().flush().ok();
+
+            let stdin = io::stdin();
+            let line = stdin.lock().lines().next()
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
+            let num: usize = match line.trim().parse() {
+                Ok(n) if n >= 1 && n <= sources.len() => n,
+                _ => {
+                    println!("Cancelled.");
+                    return;
+                }
+            };
+            &sources[num - 1]
+        }
+    } else {
+        println!("  {}", "All copies are identical.".dimmed());
+        project_sources[0]
+    };
+
+    // --- Step 2: npx detection ---
+    let mut npx_warnings = Vec::new();
+    for src in sources.iter() {
+        if let Some(uninstall_cmd) = check_npx_installed(&src.skill_dir, &selected_name) {
+            npx_warnings.push((src.project_display.clone(), uninstall_cmd));
+        }
+    }
+    if !npx_warnings.is_empty() {
+        println!("\n{}", "Note: This skill was installed via npx/agents in some locations:".yellow());
+        for (project, cmd) in &npx_warnings {
+            println!("  {} → to uninstall: {}", project, cmd.cyan());
+        }
+    }
+
+    // --- Step 3: Determine destination ---
+    let dest_dir = global_skills_dir.join(&selected_name);
+
+    if dry_run {
+        println!("\n{}", "[dry-run] Would perform:".cyan().bold());
+        println!("  Copy: {} → {}", shorten_path(&chosen_source.skill_dir.to_string_lossy()), shorten_path(&dest_dir.to_string_lossy()));
+        for src in &project_sources {
+            if src.skill_dir != chosen_source.skill_dir || global_source.is_none() {
+                let action = if fs::read_link(&src.skill_dir).is_ok() { "Backup & unlink" } else { "Backup & remove" };
+                println!("  {}: {}", action, shorten_path(&src.skill_dir.to_string_lossy()));
+            }
+        }
+        return;
+    }
+
+    // --- Step 4: Confirm ---
+    if !force {
+        println!();
+        println!("  Source: {}", shorten_path(&chosen_source.skill_dir.to_string_lossy()));
+        println!("  Dest:   {}", shorten_path(&dest_dir.to_string_lossy()));
+        print!("{}", "Proceed? (y/N): ".bold());
+        io::stdout().flush().ok();
+
+        let stdin = io::stdin();
+        let line = stdin.lock().lines().next()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
+        if line.trim().to_lowercase() != "y" {
+            println!("Cancelled.");
+            return;
+        }
+    }
+
+    // --- Step 5: Backup project copies ---
+    let cwd = std::env::current_dir().expect("Could not determine current directory");
+    let timestamp = chrono::Local::now().format("%Y%m%dT%H%M%S").to_string();
+    let backup_base = cwd.join(".claude").join("skill-promote-backup").join(&timestamp);
+
+    for src in &project_sources {
+        let slug = if project_slug(&src.project_display).is_empty() {
+            "unknown".to_string()
+        } else {
+            project_slug(&src.project_display)
+        };
+        let backup_dir = backup_base.join(format!("{}--{}", slug, selected_name));
+        println!("  Backing up {} → {}", shorten_path(&src.skill_dir.to_string_lossy()).dimmed(), shorten_path(&backup_dir.to_string_lossy()).dimmed());
+        if let Err(e) = copy_dir_recursive(&src.skill_dir, &backup_dir) {
+            eprintln!("{}: backup failed for {}: {}", "Error".red(), src.project_display, e);
+            std::process::exit(1);
+        }
+    }
+
+    // --- Step 6: Copy to global ---
+    if dest_dir.exists() {
+        // Backup existing global too
+        let backup_dir = backup_base.join(format!("global--{}", selected_name));
+        println!("  Backing up existing global → {}", shorten_path(&backup_dir.to_string_lossy()).dimmed());
+        if let Err(e) = copy_dir_recursive(&dest_dir, &backup_dir) {
+            eprintln!("{}: backup failed for global: {}", "Error".red(), e);
+            std::process::exit(1);
+        }
+        // Remove old global
+        let _ = fs::remove_dir_all(&dest_dir);
+    }
+
+    println!("  Copying to {} ...", shorten_path(&dest_dir.to_string_lossy()));
+    match copy_dir_recursive(&chosen_source.skill_dir, &dest_dir) {
+        Ok(count) => {
+            println!("{} Promoted {} files to {}", "Done!".green().bold(), count, shorten_path(&dest_dir.to_string_lossy()));
+        }
+        Err(e) => {
+            eprintln!("{}: {}", "Error copying skill".red(), e);
+            std::process::exit(1);
+        }
+    }
+
+    // --- Step 7: Remove project copies ---
+    let removable: Vec<&&SkillSource> = project_sources.iter()
+        .filter(|s| s.skill_dir != dest_dir)
+        .collect();
+
+    if !removable.is_empty() {
+        if !force {
+            println!("\n  Remove {} project-level copies?", removable.len());
+            for src in &removable {
+                println!("    - {}", shorten_path(&src.skill_dir.to_string_lossy()));
+            }
+            print!("{}", "Remove? (y/N): ".bold());
+            io::stdout().flush().ok();
+
+            let stdin = io::stdin();
+            let line = stdin.lock().lines().next()
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
+            if line.trim().to_lowercase() != "y" {
+                println!("Skipped removal. Backups at: {}", shorten_path(&backup_base.to_string_lossy()));
+                return;
+            }
+        }
+
+        for src in &removable {
+            let is_symlink = fs::read_link(&src.skill_dir).is_ok();
+            let result = if is_symlink {
+                // Symlink: remove the link itself (doesn't touch the target)
+                fs::remove_file(&src.skill_dir)
+            } else {
+                fs::remove_dir_all(&src.skill_dir)
+            };
+            let kind = if is_symlink { "Unlinked" } else { "Removed" };
+            match result {
+                Ok(()) => println!("  {} {}", format!("{}:", kind).red(), shorten_path(&src.skill_dir.to_string_lossy())),
+                Err(e) => eprintln!("  {}: could not remove {}: {}", "Warning".yellow(), shorten_path(&src.skill_dir.to_string_lossy()), e),
+            }
+        }
+    }
+
+    println!("\nBackups saved to: {}", shorten_path(&backup_base.to_string_lossy()).cyan());
 }
 
 fn scan_agents(dir: &Path) -> Vec<AgentInfo> {
@@ -2945,6 +3361,14 @@ pub fn run() {
                 force,
             } => {
                 skill_copy_command(filter, from, name, force);
+            }
+            SkillCommands::Promote {
+                filter,
+                name,
+                force,
+                dry_run,
+            } => {
+                skill_promote_command(filter, name, force, dry_run);
             }
         },
         Some(Commands::Mcp { command }) => match command {
