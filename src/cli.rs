@@ -677,24 +677,24 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<u64, Box<dyn std::error:
     Ok(copied)
 }
 
-fn detect_skill_origin(skill_dir: &Path) -> &'static str {
+fn detect_skill_origin(skill_dir: &Path) -> String {
     // Check if symlink (marketplace / npx skills add)
     if skill_dir.is_symlink() {
         if let Ok(target) = fs::read_link(skill_dir) {
             let target_str = target.to_string_lossy();
             if target_str.contains(".agents/skills") {
-                return "marketplace";
+                return "marketplace".to_string();
             }
         }
-        return "symlink";
+        return "symlink".to_string();
     }
 
     // Check for .claude-plugin/plugin.json (standalone installed skill)
     if skill_dir.join(".claude-plugin/plugin.json").exists() {
-        return "installed";
+        return "installed".to_string();
     }
 
-    // Check frontmatter for author: personal
+    // Check frontmatter for author field
     let skill_file = skill_dir.join("SKILL.md");
     if let Ok(content) = fs::read_to_string(&skill_file)
         && content.starts_with("---")
@@ -704,14 +704,14 @@ fn detect_skill_origin(skill_dir: &Path) -> &'static str {
             let fm = parts[1];
             for line in fm.lines() {
                 let line = line.trim();
-                if line.starts_with("author:") && line.contains("personal") {
-                    return "personal";
+                if let Some(value) = line.strip_prefix("author:") {
+                    return value.trim().to_string();
                 }
             }
         }
     }
 
-    "custom"
+    "no author".to_string()
 }
 
 fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
@@ -787,10 +787,11 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
         let project_claude = cwd.join(".claude");
         if project_claude.join("skills").exists() {
             for skill_source in scan_skills_with_paths(&project_claude) {
+                let origin = detect_skill_origin(&skill_source.skill_dir);
                 entries.push(SkillEntry {
                     name: skill_source.info.name,
                     description: skill_source.info.description,
-                    origin: "custom".to_string(),
+                    origin,
                     scope: "project".to_string(),
                     path: shorten_path(&skill_source.skill_dir.to_string_lossy()),
                 });
@@ -843,11 +844,19 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
             })
             .unwrap_or_default();
 
+        let origin_colored = match entry.origin.as_str() {
+            "personal" => format!("({})", entry.origin).green(),
+            "marketplace" => format!("({})", entry.origin).bright_blue(),
+            "installed" => format!("({})", entry.origin).cyan(),
+            "plugin" => format!("({})", entry.origin).magenta(),
+            "no author" => format!("({})", entry.origin).dimmed(),
+            _ => format!("({})", entry.origin).yellow(),
+        };
         println!(
             "  {} {:<width_name$} {:<width_origin$} {} {}",
             "-".dimmed(),
             entry.name.bright_cyan(),
-            format!("({})", entry.origin).dimmed(),
+            origin_colored,
             desc.dimmed(),
             format!("[{}]", entry.path).dimmed(),
             width_name = max_name,
