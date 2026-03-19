@@ -244,6 +244,15 @@ enum SessionCommands {
 
 #[derive(Subcommand)]
 enum SkillCommands {
+    /// List all skills with their origin
+    Ls {
+        #[arg(short, long, help = "Filter skills by name pattern")]
+        filter: Option<String>,
+
+        #[arg(long, help = "Show only a specific scope (global, project, plugin)")]
+        scope: Option<String>,
+    },
+
     /// Copy a skill from another project to the current project
     Copy {
         #[arg(short, long, help = "Filter skills by name pattern")]
@@ -666,6 +675,185 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<u64, Box<dyn std::error:
         }
     }
     Ok(copied)
+}
+
+fn detect_skill_origin(skill_dir: &Path) -> &'static str {
+    // Check if symlink (marketplace / npx skills add)
+    if skill_dir.is_symlink() {
+        if let Ok(target) = fs::read_link(skill_dir) {
+            let target_str = target.to_string_lossy();
+            if target_str.contains(".agents/skills") {
+                return "marketplace";
+            }
+        }
+        return "symlink";
+    }
+
+    // Check for .claude-plugin/plugin.json (standalone installed skill)
+    if skill_dir.join(".claude-plugin/plugin.json").exists() {
+        return "installed";
+    }
+
+    // Check frontmatter for author: personal
+    let skill_file = skill_dir.join("SKILL.md");
+    if let Ok(content) = fs::read_to_string(&skill_file)
+        && content.starts_with("---")
+    {
+        let parts: Vec<&str> = content.splitn(3, "---").collect();
+        if parts.len() >= 3 {
+            let fm = parts[1];
+            for line in fm.lines() {
+                let line = line.trim();
+                if line.starts_with("author:") && line.contains("personal") {
+                    return "personal";
+                }
+            }
+        }
+    }
+
+    "custom"
+}
+
+fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
+    let home = dirs::home_dir().expect("Could not find home directory");
+    let global_claude = home.join(".claude");
+
+    struct SkillEntry {
+        name: String,
+        description: Option<String>,
+        origin: String,
+        scope: String,
+        path: String,
+    }
+
+    let mut entries: Vec<SkillEntry> = Vec::new();
+
+    // 1. Global user skills (~/.claude/skills/)
+    let global_skills_dir = global_claude.join("skills");
+    if global_skills_dir.exists()
+        && let Ok(dirs) = fs::read_dir(&global_skills_dir)
+    {
+        for entry in dirs.flatten() {
+            let path = entry.path();
+            // Resolve symlinks for is_dir check
+            let is_dir = if path.is_symlink() {
+                fs::metadata(&path).is_ok_and(|m| m.is_dir())
+            } else {
+                path.is_dir()
+            };
+            if !is_dir {
+                continue;
+            }
+            let skill_file = path.join("SKILL.md");
+            if !skill_file.exists() {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&skill_file) {
+                let (name, description) = parse_frontmatter(&content);
+                let dir_name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let name = name.unwrap_or_else(|| dir_name.clone());
+                let origin = detect_skill_origin(&path).to_string();
+                entries.push(SkillEntry {
+                    name,
+                    description,
+                    origin,
+                    scope: "global".to_string(),
+                    path: shorten_path(&path.to_string_lossy()),
+                });
+            }
+        }
+    }
+
+    // 2. Plugin skills
+    let plugins = scan_plugins(&global_claude);
+    for plugin in &plugins {
+        for skill in &plugin.skills {
+            entries.push(SkillEntry {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                origin: "plugin".to_string(),
+                scope: format!("plugin:{}", plugin.name),
+                path: plugin.name.clone(),
+            });
+        }
+    }
+
+    // 3. Project-local skills (current directory)
+    if let Ok(cwd) = std::env::current_dir() {
+        let project_claude = cwd.join(".claude");
+        if project_claude.join("skills").exists() {
+            for skill_source in scan_skills_with_paths(&project_claude) {
+                entries.push(SkillEntry {
+                    name: skill_source.info.name,
+                    description: skill_source.info.description,
+                    origin: "custom".to_string(),
+                    scope: "project".to_string(),
+                    path: shorten_path(&skill_source.skill_dir.to_string_lossy()),
+                });
+            }
+        }
+    }
+
+    // Apply filters
+    if let Some(ref f) = filter {
+        entries.retain(|e| e.name.contains(f.as_str()));
+    }
+    if let Some(ref s) = scope {
+        entries.retain(|e| e.scope.starts_with(s.as_str()));
+    }
+
+    entries.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
+
+    if entries.is_empty() {
+        println!("{}", "No skills found.".dimmed());
+        return;
+    }
+
+    // Calculate column widths
+    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(10).min(30);
+    let max_origin = entries
+        .iter()
+        .map(|e| e.origin.len())
+        .max()
+        .unwrap_or(6)
+        .min(15);
+
+    println!(
+        "{} skills found\n",
+        entries.len().to_string().cyan()
+    );
+
+    let mut current_scope = String::new();
+    for entry in &entries {
+        if entry.scope != current_scope {
+            current_scope = entry.scope.clone();
+            println!("{}:", current_scope.bold());
+        }
+
+        let desc = entry
+            .description
+            .as_deref()
+            .map(|d| {
+                let d = d.lines().next().unwrap_or(d);
+                truncate_str(d, 60)
+            })
+            .unwrap_or_default();
+
+        println!(
+            "  {} {:<width_name$} {:<width_origin$} {} {}",
+            "-".dimmed(),
+            entry.name.bright_cyan(),
+            format!("({})", entry.origin).dimmed(),
+            desc.dimmed(),
+            format!("[{}]", entry.path).dimmed(),
+            width_name = max_name,
+            width_origin = max_origin + 2,
+        );
+    }
 }
 
 fn skill_copy_command(
@@ -3473,6 +3661,9 @@ pub fn run() {
             config_command(key, raw);
         }
         Some(Commands::Skill { command }) => match command {
+            SkillCommands::Ls { filter, scope } => {
+                skill_ls_command(filter, scope);
+            }
             SkillCommands::Copy {
                 filter,
                 from,
