@@ -1272,7 +1272,7 @@ fn skill_promote_command(
     // --- Step 5: Backup project copies ---
     let cwd = std::env::current_dir().expect("Could not determine current directory");
     let timestamp = chrono::Local::now().format("%Y%m%dT%H%M%S").to_string();
-    let backup_base = cwd.join(".claude").join("skill-promote-backup").join(&timestamp);
+    let backup_base = cwd.join(".cckit").join("promote-backup").join(&timestamp);
 
     for src in &project_sources {
         let slug = if project_slug(&src.project_display).is_empty() {
