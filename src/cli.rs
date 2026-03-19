@@ -245,6 +245,14 @@ enum SessionCommands {
 #[derive(Subcommand)]
 enum SkillCommands {
     /// List all skills with their origin
+    #[command(after_help = "\
+Origins:
+  \x1b[32mpersonal\x1b[0m     skill-creator generated (author: personal in frontmatter)
+  \x1b[94mmarketplace\x1b[0m  npx @anthropic/skills add (symlink to ~/.agents/skills/)
+  \x1b[36minstalled\x1b[0m    standalone skill with .claude-plugin/plugin.json
+  \x1b[35mplugin\x1b[0m       bundled inside an installed plugin
+  \x1b[33m<author>\x1b[0m     author field value from frontmatter
+  \x1b[2mno author\x1b[0m    no author field in frontmatter")]
     Ls {
         #[arg(short, long, help = "Filter skills by name pattern")]
         filter: Option<String>,
@@ -863,6 +871,7 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
             width_origin = max_origin + 2,
         );
     }
+
 }
 
 fn skill_copy_command(
