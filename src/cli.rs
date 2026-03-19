@@ -1231,17 +1231,15 @@ fn scan_commands(dir: &Path) -> Vec<CommandInfo> {
     commands
 }
 
-fn scan_mcp_servers(project_dir: &Path) -> Vec<McpServerInfo> {
-    let mcp_file = project_dir.join(".mcp.json");
+fn parse_mcp_json(mcp_file: &Path) -> Vec<McpServerInfo> {
     let mut servers = Vec::new();
-
     if !mcp_file.exists() {
         return servers;
     }
 
     let source = mcp_file.to_string_lossy().to_string();
 
-    let content = match fs::read_to_string(&mcp_file) {
+    let content = match fs::read_to_string(mcp_file) {
         Ok(c) => c,
         Err(_) => return servers,
     };
@@ -1251,7 +1249,13 @@ fn scan_mcp_servers(project_dir: &Path) -> Vec<McpServerInfo> {
         Err(_) => return servers,
     };
 
-    if let Some(mcp_servers) = json.get("mcpServers").and_then(|v| v.as_object()) {
+    // Support both {"mcpServers": {...}} and {"name": {...}} (plugin format)
+    let mcp_obj = json
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .or_else(|| json.as_object());
+
+    if let Some(mcp_servers) = mcp_obj {
         for (name, config) in mcp_servers {
             let server_type = config
                 .get("type")
@@ -1281,6 +1285,121 @@ fn scan_mcp_servers(project_dir: &Path) -> Vec<McpServerInfo> {
                 command,
                 source: source.clone(),
             });
+        }
+    }
+
+    servers
+}
+
+fn scan_local_mcp_servers(
+    project_dir: &Path,
+    mcp_json_names: &std::collections::HashSet<String>,
+) -> Vec<McpServerInfo> {
+    let settings_file = project_dir.join(".claude/settings.local.json");
+    if !settings_file.exists() {
+        return Vec::new();
+    }
+
+    let content = match fs::read_to_string(&settings_file) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut server_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    if let Some(enabled) = json.get("enabledMcpjsonServers").and_then(|v| v.as_array()) {
+        for entry in enabled {
+            if let Some(name) = entry.as_str() {
+                if !mcp_json_names.contains(name) {
+                    server_names.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    // Load plugin MCP definitions for enrichment
+    let plugin_mcps = load_plugin_mcp_definitions();
+
+    let source = settings_file.to_string_lossy().to_string();
+
+    server_names
+        .into_iter()
+        .map(|name| {
+            if let Some(plugin_info) = plugin_mcps.get(&name) {
+                McpServerInfo {
+                    name,
+                    server_type: "local".to_string(),
+                    command: plugin_info.command.clone(),
+                    source: source.clone(),
+                }
+            } else {
+                McpServerInfo {
+                    name,
+                    server_type: "local".to_string(),
+                    command: None,
+                    source: source.clone(),
+                }
+            }
+        })
+        .collect()
+}
+
+fn load_plugin_mcp_definitions() -> std::collections::HashMap<String, McpServerInfo> {
+    let mut map = std::collections::HashMap::new();
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return map,
+    };
+
+    let plugins_dir = home.join(".claude/plugins/marketplaces");
+    if !plugins_dir.exists() {
+        return map;
+    }
+
+    // Scan marketplace/*/external_plugins/*/.mcp.json
+    let marketplace_entries = match fs::read_dir(&plugins_dir) {
+        Ok(e) => e,
+        Err(_) => return map,
+    };
+    for marketplace in marketplace_entries.flatten() {
+        let ext_dir = marketplace.path().join("external_plugins");
+        if !ext_dir.is_dir() {
+            continue;
+        }
+        let plugin_entries = match fs::read_dir(&ext_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for plugin in plugin_entries.flatten() {
+            let mcp_file = plugin.path().join(".mcp.json");
+            if mcp_file.exists() {
+                for info in parse_mcp_json(&mcp_file) {
+                    map.insert(info.name.clone(), info);
+                }
+            }
+        }
+    }
+    map
+}
+
+fn scan_mcp_servers(project_dir: &Path) -> Vec<McpServerInfo> {
+    let mut servers = parse_mcp_json(&project_dir.join(".mcp.json"));
+
+    let mcp_json_names: std::collections::HashSet<String> =
+        servers.iter().map(|s| s.name.clone()).collect();
+
+    // Also scan local config MCP servers, excluding those already in .mcp.json
+    let local_servers = scan_local_mcp_servers(project_dir, &mcp_json_names);
+    let existing_names: std::collections::HashSet<String> =
+        servers.iter().map(|s| s.name.clone()).collect();
+    for server in local_servers {
+        if !existing_names.contains(&server.name) {
+            servers.push(server);
         }
     }
 
