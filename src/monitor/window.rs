@@ -102,6 +102,11 @@ const HINT_FONT_SIZE: CGFloat = 10.5;
 const DOT_SIZE: CGFloat = 6.0;
 const LEFT_PAD: CGFloat = 10.0;
 const TEXT_LEFT: CGFloat = 24.0;
+const FIT_MIN_WIDTH: CGFloat = 560.0;
+const FIT_MAX_WIDTH: CGFloat = 760.0;
+const FIT_PATH_CHAR_WIDTH: CGFloat = 6.0;
+const FIT_PATH_BASE_CHARS: usize = 18;
+const FIT_PATH_MAX_CHARS: usize = 34;
 
 // --- Colors ---
 
@@ -239,6 +244,19 @@ fn format_duration_ms(ms: i64) -> String {
     } else {
         format!("{:.0}m", ms as f64 / 60_000.0)
     }
+}
+
+fn calculate_fit_window_width() -> CGFloat {
+    let sessions = SESSION_LIST.lock().unwrap();
+    let longest_path_chars = sessions
+        .iter()
+        .map(|session| session.short_cwd().chars().count())
+        .max()
+        .unwrap_or(FIT_PATH_BASE_CHARS)
+        .clamp(FIT_PATH_BASE_CHARS, FIT_PATH_MAX_CHARS);
+    let extra_chars = longest_path_chars.saturating_sub(FIT_PATH_BASE_CHARS) as CGFloat;
+
+    (FIT_MIN_WIDTH + extra_chars * FIT_PATH_CHAR_WIDTH).clamp(FIT_MIN_WIDTH, FIT_MAX_WIDTH)
 }
 
 fn status_label(status: &SessionStatus) -> &'static str {
@@ -929,7 +947,7 @@ fn move_window_to_position(position: u8) {
     save_window_frame();
 }
 
-/// Resize window height to fit content
+/// Resize window to fit height and a path-aware width.
 fn fit_window_to_content() {
     let ptr = *WINDOW_PTR.lock().unwrap();
     let ptr = match ptr {
@@ -947,16 +965,22 @@ fn fit_window_to_content() {
         None => return,
     };
     let sf = screen.visibleFrame();
+    let max_w = sf.size.width * 0.9;
     let max_h = sf.size.height * 0.8;
-    let content_h = calculate_content_height();
-    let new_content_h = content_h.clamp(MIN_WINDOW_HEIGHT, max_h);
+    let content_h = calculate_content_height().clamp(MIN_WINDOW_HEIGHT, max_h);
+    let content_w = calculate_fit_window_width().min(max_w);
+    let target_content_rect =
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(content_w, content_h));
+    let target_frame =
+        NSWindow::frameRectForContentRect_styleMask(target_content_rect, window.styleMask(), mtm);
 
     let old_frame = window.frame();
-    // Keep top edge fixed: adjust origin.y by height difference
-    let dy = new_content_h - old_frame.size.height;
+    // Keep top edge fixed and preserve the center horizontally.
+    let dx = (target_frame.size.width - old_frame.size.width) / 2.0;
+    let dy = target_frame.size.height - old_frame.size.height;
     let new_frame = NSRect::new(
-        NSPoint::new(old_frame.origin.x, old_frame.origin.y - dy),
-        NSSize::new(old_frame.size.width, new_content_h),
+        NSPoint::new(old_frame.origin.x - dx, old_frame.origin.y - dy),
+        target_frame.size,
     );
     window.setFrame_display_animate(new_frame, true, true);
     save_window_frame();
