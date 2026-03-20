@@ -440,7 +440,12 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
 fn request_redraw() {
     let ptr = *CONTENT_VIEW_PTR.lock().unwrap();
     if let Some(ptr) = ptr {
-        let view = ptr as *mut AnyObject;
+        let view = unsafe { &*(ptr as *const NSView) };
+        let view_width = unsafe { view.superview() }
+            .map(|sv| sv.bounds().size.width)
+            .unwrap_or_else(|| view.frame().size.width.max(WINDOW_WIDTH));
+        let view_height = view.frame().size.height;
+        view.setFrameSize(NSSize::new(view_width, view_height));
         let _: () = unsafe { msg_send![view, setNeedsDisplay: true] };
     }
     update_af_label();
@@ -943,15 +948,8 @@ fn fit_window_to_content() {
     };
     let sf = screen.visibleFrame();
     let max_h = sf.size.height * 0.8;
-
-    // Probe titlebar height
-    let probe_style = NSWindowStyleMask::Titled;
-    let probe = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WINDOW_WIDTH, 100.0));
-    let probe_frame = NSWindow::frameRectForContentRect_styleMask(probe, probe_style, mtm);
-    let titlebar_h = probe_frame.size.height - 100.0;
-
     let content_h = calculate_content_height();
-    let new_content_h = (content_h + titlebar_h).clamp(MIN_WINDOW_HEIGHT, max_h);
+    let new_content_h = content_h.clamp(MIN_WINDOW_HEIGHT, max_h);
 
     let old_frame = window.frame();
     // Keep top edge fixed: adjust origin.y by height difference
@@ -1089,8 +1087,7 @@ fn setup_main_menu(mtm: MainThreadMarker, app: &NSApplication) {
 
         // Window menu
         let window_menu_item = NSMenuItem::new(mtm);
-        let window_menu =
-            NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Window"));
+        let window_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Window"));
 
         let minimize = NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -1122,15 +1119,7 @@ fn setup_window(
         .union(NSWindowStyleMask::Miniaturizable)
         .union(NSWindowStyleMask::FullSizeContentView);
     let needed_h = calculate_content_height();
-
-    // With FullSizeContentView, frameRectForContentRect returns frame==content (titlebar_h=0).
-    // Probe WITHOUT FullSizeContentView to get the actual title bar height.
-    let probe_style = NSWindowStyleMask::Titled;
-    let probe = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WINDOW_WIDTH, 100.0));
-    let probe_frame = NSWindow::frameRectForContentRect_styleMask(probe, probe_style, mtm);
-    let titlebar_h = probe_frame.size.height - 100.0;
-
-    let content_rect_h = (needed_h + titlebar_h).clamp(MIN_WINDOW_HEIGHT, max_window_h);
+    let content_rect_h = needed_h.clamp(MIN_WINDOW_HEIGHT, max_window_h);
 
     // Restore saved window frame, or center on screen
     let storage = Storage::new();
@@ -1163,8 +1152,7 @@ fn setup_window(
             NSPoint::new(0.0, 0.0),
             NSSize::new(WINDOW_WIDTH, content_rect_h),
         );
-        let frame_rect =
-            NSWindow::frameRectForContentRect_styleMask(frame_probe, style_mask, mtm);
+        let frame_rect = NSWindow::frameRectForContentRect_styleMask(frame_probe, style_mask, mtm);
         (
             sf.origin.x + (sf.size.width - WINDOW_WIDTH) / 2.0,
             sf.origin.y + (sf.size.height - frame_rect.size.height) / 2.0,
@@ -1234,12 +1222,13 @@ fn setup_window(
     // contentLayoutRect = usable area not obscured by title bar
     let layout_rect: NSRect = unsafe { msg_send![&*window, contentLayoutRect] };
     let usable_h = layout_rect.size.height;
+    let content_w = layout_rect.size.width.max(WINDOW_WIDTH);
     // Footer at the bottom of the usable area
     let footer = NSView::initWithFrame(
         NSView::alloc(mtm),
         NSRect::new(
             NSPoint::new(0.0, 0.0),
-            NSSize::new(WINDOW_WIDTH, FOOTER_HEIGHT),
+            NSSize::new(content_w, FOOTER_HEIGHT),
         ),
     );
     footer.setAutoresizingMask(
@@ -1248,7 +1237,7 @@ fn setup_window(
 
     let hint_rect = NSRect::new(
         NSPoint::new(LEFT_PAD, 3.0),
-        NSSize::new(WINDOW_WIDTH - LEFT_PAD * 2.0, FOOTER_HEIGHT - 3.0),
+        NSSize::new(content_w - LEFT_PAD * 2.0, FOOTER_HEIGHT - 3.0),
     );
     let hint_label = create_mono_label(
         mtm,
@@ -1261,7 +1250,7 @@ fn setup_window(
 
     // Auto Focus indicator (right side of footer, initially AF:ON)
     let af_rect = NSRect::new(
-        NSPoint::new(WINDOW_WIDTH - 80.0 - LEFT_PAD, 3.0),
+        NSPoint::new(content_w - 80.0 - LEFT_PAD, 3.0),
         NSSize::new(80.0, FOOTER_HEIGHT - 3.0),
     );
     let af_color = color_text();
@@ -1275,7 +1264,7 @@ fn setup_window(
         mtm,
         NSRect::new(
             NSPoint::new(0.0, FOOTER_HEIGHT - 1.0),
-            NSSize::new(WINDOW_WIDTH, 1.0),
+            NSSize::new(content_w, 1.0),
         ),
         &color_border(),
         0.0,
@@ -1290,7 +1279,7 @@ fn setup_window(
     let scroll_height = (usable_h - FOOTER_HEIGHT).max(0.0);
     let scroll_rect = NSRect::new(
         NSPoint::new(0.0, scroll_y),
-        NSSize::new(WINDOW_WIDTH, scroll_height),
+        NSSize::new(content_w, scroll_height),
     );
     let scroll_view = objc2_app_kit::NSScrollView::initWithFrame(
         objc2_app_kit::NSScrollView::alloc(mtm),
@@ -1311,7 +1300,7 @@ fn setup_window(
         let obj: *mut AnyObject = msg_send![view_cls, alloc];
         let obj: *mut AnyObject = msg_send![obj, initWithFrame: NSRect::new(
             NSPoint::new(0.0, 0.0),
-            NSSize::new(WINDOW_WIDTH, doc_height),
+            NSSize::new(content_w, doc_height),
         )];
         Retained::from_raw(obj as *mut NSView).unwrap()
     };

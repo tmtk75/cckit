@@ -823,7 +823,12 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
     }
 
     // Calculate column widths
-    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(10).min(30);
+    let max_name = entries
+        .iter()
+        .map(|e| e.name.len())
+        .max()
+        .unwrap_or(10)
+        .min(30);
     let max_origin = entries
         .iter()
         .map(|e| e.origin.len())
@@ -831,10 +836,7 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
         .unwrap_or(6)
         .min(15);
 
-    println!(
-        "{} skills found\n",
-        entries.len().to_string().cyan()
-    );
+    println!("{} skills found\n", entries.len().to_string().cyan());
 
     let mut current_scope = String::new();
     for entry in &entries {
@@ -871,7 +873,6 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
             width_origin = max_origin + 2,
         );
     }
-
 }
 
 fn skill_copy_command(
@@ -1012,8 +1013,14 @@ fn collect_project_skills_grouped() -> Vec<(String, Vec<SkillSource>)> {
     // Sort: skills in multiple projects first, then alphabetical
     let mut sorted: Vec<_> = groups.into_iter().collect();
     sorted.sort_by(|a, b| {
-        let a_project_count = a.1.iter().filter(|s| s.project_display != "~/.claude (global)").count();
-        let b_project_count = b.1.iter().filter(|s| s.project_display != "~/.claude (global)").count();
+        let a_project_count =
+            a.1.iter()
+                .filter(|s| s.project_display != "~/.claude (global)")
+                .count();
+        let b_project_count =
+            b.1.iter()
+                .filter(|s| s.project_display != "~/.claude (global)")
+                .count();
         b_project_count.cmp(&a_project_count).then(a.0.cmp(&b.0))
     });
     sorted
@@ -1089,12 +1096,7 @@ fn project_slug(display: &str) -> String {
         .replace(' ', "-")
 }
 
-fn skill_promote_command(
-    filter: Option<String>,
-    name: Option<String>,
-    force: bool,
-    dry_run: bool,
-) {
+fn skill_promote_command(filter: Option<String>, name: Option<String>, force: bool, dry_run: bool) {
     use std::io::{self, BufRead, Write};
 
     let home = dirs::home_dir().expect("Could not find home directory");
@@ -1109,7 +1111,9 @@ fn skill_promote_command(
 
     // For selection, only show skills that have at least one project-level copy
     groups.retain(|(_, sources)| {
-        sources.iter().any(|s| s.project_display != "~/.claude (global)")
+        sources
+            .iter()
+            .any(|s| s.project_display != "~/.claude (global)")
     });
 
     if groups.is_empty() {
@@ -1122,7 +1126,11 @@ fn skill_promote_command(
         match groups.iter().position(|(n, _)| n == skill_name) {
             Some(_) => skill_name.clone(),
             None => {
-                eprintln!("{}: skill '{}' not found in any project", "Error".red(), skill_name);
+                eprintln!(
+                    "{}: skill '{}' not found in any project",
+                    "Error".red(),
+                    skill_name
+                );
                 std::process::exit(1);
             }
         }
@@ -1131,9 +1139,15 @@ fn skill_promote_command(
         let flat: Vec<SkillSource> = groups
             .iter()
             .map(|(_, sources)| {
-                let project_count = sources.iter().filter(|s| s.project_display != "~/.claude (global)").count();
-                let has_global = sources.iter().any(|s| s.project_display == "~/.claude (global)");
-                let mut representative = sources.iter()
+                let project_count = sources
+                    .iter()
+                    .filter(|s| s.project_display != "~/.claude (global)")
+                    .count();
+                let has_global = sources
+                    .iter()
+                    .any(|s| s.project_display == "~/.claude (global)");
+                let mut representative = sources
+                    .iter()
                     .find(|s| s.project_display != "~/.claude (global)")
                     .unwrap()
                     .clone();
@@ -1141,7 +1155,8 @@ fn skill_promote_command(
                 let suffix = if project_count > 1 {
                     format!("{} projects", project_count)
                 } else {
-                    sources.iter()
+                    sources
+                        .iter()
                         .find(|s| s.project_display != "~/.claude (global)")
                         .map(|s| s.project_display.clone())
                         .unwrap_or_default()
@@ -1164,18 +1179,29 @@ fn skill_promote_command(
     let (_, sources) = groups.iter().find(|(n, _)| *n == selected_name).unwrap();
 
     // Separate project sources and global
-    let project_sources: Vec<&SkillSource> = sources.iter()
+    let project_sources: Vec<&SkillSource> = sources
+        .iter()
         .filter(|s| s.project_display != "~/.claude (global)")
         .collect();
-    let global_source: Option<&SkillSource> = sources.iter()
+    let global_source: Option<&SkillSource> = sources
+        .iter()
         .find(|s| s.project_display == "~/.claude (global)");
 
     let skill_display_name = &sources[0].info.name;
 
-    println!("\n{} '{}'", "Promoting skill:".bold(), skill_display_name.green());
-    println!("  Found in {} project(s){}",
+    println!(
+        "\n{} '{}'",
+        "Promoting skill:".bold(),
+        skill_display_name.green()
+    );
+    println!(
+        "  Found in {} project(s){}",
         project_sources.len(),
-        if global_source.is_some() { " + global" } else { "" }
+        if global_source.is_some() {
+            " + global"
+        } else {
+            ""
+        }
     );
 
     // --- Step 1: Diff check ---
@@ -1194,7 +1220,12 @@ fn skill_promote_command(
                     dt.format("%Y-%m-%d %H:%M").to_string()
                 })
                 .unwrap_or_else(|| "unknown".to_string());
-            println!("  [{}] {}  (modified: {})", i + 1, shorten_path(&src.skill_dir.to_string_lossy()), modified);
+            println!(
+                "  [{}] {}  (modified: {})",
+                i + 1,
+                shorten_path(&src.skill_dir.to_string_lossy()),
+                modified
+            );
         }
         println!("\n{}", "File differences:".dimmed());
         for line in diff_summary.lines().take(20) {
@@ -1206,11 +1237,17 @@ fn skill_promote_command(
 
         if dry_run {
             // In dry-run, just show the diff info and exit
-            println!("\n{}", "[dry-run] Run without --dry-run to select a version and promote.".cyan().bold());
+            println!(
+                "\n{}",
+                "[dry-run] Run without --dry-run to select a version and promote."
+                    .cyan()
+                    .bold()
+            );
             return;
         } else if force {
             // With --force, pick the most recently modified
-            sources.iter()
+            sources
+                .iter()
                 .max_by_key(|s| {
                     fs::metadata(s.skill_dir.join("SKILL.md"))
                         .and_then(|m| m.modified())
@@ -1219,11 +1256,17 @@ fn skill_promote_command(
                 .unwrap()
         } else {
             println!();
-            print!("{}", format!("Which version to promote? [1-{}]: ", sources.len()).bold());
+            print!(
+                "{}",
+                format!("Which version to promote? [1-{}]: ", sources.len()).bold()
+            );
             io::stdout().flush().ok();
 
             let stdin = io::stdin();
-            let line = stdin.lock().lines().next()
+            let line = stdin
+                .lock()
+                .lines()
+                .next()
                 .and_then(|r| r.ok())
                 .unwrap_or_default();
             let num: usize = match line.trim().parse() {
@@ -1248,7 +1291,10 @@ fn skill_promote_command(
         }
     }
     if !npx_warnings.is_empty() {
-        println!("\n{}", "Note: This skill was installed via npx/agents in some locations:".yellow());
+        println!(
+            "\n{}",
+            "Note: This skill was installed via npx/agents in some locations:".yellow()
+        );
         for (project, cmd) in &npx_warnings {
             println!("  {} → to uninstall: {}", project, cmd.cyan());
         }
@@ -1259,11 +1305,23 @@ fn skill_promote_command(
 
     if dry_run {
         println!("\n{}", "[dry-run] Would perform:".cyan().bold());
-        println!("  Copy: {} → {}", shorten_path(&chosen_source.skill_dir.to_string_lossy()), shorten_path(&dest_dir.to_string_lossy()));
+        println!(
+            "  Copy: {} → {}",
+            shorten_path(&chosen_source.skill_dir.to_string_lossy()),
+            shorten_path(&dest_dir.to_string_lossy())
+        );
         for src in &project_sources {
             if src.skill_dir != chosen_source.skill_dir || global_source.is_none() {
-                let action = if fs::read_link(&src.skill_dir).is_ok() { "Backup & unlink" } else { "Backup & remove" };
-                println!("  {}: {}", action, shorten_path(&src.skill_dir.to_string_lossy()));
+                let action = if fs::read_link(&src.skill_dir).is_ok() {
+                    "Backup & unlink"
+                } else {
+                    "Backup & remove"
+                };
+                println!(
+                    "  {}: {}",
+                    action,
+                    shorten_path(&src.skill_dir.to_string_lossy())
+                );
             }
         }
         return;
@@ -1272,13 +1330,19 @@ fn skill_promote_command(
     // --- Step 4: Confirm ---
     if !force {
         println!();
-        println!("  Source: {}", shorten_path(&chosen_source.skill_dir.to_string_lossy()));
+        println!(
+            "  Source: {}",
+            shorten_path(&chosen_source.skill_dir.to_string_lossy())
+        );
         println!("  Dest:   {}", shorten_path(&dest_dir.to_string_lossy()));
         print!("{}", "Proceed? (y/N): ".bold());
         io::stdout().flush().ok();
 
         let stdin = io::stdin();
-        let line = stdin.lock().lines().next()
+        let line = stdin
+            .lock()
+            .lines()
+            .next()
             .and_then(|r| r.ok())
             .unwrap_or_default();
         if line.trim().to_lowercase() != "y" {
@@ -1299,9 +1363,18 @@ fn skill_promote_command(
             project_slug(&src.project_display)
         };
         let backup_dir = backup_base.join(format!("{}--{}", slug, selected_name));
-        println!("  Backing up {} → {}", shorten_path(&src.skill_dir.to_string_lossy()).dimmed(), shorten_path(&backup_dir.to_string_lossy()).dimmed());
+        println!(
+            "  Backing up {} → {}",
+            shorten_path(&src.skill_dir.to_string_lossy()).dimmed(),
+            shorten_path(&backup_dir.to_string_lossy()).dimmed()
+        );
         if let Err(e) = copy_dir_recursive(&src.skill_dir, &backup_dir) {
-            eprintln!("{}: backup failed for {}: {}", "Error".red(), src.project_display, e);
+            eprintln!(
+                "{}: backup failed for {}: {}",
+                "Error".red(),
+                src.project_display,
+                e
+            );
             std::process::exit(1);
         }
     }
@@ -1310,7 +1383,10 @@ fn skill_promote_command(
     if dest_dir.exists() {
         // Backup existing global too
         let backup_dir = backup_base.join(format!("global--{}", selected_name));
-        println!("  Backing up existing global → {}", shorten_path(&backup_dir.to_string_lossy()).dimmed());
+        println!(
+            "  Backing up existing global → {}",
+            shorten_path(&backup_dir.to_string_lossy()).dimmed()
+        );
         if let Err(e) = copy_dir_recursive(&dest_dir, &backup_dir) {
             eprintln!("{}: backup failed for global: {}", "Error".red(), e);
             std::process::exit(1);
@@ -1319,10 +1395,18 @@ fn skill_promote_command(
         let _ = fs::remove_dir_all(&dest_dir);
     }
 
-    println!("  Copying to {} ...", shorten_path(&dest_dir.to_string_lossy()));
+    println!(
+        "  Copying to {} ...",
+        shorten_path(&dest_dir.to_string_lossy())
+    );
     match copy_dir_recursive(&chosen_source.skill_dir, &dest_dir) {
         Ok(count) => {
-            println!("{} Promoted {} files to {}", "Done!".green().bold(), count, shorten_path(&dest_dir.to_string_lossy()));
+            println!(
+                "{} Promoted {} files to {}",
+                "Done!".green().bold(),
+                count,
+                shorten_path(&dest_dir.to_string_lossy())
+            );
         }
         Err(e) => {
             eprintln!("{}: {}", "Error copying skill".red(), e);
@@ -1331,7 +1415,8 @@ fn skill_promote_command(
     }
 
     // --- Step 7: Remove project copies ---
-    let removable: Vec<&&SkillSource> = project_sources.iter()
+    let removable: Vec<&&SkillSource> = project_sources
+        .iter()
         .filter(|s| s.skill_dir != dest_dir)
         .collect();
 
@@ -1345,11 +1430,17 @@ fn skill_promote_command(
             io::stdout().flush().ok();
 
             let stdin = io::stdin();
-            let line = stdin.lock().lines().next()
+            let line = stdin
+                .lock()
+                .lines()
+                .next()
                 .and_then(|r| r.ok())
                 .unwrap_or_default();
             if line.trim().to_lowercase() != "y" {
-                println!("Skipped removal. Backups at: {}", shorten_path(&backup_base.to_string_lossy()));
+                println!(
+                    "Skipped removal. Backups at: {}",
+                    shorten_path(&backup_base.to_string_lossy())
+                );
                 return;
             }
         }
@@ -1364,13 +1455,25 @@ fn skill_promote_command(
             };
             let kind = if is_symlink { "Unlinked" } else { "Removed" };
             match result {
-                Ok(()) => println!("  {} {}", format!("{}:", kind).red(), shorten_path(&src.skill_dir.to_string_lossy())),
-                Err(e) => eprintln!("  {}: could not remove {}: {}", "Warning".yellow(), shorten_path(&src.skill_dir.to_string_lossy()), e),
+                Ok(()) => println!(
+                    "  {} {}",
+                    format!("{}:", kind).red(),
+                    shorten_path(&src.skill_dir.to_string_lossy())
+                ),
+                Err(e) => eprintln!(
+                    "  {}: could not remove {}: {}",
+                    "Warning".yellow(),
+                    shorten_path(&src.skill_dir.to_string_lossy()),
+                    e
+                ),
             }
         }
     }
 
-    println!("\nBackups saved to: {}", shorten_path(&backup_base.to_string_lossy()).cyan());
+    println!(
+        "\nBackups saved to: {}",
+        shorten_path(&backup_base.to_string_lossy()).cyan()
+    );
 }
 
 fn scan_agents(dir: &Path) -> Vec<AgentInfo> {
