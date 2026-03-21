@@ -290,6 +290,20 @@ Origins:
         #[arg(long, help = "Show what would be done without making changes")]
         dry_run: bool,
     },
+
+    /// Validate a skill's SKILL.md for security concerns (e.g. embedded shell commands)
+    #[command(after_help = "\
+Examples:
+  cckit skill validate                                             All installed skills
+  cckit skill validate https://github.com/user/skill-repo          Full GitHub URL
+  cckit skill validate https://github.com/user/repo/tree/main/dir  URL with path
+  cckit skill validate user/skills/my-skill                        Short owner/repo/path
+  cckit skill validate user/skills/                                List skills in repo
+  cckit skill validate ./path/to/skill/                            Local skill directory")]
+    Validate {
+        /// GitHub URL, owner/repo[/path] shorthand, or local path. Omit to scan all installed skills.
+        spec: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1474,6 +1488,633 @@ fn skill_promote_command(filter: Option<String>, name: Option<String>, force: bo
         "\nBackups saved to: {}",
         shorten_path(&backup_base.to_string_lossy()).cyan()
     );
+}
+
+/// Kind of finding in skill validation
+enum FindingKind {
+    /// !`command` — shell command executed during skill expansion
+    ShellCommand,
+    /// ${VAR} — variable substitution
+    Substitution,
+}
+
+/// Represents a finding from skill validation
+struct SkillFinding {
+    line_number: usize,
+    line: String,
+    command: String,
+    kind: FindingKind,
+}
+
+/// Parse a GitHub spec: full URL or "owner/repo[/path]" shorthand.
+/// Supports:
+///   https://github.com/owner/repo
+///   https://github.com/owner/repo/tree/main/path/to/skill
+///   owner/repo/skill-name
+///   owner/repo/
+/// Returns (owner, repo, optional skill path within repo)
+fn parse_github_spec(spec: &str) -> Option<(String, String, Option<String>)> {
+    // Full GitHub URL
+    if spec.starts_with("https://github.com/") || spec.starts_with("http://github.com/") {
+        let url = spec
+            .trim_end_matches('/')
+            .strip_prefix("https://github.com/")
+            .or_else(|| spec.trim_end_matches('/').strip_prefix("http://github.com/"))?;
+        // url is now "owner/repo" or "owner/repo/tree/branch/path..."
+        let parts: Vec<&str> = url.splitn(3, '/').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        let owner = parts[0].to_string();
+        let repo = parts[1].to_string();
+        if parts.len() == 2 {
+            // https://github.com/owner/repo
+            return Some((owner, repo, None));
+        }
+        // parts[2] might be "tree/main/path/to/skill" or "tree/branch"
+        let rest = parts[2];
+        if let Some(after_tree) = rest.strip_prefix("tree/") {
+            // Skip "branch/" part
+            if let Some((_branch, path)) = after_tree.split_once('/') {
+                let path = path.trim_end_matches('/');
+                if path.is_empty() {
+                    return Some((owner, repo, None));
+                }
+                return Some((owner, repo, Some(path.to_string())));
+            }
+            // Just "tree/branch" with no further path
+            return Some((owner, repo, None));
+        }
+        return Some((owner, repo, None));
+    }
+
+    // Short form: owner/repo[/skill]
+    let parts: Vec<&str> = spec.splitn(3, '/').collect();
+    match parts.len() {
+        2 => {
+            let repo = parts[1].trim_end_matches('/');
+            Some((parts[0].to_string(), repo.to_string(), None))
+        }
+        3 => {
+            let skill = parts[2].trim_end_matches('/');
+            if skill.is_empty() {
+                Some((parts[0].to_string(), parts[1].to_string(), None))
+            } else {
+                Some((parts[0].to_string(), parts[1].to_string(), Some(skill.to_string())))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Scan SKILL.md content for !`command` patterns (shell commands executed during skill expansion).
+/// These commands run automatically before Claude sees the prompt — a security concern for untrusted skills.
+/// Also detects ${VARIABLE} substitutions for awareness.
+fn find_shell_commands(content: &str) -> Vec<SkillFinding> {
+    let mut findings = Vec::new();
+    // !`command` — the dynamic context injection syntax
+    let re_bang_backtick = regex_lite::Regex::new(r"!\x60([^\x60]+)\x60").unwrap();
+    // ${VAR} substitutions (CLAUDE_SESSION_ID, CLAUDE_SKILL_DIR, etc.)
+    let re_substitution = regex_lite::Regex::new(r"\$\{([A-Z_]+)\}").unwrap();
+    let in_code_block = &mut false;
+
+    for (i, line) in content.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            *in_code_block = !*in_code_block;
+            continue;
+        }
+        // Skip content inside fenced code blocks (examples/templates, not actual directives)
+        if *in_code_block {
+            continue;
+        }
+
+        for cap in re_bang_backtick.captures_iter(line) {
+            findings.push(SkillFinding {
+                line_number: i + 1,
+                line: line.to_string(),
+                command: format!("!`{}`", &cap[1]),
+                kind: FindingKind::ShellCommand,
+            });
+        }
+        for cap in re_substitution.captures_iter(line) {
+            findings.push(SkillFinding {
+                line_number: i + 1,
+                line: line.to_string(),
+                command: format!("${{{}}}", &cap[1]),
+                kind: FindingKind::Substitution,
+            });
+        }
+    }
+    findings
+}
+
+/// Display validation results
+fn display_findings(skill_name: &str, content: &str, findings: &[SkillFinding]) {
+    let shell_cmds: Vec<&SkillFinding> = findings
+        .iter()
+        .filter(|f| matches!(f.kind, FindingKind::ShellCommand))
+        .collect();
+    let substitutions: Vec<&SkillFinding> = findings
+        .iter()
+        .filter(|f| matches!(f.kind, FindingKind::Substitution))
+        .collect();
+
+    if shell_cmds.is_empty() && substitutions.is_empty() {
+        println!(
+            "{} No embedded shell commands found in '{}'",
+            "OK".green().bold(),
+            skill_name.green()
+        );
+    } else {
+        if !shell_cmds.is_empty() {
+            println!(
+                "{} {} shell command(s) will execute on skill expansion:\n",
+                "WARN".yellow().bold(),
+                shell_cmds.len().to_string().yellow(),
+            );
+            for f in &shell_cmds {
+                println!(
+                    "  {}:{} {}",
+                    "line".dimmed(),
+                    f.line_number.to_string().cyan(),
+                    f.command.red().bold()
+                );
+                println!("    {}\n", f.line.trim().dimmed());
+            }
+        }
+        if !substitutions.is_empty() {
+            println!(
+                "{} {} variable substitution(s):\n",
+                "INFO".cyan().bold(),
+                substitutions.len().to_string().cyan(),
+            );
+            for f in &substitutions {
+                println!(
+                    "  {}:{} {}",
+                    "line".dimmed(),
+                    f.line_number.to_string().cyan(),
+                    f.command.cyan()
+                );
+            }
+            println!();
+        }
+    }
+
+    // Show frontmatter summary
+    println!("{}", "--- frontmatter ---".dimmed());
+    if let Some(name) = extract_frontmatter_field(content, "name") {
+        println!("  {}: {}", "name".dimmed(), name);
+    }
+    if let Some(desc) = extract_frontmatter_field(content, "description") {
+        println!("  {}: {}", "desc".dimmed(), desc);
+    }
+    if let Some(allowed) = extract_frontmatter_field(content, "allowed-tools") {
+        let has_bash = allowed.to_lowercase().contains("bash");
+        if has_bash {
+            println!(
+                "  {}: {} {}",
+                "allowed-tools".dimmed(),
+                allowed.yellow(),
+                "(includes Bash — shell commands will execute)".red()
+            );
+        } else {
+            println!("  {}: {}", "allowed-tools".dimmed(), allowed);
+        }
+    } else if !shell_cmds.is_empty() {
+        println!(
+            "  {}: {} {}",
+            "allowed-tools".dimmed(),
+            "(not set)".dimmed(),
+            "— shell commands may be blocked without Bash permission".yellow()
+        );
+    }
+    if let Some(context) = extract_frontmatter_field(content, "context") {
+        println!("  {}: {}", "context".dimmed(), context);
+    }
+
+    let line_count = content.lines().count();
+    println!("  {}: {} lines", "size".dimmed(), line_count);
+}
+
+fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.first().is_none_or(|l| l.trim() != "---") {
+        return None;
+    }
+    for line in lines.iter().skip(1) {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix(&format!("{}:", field)) {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Interactive checkbox multi-select using crossterm raw mode.
+/// Returns indices of selected items.
+/// Controls: Up/Down to move, Space to toggle, 'a' to toggle all, Enter to confirm, q/Esc to cancel.
+fn checkbox_select(items: &[&str]) -> Vec<usize> {
+    use crossterm::{
+        cursor, execute,
+        event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+        terminal::{self, ClearType},
+    };
+    use std::io::Write;
+
+    let mut stdout = std::io::stdout();
+    let mut checked = vec![false; items.len()];
+    let mut cursor_pos: usize = 0;
+
+    // Enter raw mode
+    if terminal::enable_raw_mode().is_err() {
+        // Fallback to simple input if raw mode fails
+        return checkbox_select_fallback(items);
+    }
+
+    let header = format!(
+        "{} skill(s) found. Space=toggle  a=all  Enter=confirm  q=quit",
+        items.len().to_string().cyan()
+    );
+
+    let render = |stdout: &mut std::io::Stdout, checked: &[bool], cursor_pos: usize| {
+        // Move up to redraw (header + items)
+        for _ in 0..items.len() + 1 {
+            execute!(
+                stdout,
+                cursor::MoveUp(1),
+                terminal::Clear(ClearType::CurrentLine)
+            )
+            .ok();
+        }
+        execute!(stdout, cursor::MoveToColumn(0)).ok();
+        write!(stdout, "{}\r\n", header).ok();
+        for (i, item) in items.iter().enumerate() {
+            let marker = if cursor_pos == i { ">" } else { " " };
+            let check = if checked[i] { "[x]" } else { "[ ]" };
+            let line = if cursor_pos == i {
+                format!(" {} {} {}", marker, check, item.to_string().green().bold())
+            } else {
+                format!(" {} {} {}", marker, check, item)
+            };
+            write!(stdout, "{}\r\n", line).ok();
+        }
+        stdout.flush().ok();
+    };
+
+    // Initial draw
+    write!(stdout, "{}\r\n", header).ok();
+    for (i, item) in items.iter().enumerate() {
+        let marker = if cursor_pos == i { ">" } else { " " };
+        let check = "[ ]";
+        let line = if cursor_pos == i {
+            format!(" {} {} {}", marker, check, item.to_string().green().bold())
+        } else {
+            format!(" {} {} {}", marker, check, item)
+        };
+        write!(stdout, "{}\r\n", line).ok();
+    }
+    stdout.flush().ok();
+
+    loop {
+        if let Ok(Event::Key(KeyEvent {
+            code, modifiers, ..
+        })) = event::read()
+        {
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if cursor_pos > 0 {
+                        cursor_pos -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if cursor_pos < items.len() - 1 {
+                        cursor_pos += 1;
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    checked[cursor_pos] = !checked[cursor_pos];
+                }
+                KeyCode::Char('a') => {
+                    let all_checked = checked.iter().all(|&c| c);
+                    for c in &mut checked {
+                        *c = !all_checked;
+                    }
+                }
+                KeyCode::Enter => {
+                    terminal::disable_raw_mode().ok();
+                    println!();
+                    return checked
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| **c)
+                        .map(|(i, _)| i)
+                        .collect();
+                }
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    terminal::disable_raw_mode().ok();
+                    println!();
+                    return vec![];
+                }
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    terminal::disable_raw_mode().ok();
+                    println!();
+                    return vec![];
+                }
+                _ => {}
+            }
+            render(&mut stdout, &checked, cursor_pos);
+        }
+    }
+}
+
+/// Fallback checkbox selection without raw mode (simple text input).
+fn checkbox_select_fallback(items: &[&str]) -> Vec<usize> {
+    use std::io::Write;
+
+    println!(
+        "{} skill(s) found:\n",
+        items.len().to_string().cyan()
+    );
+    for (i, item) in items.iter().enumerate() {
+        println!("  {} {}", format!("[{}]", i + 1).dimmed(), item.green());
+    }
+    print!(
+        "\n{}",
+        "Enter numbers to validate (e.g. 1 3 5, or 'a' for all, 'q' to quit): ".bold()
+    );
+    std::io::stdout().flush().ok();
+
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return vec![];
+    }
+    let input = input.trim();
+    if input == "q" || input.is_empty() {
+        return vec![];
+    }
+    if input == "a" {
+        return (0..items.len()).collect();
+    }
+    input
+        .split_whitespace()
+        .filter_map(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1 && n <= items.len())
+        .map(|n| n - 1)
+        .collect()
+}
+
+/// Find all SKILL.md files in a GitHub repo using the recursive tree API.
+/// Returns paths like "plugins/nano-banana/skills/nano-banana/SKILL.md".
+fn github_find_skill_files(owner: &str, repo: &str) -> Result<Vec<String>, String> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/git/trees/main?recursive=1",
+        owner, repo
+    );
+    let mut response = ureq::get(&url)
+        .header("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", "cckit")
+        .call()
+        .map_err(|e| format!("GitHub API error: {}", e))?;
+
+    let body: serde_json::Value = response
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+
+    let tree = body
+        .get("tree")
+        .and_then(|t| t.as_array())
+        .ok_or_else(|| "Expected tree array from GitHub API".to_string())?;
+
+    let skill_files: Vec<String> = tree
+        .iter()
+        .filter_map(|e| {
+            let path = e.get("path")?.as_str()?;
+            if path.ends_with("/SKILL.md") || path == "SKILL.md" {
+                Some(path.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(skill_files)
+}
+
+/// Fetch raw file content from GitHub
+fn github_fetch_raw(owner: &str, repo: &str, path: &str) -> Result<String, String> {
+    let url = format!(
+        "https://raw.githubusercontent.com/{}/{}/main/{}",
+        owner, repo, path
+    );
+    let mut response = ureq::get(&url)
+        .header("User-Agent", "cckit")
+        .call()
+        .map_err(|e| format!("Fetch error: {}", e))?;
+
+    response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("Read error: {}", e))
+}
+
+/// Collect all local SKILL.md paths (global + project).
+/// Returns Vec<(display_name, path_to_skill_md)>.
+fn collect_local_skill_paths() -> Vec<(String, std::path::PathBuf)> {
+    let mut results = Vec::new();
+
+    // Global skills (~/.claude/skills/)
+    if let Some(home) = dirs::home_dir() {
+        let global_skills = home.join(".claude").join("skills");
+        if global_skills.exists() {
+            if let Ok(entries) = fs::read_dir(&global_skills) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    let skill_file = p.join("SKILL.md");
+                    if p.is_dir() && skill_file.exists() {
+                        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        results.push((format!("{} {}", name, "(global)".dimmed()), skill_file));
+                    }
+                }
+            }
+        }
+    }
+
+    // Project skills (.claude/skills/)
+    if let Ok(cwd) = std::env::current_dir() {
+        let project_skills = cwd.join(".claude").join("skills");
+        if project_skills.exists() {
+            if let Ok(entries) = fs::read_dir(&project_skills) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    let skill_file = p.join("SKILL.md");
+                    if p.is_dir() && skill_file.exists() {
+                        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        results.push((format!("{} {}", name, "(project)".dimmed()), skill_file));
+                    }
+                }
+            }
+        }
+    }
+
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
+
+fn skill_validate_command(spec: Option<&str>) {
+    // No spec — validate all installed local skills
+    let Some(spec) = spec else {
+        let skills = collect_local_skill_paths();
+        if skills.is_empty() {
+            println!("{}", "No installed skills found.".yellow());
+            return;
+        }
+
+        let displays: Vec<&str> = skills.iter().map(|(name, _)| name.as_str()).collect();
+        let selected = checkbox_select(&displays);
+        if selected.is_empty() {
+            return;
+        }
+
+        for (i, idx) in selected.iter().enumerate() {
+            let (name, path) = &skills[*idx];
+            match fs::read_to_string(path) {
+                Ok(content) => {
+                    let findings = find_shell_commands(&content);
+                    display_findings(name, &content, &findings);
+                }
+                Err(e) => {
+                    eprintln!("{}: {}: {}", "Error".red(), name, e);
+                }
+            }
+            if selected.len() > 1 && i < selected.len() - 1 {
+                println!("{}", "─".repeat(60).dimmed());
+            }
+        }
+        return;
+    };
+
+    let path = std::path::Path::new(spec);
+
+    // Local path?
+    if path.exists() || spec.starts_with('.') || spec.starts_with('/') {
+        let skill_file = if path.is_dir() {
+            path.join("SKILL.md")
+        } else {
+            path.to_path_buf()
+        };
+        match fs::read_to_string(&skill_file) {
+            Ok(content) => {
+                let name = path
+                    .file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy();
+                let findings = find_shell_commands(&content);
+                display_findings(&name, &content, &findings);
+            }
+            Err(e) => {
+                eprintln!("{}: {}: {}", "Error".red(), skill_file.display(), e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // GitHub spec
+    let Some((owner, repo, skill_path)) = parse_github_spec(spec) else {
+        eprintln!(
+            "{}: invalid spec '{}'. Expected owner/repo/skill-name or owner/repo/",
+            "Error".red(),
+            spec
+        );
+        std::process::exit(1);
+    };
+
+    // Helper: validate and display a SKILL.md fetched from GitHub
+    let validate_remote = |owner: &str, repo: &str, skill_md_path: &str, display_name: &str| {
+        println!(
+            "Fetching {}/{}/{}...\n",
+            owner.dimmed(),
+            repo.dimmed(),
+            skill_md_path.green()
+        );
+        match github_fetch_raw(owner, repo, skill_md_path) {
+            Ok(content) => {
+                let findings = find_shell_commands(&content);
+                display_findings(display_name, &content, &findings);
+            }
+            Err(e) => {
+                eprintln!("{}: {}", "Error".red(), e);
+                std::process::exit(1);
+            }
+        }
+    };
+
+    if let Some(ref skill_name) = skill_path {
+        // Try skill_name/SKILL.md first, fall back to SKILL.md at path directly
+        let skill_md_path = format!("{}/SKILL.md", skill_name);
+        if github_fetch_raw(&owner, &repo, &skill_md_path).is_ok() {
+            validate_remote(&owner, &repo, &skill_md_path, skill_name);
+        } else {
+            // Maybe it's a direct path to a dir with SKILL.md, or SKILL.md itself
+            let path = if skill_name.ends_with("SKILL.md") {
+                skill_name.clone()
+            } else {
+                format!("{}/SKILL.md", skill_name.trim_end_matches('/'))
+            };
+            validate_remote(&owner, &repo, &path, skill_name);
+        }
+        return;
+    }
+
+    // No skill path specified — find all SKILL.md files in the repo
+    println!(
+        "Searching for skills in {}/{}...\n",
+        owner.cyan(),
+        repo.cyan()
+    );
+    let skill_files = match github_find_skill_files(&owner, &repo) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{}: {}", "Error".red(), e);
+            std::process::exit(1);
+        }
+    };
+
+    if skill_files.is_empty() {
+        println!("{}", "No SKILL.md files found in repository.".yellow());
+        return;
+    }
+
+    if skill_files.len() == 1 {
+        // Single skill — validate directly
+        let path = &skill_files[0];
+        let display = path.trim_end_matches("/SKILL.md");
+        let display = if display == "SKILL.md" { &repo } else { display };
+        validate_remote(&owner, &repo, path, display);
+        return;
+    }
+
+    // Multiple skills — interactive checkbox selection
+    let displays: Vec<&str> = skill_files
+        .iter()
+        .map(|f| f.trim_end_matches("/SKILL.md"))
+        .collect();
+    let selected = checkbox_select(&displays);
+    if selected.is_empty() {
+        return;
+    }
+
+    for idx in &selected {
+        let path = &skill_files[*idx];
+        let display = displays[*idx];
+        validate_remote(&owner, &repo, path, display);
+        if selected.len() > 1 {
+            println!("{}", "─".repeat(60).dimmed());
+        }
+    }
 }
 
 fn scan_agents(dir: &Path) -> Vec<AgentInfo> {
@@ -3800,6 +4441,9 @@ pub fn run() {
                 dry_run,
             } => {
                 skill_promote_command(filter, name, force, dry_run);
+            }
+            SkillCommands::Validate { spec } => {
+                skill_validate_command(spec.as_deref());
             }
         },
         Some(Commands::Mcp { command }) => match command {
