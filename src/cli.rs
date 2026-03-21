@@ -303,6 +303,9 @@ Examples:
     Validate {
         /// GitHub URL, owner/repo[/path] shorthand, or local path. Omit to scan all installed skills.
         spec: Option<String>,
+
+        #[arg(short, long, help = "Show detailed output (context lines, frontmatter)")]
+        verbose: bool,
     },
 }
 
@@ -1506,6 +1509,148 @@ struct SkillFinding {
     kind: FindingKind,
 }
 
+/// A suspicious pattern found in a bundled script
+struct ScriptFinding {
+    file: String,
+    line_number: usize,
+    line: String,
+    category: &'static str,
+}
+
+/// Suspicious patterns to flag in bundled scripts.
+/// Not proof of malice — just "worth checking before you trust this."
+const SCRIPT_SUSPICIOUS_PATTERNS: &[(&str, &[&str])] = &[
+    ("network", &[
+        "curl ", "curl\t", "wget ", "fetch(", "requests.", "requests.get", "requests.post",
+        "http.get", "http.request", "urllib", "httpx", "aiohttp",
+        "XMLHttpRequest", "axios", "got(", "node-fetch",
+    ]),
+    ("exec/eval", &[
+        "eval(", "exec(", "subprocess", "child_process", "os.system(",
+        "os.popen(", "Popen(", "spawn(", "execSync(", "execFile(",
+        "Function(", "vm.runIn",
+    ]),
+    ("env/credentials", &[
+        "process.env", "os.environ", "os.getenv", "ENV[",
+        "API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL",
+        "aws_access_key", "aws_secret",
+    ]),
+    ("encode/obfuscate", &[
+        "base64", "atob(", "btoa(", "decode(", "\\x", "\\u00",
+        "fromCharCode", "String.raw",
+    ]),
+    ("destructive", &[
+        "rm -rf", "rmdir", "shutil.rmtree", "os.remove", "fs.unlinkSync",
+        "fs.rmdirSync", "fs.rmSync",
+    ]),
+    ("exfiltration", &[
+        "| curl", "| wget", "| nc ", "| ncat",
+        "> /dev/tcp", "base64 |",
+    ]),
+];
+
+/// Scan script content for suspicious patterns
+fn scan_script_content(filename: &str, content: &str) -> Vec<ScriptFinding> {
+    let mut findings = Vec::new();
+    let lower_content_lines: Vec<String> = content.lines().map(|l| l.to_lowercase()).collect();
+
+    for (i, (line, lower)) in content.lines().zip(lower_content_lines.iter()).enumerate() {
+        let trimmed = lower.trim();
+        // Skip comments
+        if trimmed.starts_with('#') || trimmed.starts_with("//") || trimmed.starts_with("--") {
+            continue;
+        }
+        for &(category, patterns) in SCRIPT_SUSPICIOUS_PATTERNS {
+            for &pattern in patterns {
+                if lower.contains(&pattern.to_lowercase()) {
+                    findings.push(ScriptFinding {
+                        file: filename.to_string(),
+                        line_number: i + 1,
+                        line: line.to_string(),
+                        category,
+                    });
+                    break; // one finding per category per line
+                }
+            }
+        }
+    }
+    findings
+}
+
+/// Script file extensions to check
+fn is_script_file(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".sh")
+        || lower.ends_with(".bash")
+        || lower.ends_with(".zsh")
+        || lower.ends_with(".py")
+        || lower.ends_with(".js")
+        || lower.ends_with(".ts")
+        || lower.ends_with(".mjs")
+        || lower.ends_with(".rb")
+        || lower.ends_with(".pl")
+}
+
+/// Display script findings grouped by category
+fn display_script_findings(findings: &[ScriptFinding], verbose: bool) {
+    if findings.is_empty() {
+        return;
+    }
+
+    if verbose {
+        // Group by category, show each line
+        let mut by_category: std::collections::BTreeMap<&str, Vec<&ScriptFinding>> =
+            std::collections::BTreeMap::new();
+        for f in findings {
+            by_category.entry(f.category).or_default().push(f);
+        }
+
+        println!(
+            "  {} {} suspicious pattern(s) in scripts:",
+            "FLAG".yellow().bold(),
+            findings.len().to_string().yellow(),
+        );
+        for (category, items) in &by_category {
+            println!("    [{}]", category.yellow().bold());
+            for f in items {
+                println!(
+                    "      {}:{} {}",
+                    f.file.dimmed(),
+                    f.line_number.to_string().cyan(),
+                    f.line.trim().dimmed()
+                );
+            }
+        }
+    } else {
+        // Compact: one line per file with categories
+        let mut by_file: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> =
+            std::collections::BTreeMap::new();
+        for f in findings {
+            by_file.entry(&f.file).or_default().insert(f.category);
+        }
+        let file_summaries: Vec<String> = by_file
+            .iter()
+            .map(|(file, cats)| {
+                let cat_str: Vec<&&str> = cats.iter().collect();
+                format!(
+                    "{}({})",
+                    file,
+                    cat_str
+                        .iter()
+                        .map(|c| c.yellow().to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .collect();
+        println!(
+            "  {} scripts: {}",
+            "FLAG".yellow().bold(),
+            file_summaries.join("  ")
+        );
+    }
+}
+
 /// Parse a GitHub spec: full URL or "owner/repo[/path]" shorthand.
 /// Supports:
 ///   https://github.com/owner/repo
@@ -1609,7 +1754,7 @@ fn find_shell_commands(content: &str) -> Vec<SkillFinding> {
 }
 
 /// Display validation results
-fn display_findings(skill_name: &str, content: &str, findings: &[SkillFinding]) {
+fn display_findings(skill_name: &str, content: &str, findings: &[SkillFinding], verbose: bool) {
     let shell_cmds: Vec<&SkillFinding> = findings
         .iter()
         .filter(|f| matches!(f.kind, FindingKind::ShellCommand))
@@ -1619,48 +1764,91 @@ fn display_findings(skill_name: &str, content: &str, findings: &[SkillFinding]) 
         .filter(|f| matches!(f.kind, FindingKind::Substitution))
         .collect();
 
+    let line_count = content.lines().count();
+    let allowed_tools = extract_frontmatter_field(content, "allowed-tools");
+    let has_bash = allowed_tools
+        .as_ref()
+        .is_some_and(|a| a.to_lowercase().contains("bash"));
+
     if shell_cmds.is_empty() && substitutions.is_empty() {
+        // Compact OK line
         println!(
-            "{} No embedded shell commands found in '{}'",
+            "{} {} {}",
             "OK".green().bold(),
-            skill_name.green()
+            skill_name.green(),
+            format!("({} lines)", line_count).dimmed()
         );
-    } else {
-        if !shell_cmds.is_empty() {
-            println!(
-                "{} {} shell command(s) will execute on skill expansion:\n",
-                "WARN".yellow().bold(),
-                shell_cmds.len().to_string().yellow(),
-            );
-            for f in &shell_cmds {
-                println!(
-                    "  {}:{} {}",
-                    "line".dimmed(),
-                    f.line_number.to_string().cyan(),
-                    f.command.red().bold()
-                );
-                println!("    {}\n", f.line.trim().dimmed());
-            }
+        if verbose {
+            print_frontmatter_details(content, &shell_cmds, &allowed_tools, has_bash);
         }
-        if !substitutions.is_empty() {
+        return;
+    }
+
+    // Summary line
+    let mut parts = Vec::new();
+    if !shell_cmds.is_empty() {
+        parts.push(format!("{} shell cmd", shell_cmds.len()).yellow().to_string());
+    }
+    if !substitutions.is_empty() {
+        parts.push(format!("{} substitution", substitutions.len()).cyan().to_string());
+    }
+    println!(
+        "{} {} — {}  {}",
+        "WARN".yellow().bold(),
+        skill_name.green(),
+        parts.join(", "),
+        format!("({} lines)", line_count).dimmed()
+    );
+
+    // Shell commands: always show (these are the main concern)
+    for f in &shell_cmds {
+        if verbose {
             println!(
-                "{} {} variable substitution(s):\n",
-                "INFO".cyan().bold(),
-                substitutions.len().to_string().cyan(),
+                "  {}:{} {}",
+                "line".dimmed(),
+                f.line_number.to_string().cyan(),
+                f.command.red().bold()
             );
-            for f in &substitutions {
-                println!(
-                    "  {}:{} {}",
-                    "line".dimmed(),
-                    f.line_number.to_string().cyan(),
-                    f.command.cyan()
-                );
-            }
-            println!();
+            println!("    {}", f.line.trim().dimmed());
+        } else {
+            println!(
+                "  {} {}",
+                format!("L{}", f.line_number).dimmed(),
+                f.command.red()
+            );
         }
     }
 
-    // Show frontmatter summary
+    // Substitutions: compact
+    if !substitutions.is_empty() {
+        let vars: Vec<&str> = substitutions.iter().map(|f| f.command.as_str()).collect();
+        println!("  {} {}", "vars:".dimmed(), vars.join(", ").cyan());
+    }
+
+    // allowed-tools warning (always show if relevant)
+    if has_bash {
+        println!(
+            "  {} allowed-tools includes Bash — shell commands will execute",
+            "!".red().bold()
+        );
+    } else if !shell_cmds.is_empty() && allowed_tools.is_none() {
+        println!(
+            "  {} no allowed-tools — shell commands may be blocked",
+            "?".yellow()
+        );
+    }
+
+    if verbose {
+        print_frontmatter_details(content, &shell_cmds, &allowed_tools, has_bash);
+    }
+}
+
+fn print_frontmatter_details(
+    content: &str,
+    _shell_cmds: &[&SkillFinding],
+    allowed_tools: &Option<String>,
+    _has_bash: bool,
+) {
     println!("{}", "--- frontmatter ---".dimmed());
     if let Some(name) = extract_frontmatter_field(content, "name") {
         println!("  {}: {}", "name".dimmed(), name);
@@ -1668,32 +1856,116 @@ fn display_findings(skill_name: &str, content: &str, findings: &[SkillFinding]) 
     if let Some(desc) = extract_frontmatter_field(content, "description") {
         println!("  {}: {}", "desc".dimmed(), desc);
     }
-    if let Some(allowed) = extract_frontmatter_field(content, "allowed-tools") {
-        let has_bash = allowed.to_lowercase().contains("bash");
-        if has_bash {
-            println!(
-                "  {}: {} {}",
-                "allowed-tools".dimmed(),
-                allowed.yellow(),
-                "(includes Bash — shell commands will execute)".red()
-            );
-        } else {
-            println!("  {}: {}", "allowed-tools".dimmed(), allowed);
-        }
-    } else if !shell_cmds.is_empty() {
-        println!(
-            "  {}: {} {}",
-            "allowed-tools".dimmed(),
-            "(not set)".dimmed(),
-            "— shell commands may be blocked without Bash permission".yellow()
-        );
+    if let Some(allowed) = allowed_tools {
+        println!("  {}: {}", "allowed-tools".dimmed(), allowed);
     }
     if let Some(context) = extract_frontmatter_field(content, "context") {
         println!("  {}: {}", "context".dimmed(), context);
     }
+}
 
-    let line_count = content.lines().count();
-    println!("  {}: {} lines", "size".dimmed(), line_count);
+/// Scan all scripts in a local skill directory and display findings
+fn scan_local_scripts(skill_dir: &std::path::Path, verbose: bool) {
+    let mut all_findings = Vec::new();
+    scan_local_scripts_recursive(skill_dir, skill_dir, &mut all_findings);
+    display_script_findings(&all_findings, verbose);
+}
+
+fn scan_local_scripts_recursive(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    findings: &mut Vec<ScriptFinding>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            scan_local_scripts_recursive(base, &p, findings);
+        } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+            if is_script_file(name) {
+                if let Ok(content) = fs::read_to_string(&p) {
+                    let rel = p.strip_prefix(base).unwrap_or(&p);
+                    let display = rel.to_string_lossy().to_string();
+                    let mut file_findings = scan_script_content(&display, &content);
+                    findings.append(&mut file_findings);
+                }
+            }
+        }
+    }
+}
+
+/// Scan scripts in a remote GitHub skill directory and display findings.
+/// `skill_md_path` is like "plugins/nano-banana/skills/nano-banana/SKILL.md"
+fn scan_remote_scripts(owner: &str, repo: &str, skill_md_path: &str, verbose: bool) {
+    // Derive skill directory prefix from SKILL.md path
+    let skill_dir = skill_md_path
+        .strip_suffix("/SKILL.md")
+        .or_else(|| skill_md_path.strip_suffix("SKILL.md"))
+        .unwrap_or("");
+
+    // Use the tree API to find script files under this directory
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/git/trees/main?recursive=1",
+        owner, repo
+    );
+    let Ok(mut response) = ureq::get(&url)
+        .header("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", "cckit")
+        .call()
+    else {
+        return;
+    };
+
+    let Ok(body) = response.body_mut().read_json::<serde_json::Value>() else {
+        return;
+    };
+    let Some(tree) = body.get("tree").and_then(|t| t.as_array()) else {
+        return;
+    };
+
+    let script_paths: Vec<String> = tree
+        .iter()
+        .filter_map(|e| {
+            let path = e.get("path")?.as_str()?;
+            let etype = e.get("type")?.as_str()?;
+            if etype != "blob" {
+                return None;
+            }
+            // Must be under the skill directory
+            if !skill_dir.is_empty() && !path.starts_with(skill_dir) {
+                return None;
+            }
+            let filename = path.rsplit('/').next().unwrap_or(path);
+            if is_script_file(filename) {
+                Some(path.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if script_paths.is_empty() {
+        return;
+    }
+
+    let mut all_findings = Vec::new();
+    for script_path in &script_paths {
+        if let Ok(content) = github_fetch_raw(owner, repo, script_path) {
+            let display = if !skill_dir.is_empty() {
+                script_path
+                    .strip_prefix(skill_dir)
+                    .unwrap_or(script_path)
+                    .trim_start_matches('/')
+            } else {
+                script_path
+            };
+            let mut file_findings = scan_script_content(display, &content);
+            all_findings.append(&mut file_findings);
+        }
+    }
+    display_script_findings(&all_findings, verbose);
 }
 
 fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
@@ -1920,41 +2192,52 @@ fn github_fetch_raw(owner: &str, repo: &str, path: &str) -> Result<String, Strin
         .map_err(|e| format!("Read error: {}", e))
 }
 
-/// Collect all local SKILL.md paths (global + project).
+/// Collect all local SKILL.md paths (global + all projects from ~/.claude.json).
 /// Returns Vec<(display_name, path_to_skill_md)>.
 fn collect_local_skill_paths() -> Vec<(String, std::path::PathBuf)> {
     let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
-    // Global skills (~/.claude/skills/)
-    if let Some(home) = dirs::home_dir() {
-        let global_skills = home.join(".claude").join("skills");
-        if global_skills.exists() {
-            if let Ok(entries) = fs::read_dir(&global_skills) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    let skill_file = p.join("SKILL.md");
-                    if p.is_dir() && skill_file.exists() {
-                        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-                        results.push((format!("{} {}", name, "(global)".dimmed()), skill_file));
-                    }
-                }
+    let home = dirs::home_dir().expect("Could not find home directory");
+
+    // Helper to add skills from a directory
+    let add_from_dir = |dir: &Path, scope: &str, results: &mut Vec<(String, std::path::PathBuf)>, seen: &mut std::collections::HashSet<std::path::PathBuf>| {
+        let skills_dir = dir.join("skills");
+        if !skills_dir.exists() {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(&skills_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            // Resolve symlink for is_dir check
+            let is_dir = if p.is_symlink() {
+                fs::read_link(&p).map_or(false, |t| t.is_dir())
+            } else {
+                p.is_dir()
+            };
+            if !is_dir {
+                continue;
+            }
+            let skill_file = p.join("SKILL.md");
+            if skill_file.exists() && seen.insert(skill_file.clone()) {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                results.push((format!("{} {}", name, format!("({})", scope).dimmed()), skill_file));
             }
         }
-    }
+    };
 
-    // Project skills (.claude/skills/)
-    if let Ok(cwd) = std::env::current_dir() {
-        let project_skills = cwd.join(".claude").join("skills");
-        if project_skills.exists() {
-            if let Ok(entries) = fs::read_dir(&project_skills) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    let skill_file = p.join("SKILL.md");
-                    if p.is_dir() && skill_file.exists() {
-                        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-                        results.push((format!("{} {}", name, "(project)".dimmed()), skill_file));
-                    }
-                }
+    // 1. Global skills (~/.claude/skills/)
+    add_from_dir(&home.join(".claude"), "global", &mut results, &mut seen);
+
+    // 2. All projects from ~/.claude.json
+    if let Ok(config) = load_claude_config() {
+        if let Some(projects) = config.projects {
+            for project_path in projects.keys() {
+                let claude_dir = Path::new(project_path).join(".claude");
+                let scope = shorten_path(project_path);
+                add_from_dir(&claude_dir, &scope, &mut results, &mut seen);
             }
         }
     }
@@ -1963,7 +2246,7 @@ fn collect_local_skill_paths() -> Vec<(String, std::path::PathBuf)> {
     results
 }
 
-fn skill_validate_command(spec: Option<&str>) {
+fn skill_validate_command(spec: Option<&str>, verbose: bool) {
     // No spec — validate all installed local skills
     let Some(spec) = spec else {
         let skills = collect_local_skill_paths();
@@ -1983,7 +2266,11 @@ fn skill_validate_command(spec: Option<&str>) {
             match fs::read_to_string(path) {
                 Ok(content) => {
                     let findings = find_shell_commands(&content);
-                    display_findings(name, &content, &findings);
+                    display_findings(name, &content, &findings, verbose);
+                    // Scan bundled scripts in the skill directory
+                    if let Some(skill_dir) = path.parent() {
+                        scan_local_scripts(skill_dir, verbose);
+                    }
                 }
                 Err(e) => {
                     eprintln!("{}: {}: {}", "Error".red(), name, e);
@@ -2012,7 +2299,10 @@ fn skill_validate_command(spec: Option<&str>) {
                     .unwrap_or(path.as_os_str())
                     .to_string_lossy();
                 let findings = find_shell_commands(&content);
-                display_findings(&name, &content, &findings);
+                display_findings(&name, &content, &findings, verbose);
+                // Scan bundled scripts
+                let skill_dir = if path.is_dir() { path } else { skill_file.parent().unwrap_or(path) };
+                scan_local_scripts(skill_dir, verbose);
             }
             Err(e) => {
                 eprintln!("{}: {}: {}", "Error".red(), skill_file.display(), e);
@@ -2043,7 +2333,8 @@ fn skill_validate_command(spec: Option<&str>) {
         match github_fetch_raw(owner, repo, skill_md_path) {
             Ok(content) => {
                 let findings = find_shell_commands(&content);
-                display_findings(display_name, &content, &findings);
+                display_findings(display_name, &content, &findings, verbose);
+                scan_remote_scripts(owner, repo, skill_md_path, verbose);
             }
             Err(e) => {
                 eprintln!("{}: {}", "Error".red(), e);
@@ -4442,8 +4733,8 @@ pub fn run() {
             } => {
                 skill_promote_command(filter, name, force, dry_run);
             }
-            SkillCommands::Validate { spec } => {
-                skill_validate_command(spec.as_deref());
+            SkillCommands::Validate { spec, verbose } => {
+                skill_validate_command(spec.as_deref(), verbose);
             }
         },
         Some(Commands::Mcp { command }) => match command {
