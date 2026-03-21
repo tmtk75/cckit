@@ -259,6 +259,9 @@ Origins:
 
         #[arg(long, help = "Show only a specific scope (global, project, plugin)")]
         scope: Option<String>,
+
+        #[arg(long, help = "Show only skills that exist in multiple projects")]
+        dupes: bool,
     },
 
     /// Copy a skill from another project to the current project
@@ -739,7 +742,7 @@ fn detect_skill_origin(skill_dir: &Path) -> String {
     "no author".to_string()
 }
 
-fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
+fn skill_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) {
     let home = dirs::home_dir().expect("Could not find home directory");
     let global_claude = home.join(".claude");
 
@@ -748,7 +751,6 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
         description: Option<String>,
         origin: String,
         scope: String,
-        path: String,
     }
 
     let mut entries: Vec<SkillEntry> = Vec::new();
@@ -787,7 +789,6 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
                     description,
                     origin,
                     scope: "global".to_string(),
-                    path: shorten_path(&path.to_string_lossy()),
                 });
             }
         }
@@ -802,24 +803,39 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
                 description: skill.description.clone(),
                 origin: "plugin".to_string(),
                 scope: format!("plugin:{}", plugin.name),
-                path: plugin.name.clone(),
             });
         }
     }
 
-    // 3. Project-local skills (current directory)
-    if let Ok(cwd) = std::env::current_dir() {
-        let project_claude = cwd.join(".claude");
-        if project_claude.join("skills").exists() {
-            for skill_source in scan_skills_with_paths(&project_claude) {
-                let origin = detect_skill_origin(&skill_source.skill_dir);
-                entries.push(SkillEntry {
-                    name: skill_source.info.name,
-                    description: skill_source.info.description,
-                    origin,
-                    scope: "project".to_string(),
-                    path: shorten_path(&skill_source.skill_dir.to_string_lossy()),
-                });
+    // 3. All projects from ~/.claude.json
+    // Deduplicate by (skill_name, content_hash) to handle submodules with identical content
+    let mut seen_content: std::collections::HashSet<(String, u64)> = std::collections::HashSet::new();
+    if let Ok(config) = load_claude_config() {
+        if let Some(projects) = config.projects {
+            for project_path in projects.keys() {
+                let claude_dir = Path::new(project_path).join(".claude");
+                if claude_dir.join("skills").exists() {
+                    for skill_source in scan_skills_with_paths(&claude_dir) {
+                        let content_hash = fs::read_to_string(skill_source.skill_dir.join("SKILL.md"))
+                            .map(|c| {
+                                use std::hash::{Hash, Hasher};
+                                let mut h = std::collections::hash_map::DefaultHasher::new();
+                                c.hash(&mut h);
+                                h.finish()
+                            })
+                            .unwrap_or(0);
+                        let key = (skill_source.info.name.clone(), content_hash);
+                        if seen_content.insert(key) {
+                            let origin = detect_skill_origin(&skill_source.skill_dir);
+                            entries.push(SkillEntry {
+                                name: skill_source.info.name,
+                                description: skill_source.info.description,
+                                origin,
+                                scope: format!("project:{}", shorten_path(project_path)),
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -832,37 +848,42 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
         entries.retain(|e| e.scope.starts_with(s.as_str()));
     }
 
-    entries.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
-
     if entries.is_empty() {
         println!("{}", "No skills found.".dimmed());
         return;
     }
 
-    // Calculate column widths
-    let max_name = entries
-        .iter()
-        .map(|e| e.name.len())
-        .max()
-        .unwrap_or(10)
-        .min(30);
-    let max_origin = entries
-        .iter()
-        .map(|e| e.origin.len())
-        .max()
-        .unwrap_or(6)
-        .min(15);
-
-    println!("{} skills found\n", entries.len().to_string().cyan());
-
-    let mut current_scope = String::new();
+    // Group by skill name
+    let mut by_name: std::collections::BTreeMap<String, Vec<&SkillEntry>> =
+        std::collections::BTreeMap::new();
     for entry in &entries {
-        if entry.scope != current_scope {
-            current_scope = entry.scope.clone();
-            println!("{}:", current_scope.bold());
-        }
+        by_name.entry(entry.name.clone()).or_default().push(entry);
+    }
 
-        let desc = entry
+    if dupes {
+        by_name.retain(|_, locs| locs.len() > 1);
+        if by_name.is_empty() {
+            println!("{}", "No duplicate skills found.".dimmed());
+            return;
+        }
+        println!(
+            "{} skills in multiple projects\n",
+            by_name.len().to_string().cyan()
+        );
+    } else {
+        let unique_count = by_name.len();
+        println!(
+            "{} unique skills ({} total across projects)\n",
+            unique_count.to_string().cyan(),
+            entries.len().to_string().dimmed()
+        );
+    }
+
+    let max_name = by_name.keys().map(|n| n.len()).max().unwrap_or(10).min(30);
+
+    for (name, locations) in &by_name {
+        let first = locations[0];
+        let desc = first
             .description
             .as_deref()
             .map(|d| {
@@ -871,24 +892,40 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>) {
             })
             .unwrap_or_default();
 
-        let origin_colored = match entry.origin.as_str() {
-            "personal" => format!("({})", entry.origin).green(),
-            "marketplace" => format!("({})", entry.origin).bright_blue(),
-            "installed" => format!("({})", entry.origin).cyan(),
-            "plugin" => format!("({})", entry.origin).magenta(),
-            "no author" => format!("({})", entry.origin).dimmed(),
-            _ => format!("({})", entry.origin).yellow(),
+        let origin_colored = match first.origin.as_str() {
+            "personal" => format!("({})", first.origin).green(),
+            "marketplace" => format!("({})", first.origin).bright_blue(),
+            "installed" => format!("({})", first.origin).cyan(),
+            "plugin" => format!("({})", first.origin).magenta(),
+            "no author" => format!("({})", first.origin).dimmed(),
+            _ => format!("({})", first.origin).yellow(),
         };
-        println!(
-            "  {} {:<width_name$} {:<width_origin$} {} {}",
-            "-".dimmed(),
-            entry.name.bright_cyan(),
-            origin_colored,
-            desc.dimmed(),
-            format!("[{}]", entry.path).dimmed(),
-            width_name = max_name,
-            width_origin = max_origin + 2,
-        );
+
+        if locations.len() == 1 {
+            println!(
+                "  {:<width$} {} {} {}",
+                name.bright_cyan(),
+                origin_colored,
+                desc.dimmed(),
+                format!("[{}]", first.scope).dimmed(),
+                width = max_name,
+            );
+        } else {
+            println!(
+                "  {:<width$} {} {}",
+                name.bright_cyan(),
+                origin_colored,
+                desc.dimmed(),
+                width = max_name,
+            );
+            for loc in locations {
+                println!(
+                    "    {} {}",
+                    "↳".dimmed(),
+                    loc.scope.dimmed(),
+                );
+            }
+        }
     }
 }
 
@@ -2221,7 +2258,8 @@ fn collect_local_skill_paths() -> Vec<(String, std::path::PathBuf)> {
                 continue;
             }
             let skill_file = p.join("SKILL.md");
-            if skill_file.exists() && seen.insert(skill_file.clone()) {
+            let canonical = fs::canonicalize(&skill_file).unwrap_or_else(|_| skill_file.clone());
+            if skill_file.exists() && seen.insert(canonical) {
                 let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
                 results.push((format!("{} {}", name, format!("({})", scope).dimmed()), skill_file));
             }
@@ -4714,8 +4752,8 @@ pub fn run() {
             config_command(key, raw);
         }
         Some(Commands::Skill { command }) => match command {
-            SkillCommands::Ls { filter, scope } => {
-                skill_ls_command(filter, scope);
+            SkillCommands::Ls { filter, scope, dupes } => {
+                skill_ls_command(filter, scope, dupes);
             }
             SkillCommands::Copy {
                 filter,
