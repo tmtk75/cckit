@@ -307,7 +307,11 @@ Examples:
         /// GitHub URL, owner/repo[/path] shorthand, or local path. Omit to scan all installed skills.
         spec: Option<String>,
 
-        #[arg(short, long, help = "Show detailed output (context lines, frontmatter)")]
+        #[arg(
+            short,
+            long,
+            help = "Show detailed output (context lines, frontmatter)"
+        )]
         verbose: bool,
     },
 }
@@ -809,21 +813,23 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) 
 
     // 3. All projects from ~/.claude.json
     // Deduplicate by (skill_name, content_hash) to handle submodules with identical content
-    let mut seen_content: std::collections::HashSet<(String, u64)> = std::collections::HashSet::new();
+    let mut seen_content: std::collections::HashSet<(String, u64)> =
+        std::collections::HashSet::new();
     if let Ok(config) = load_claude_config() {
         if let Some(projects) = config.projects {
             for project_path in projects.keys() {
                 let claude_dir = Path::new(project_path).join(".claude");
                 if claude_dir.join("skills").exists() {
                     for skill_source in scan_skills_with_paths(&claude_dir) {
-                        let content_hash = fs::read_to_string(skill_source.skill_dir.join("SKILL.md"))
-                            .map(|c| {
-                                use std::hash::{Hash, Hasher};
-                                let mut h = std::collections::hash_map::DefaultHasher::new();
-                                c.hash(&mut h);
-                                h.finish()
-                            })
-                            .unwrap_or(0);
+                        let content_hash =
+                            fs::read_to_string(skill_source.skill_dir.join("SKILL.md"))
+                                .map(|c| {
+                                    use std::hash::{Hash, Hasher};
+                                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                                    c.hash(&mut h);
+                                    h.finish()
+                                })
+                                .unwrap_or(0);
                         let key = (skill_source.info.name.clone(), content_hash);
                         if seen_content.insert(key) {
                             let origin = detect_skill_origin(&skill_source.skill_dir);
@@ -919,11 +925,7 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) 
                 width = max_name,
             );
             for loc in locations {
-                println!(
-                    "    {} {}",
-                    "↳".dimmed(),
-                    loc.scope.dimmed(),
-                );
+                println!("    {} {}", "↳".dimmed(), loc.scope.dimmed(),);
             }
         }
     }
@@ -1557,33 +1559,96 @@ struct ScriptFinding {
 /// Suspicious patterns to flag in bundled scripts.
 /// Not proof of malice — just "worth checking before you trust this."
 const SCRIPT_SUSPICIOUS_PATTERNS: &[(&str, &[&str])] = &[
-    ("network", &[
-        "curl ", "curl\t", "wget ", "fetch(", "requests.", "requests.get", "requests.post",
-        "http.get", "http.request", "urllib", "httpx", "aiohttp",
-        "XMLHttpRequest", "axios", "got(", "node-fetch",
-    ]),
-    ("exec/eval", &[
-        "eval(", "exec(", "subprocess", "child_process", "os.system(",
-        "os.popen(", "Popen(", "spawn(", "execSync(", "execFile(",
-        "Function(", "vm.runIn",
-    ]),
-    ("env/credentials", &[
-        "process.env", "os.environ", "os.getenv", "ENV[",
-        "API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL",
-        "aws_access_key", "aws_secret",
-    ]),
-    ("encode/obfuscate", &[
-        "base64", "atob(", "btoa(", "decode(", "\\x", "\\u00",
-        "fromCharCode", "String.raw",
-    ]),
-    ("destructive", &[
-        "rm -rf", "rmdir", "shutil.rmtree", "os.remove", "fs.unlinkSync",
-        "fs.rmdirSync", "fs.rmSync",
-    ]),
-    ("exfiltration", &[
-        "| curl", "| wget", "| nc ", "| ncat",
-        "> /dev/tcp", "base64 |",
-    ]),
+    (
+        "network",
+        &[
+            "curl ",
+            "curl\t",
+            "wget ",
+            "fetch(",
+            "requests.",
+            "requests.get",
+            "requests.post",
+            "http.get",
+            "http.request",
+            "urllib",
+            "httpx",
+            "aiohttp",
+            "XMLHttpRequest",
+            "axios",
+            "got(",
+            "node-fetch",
+        ],
+    ),
+    (
+        "exec/eval",
+        &[
+            "eval(",
+            "exec(",
+            "subprocess",
+            "child_process",
+            "os.system(",
+            "os.popen(",
+            "Popen(",
+            "spawn(",
+            "execSync(",
+            "execFile(",
+            "Function(",
+            "vm.runIn",
+        ],
+    ),
+    (
+        "env/credentials",
+        &[
+            "process.env",
+            "os.environ",
+            "os.getenv",
+            "ENV[",
+            "API_KEY",
+            "SECRET",
+            "TOKEN",
+            "PASSWORD",
+            "CREDENTIAL",
+            "aws_access_key",
+            "aws_secret",
+        ],
+    ),
+    (
+        "encode/obfuscate",
+        &[
+            "base64",
+            "atob(",
+            "btoa(",
+            "decode(",
+            "\\x",
+            "\\u00",
+            "fromCharCode",
+            "String.raw",
+        ],
+    ),
+    (
+        "destructive",
+        &[
+            "rm -rf",
+            "rmdir",
+            "shutil.rmtree",
+            "os.remove",
+            "fs.unlinkSync",
+            "fs.rmdirSync",
+            "fs.rmSync",
+        ],
+    ),
+    (
+        "exfiltration",
+        &[
+            "| curl",
+            "| wget",
+            "| nc ",
+            "| ncat",
+            "> /dev/tcp",
+            "base64 |",
+        ],
+    ),
 ];
 
 /// Scan script content for suspicious patterns
@@ -1701,7 +1766,10 @@ fn parse_github_spec(spec: &str) -> Option<(String, String, Option<String>)> {
         let url = spec
             .trim_end_matches('/')
             .strip_prefix("https://github.com/")
-            .or_else(|| spec.trim_end_matches('/').strip_prefix("http://github.com/"))?;
+            .or_else(|| {
+                spec.trim_end_matches('/')
+                    .strip_prefix("http://github.com/")
+            })?;
         // url is now "owner/repo" or "owner/repo/tree/branch/path..."
         let parts: Vec<&str> = url.splitn(3, '/').collect();
         if parts.len() < 2 {
@@ -1742,7 +1810,11 @@ fn parse_github_spec(spec: &str) -> Option<(String, String, Option<String>)> {
             if skill.is_empty() {
                 Some((parts[0].to_string(), parts[1].to_string(), None))
             } else {
-                Some((parts[0].to_string(), parts[1].to_string(), Some(skill.to_string())))
+                Some((
+                    parts[0].to_string(),
+                    parts[1].to_string(),
+                    Some(skill.to_string()),
+                ))
             }
         }
         _ => None,
@@ -1824,10 +1896,18 @@ fn display_findings(skill_name: &str, content: &str, findings: &[SkillFinding], 
     // Summary line
     let mut parts = Vec::new();
     if !shell_cmds.is_empty() {
-        parts.push(format!("{} shell cmd", shell_cmds.len()).yellow().to_string());
+        parts.push(
+            format!("{} shell cmd", shell_cmds.len())
+                .yellow()
+                .to_string(),
+        );
     }
     if !substitutions.is_empty() {
-        parts.push(format!("{} substitution", substitutions.len()).cyan().to_string());
+        parts.push(
+            format!("{} substitution", substitutions.len())
+                .cyan()
+                .to_string(),
+        );
     }
     println!(
         "{} {} — {}  {}",
@@ -2026,8 +2106,9 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
 /// Controls: Up/Down to move, Space to toggle, 'a' to toggle all, Enter to confirm, q/Esc to cancel.
 fn checkbox_select(items: &[&str]) -> Vec<usize> {
     use crossterm::{
-        cursor, execute,
+        cursor,
         event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+        execute,
         terminal::{self, ClearType},
     };
     use std::io::Write;
@@ -2142,10 +2223,7 @@ fn checkbox_select(items: &[&str]) -> Vec<usize> {
 fn checkbox_select_fallback(items: &[&str]) -> Vec<usize> {
     use std::io::Write;
 
-    println!(
-        "{} skill(s) found:\n",
-        items.len().to_string().cyan()
-    );
+    println!("{} skill(s) found:\n", items.len().to_string().cyan());
     for (i, item) in items.iter().enumerate() {
         println!("  {} {}", format!("[{}]", i + 1).dimmed(), item.green());
     }
@@ -2238,33 +2316,45 @@ fn collect_local_skill_paths() -> Vec<(String, std::path::PathBuf)> {
     let home = dirs::home_dir().expect("Could not find home directory");
 
     // Helper to add skills from a directory
-    let add_from_dir = |dir: &Path, scope: &str, results: &mut Vec<(String, std::path::PathBuf)>, seen: &mut std::collections::HashSet<std::path::PathBuf>| {
-        let skills_dir = dir.join("skills");
-        if !skills_dir.exists() {
-            return;
-        }
-        let Ok(entries) = fs::read_dir(&skills_dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            // Resolve symlink for is_dir check
-            let is_dir = if p.is_symlink() {
-                fs::read_link(&p).map_or(false, |t| t.is_dir())
-            } else {
-                p.is_dir()
+    let add_from_dir =
+        |dir: &Path,
+         scope: &str,
+         results: &mut Vec<(String, std::path::PathBuf)>,
+         seen: &mut std::collections::HashSet<std::path::PathBuf>| {
+            let skills_dir = dir.join("skills");
+            if !skills_dir.exists() {
+                return;
+            }
+            let Ok(entries) = fs::read_dir(&skills_dir) else {
+                return;
             };
-            if !is_dir {
-                continue;
+            for entry in entries.flatten() {
+                let p = entry.path();
+                // Resolve symlink for is_dir check
+                let is_dir = if p.is_symlink() {
+                    fs::read_link(&p).map_or(false, |t| t.is_dir())
+                } else {
+                    p.is_dir()
+                };
+                if !is_dir {
+                    continue;
+                }
+                let skill_file = p.join("SKILL.md");
+                let canonical =
+                    fs::canonicalize(&skill_file).unwrap_or_else(|_| skill_file.clone());
+                if skill_file.exists() && seen.insert(canonical) {
+                    let name = p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    results.push((
+                        format!("{} {}", name, format!("({})", scope).dimmed()),
+                        skill_file,
+                    ));
+                }
             }
-            let skill_file = p.join("SKILL.md");
-            let canonical = fs::canonicalize(&skill_file).unwrap_or_else(|_| skill_file.clone());
-            if skill_file.exists() && seen.insert(canonical) {
-                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-                results.push((format!("{} {}", name, format!("({})", scope).dimmed()), skill_file));
-            }
-        }
-    };
+        };
 
     // 1. Global skills (~/.claude/skills/)
     add_from_dir(&home.join(".claude"), "global", &mut results, &mut seen);
@@ -2339,7 +2429,11 @@ fn skill_validate_command(spec: Option<&str>, verbose: bool) {
                 let findings = find_shell_commands(&content);
                 display_findings(&name, &content, &findings, verbose);
                 // Scan bundled scripts
-                let skill_dir = if path.is_dir() { path } else { skill_file.parent().unwrap_or(path) };
+                let skill_dir = if path.is_dir() {
+                    path
+                } else {
+                    skill_file.parent().unwrap_or(path)
+                };
                 scan_local_scripts(skill_dir, verbose);
             }
             Err(e) => {
@@ -2421,7 +2515,11 @@ fn skill_validate_command(spec: Option<&str>, verbose: bool) {
         // Single skill — validate directly
         let path = &skill_files[0];
         let display = path.trim_end_matches("/SKILL.md");
-        let display = if display == "SKILL.md" { &repo } else { display };
+        let display = if display == "SKILL.md" {
+            &repo
+        } else {
+            display
+        };
         validate_remote(&owner, &repo, path, display);
         return;
     }
@@ -4752,7 +4850,11 @@ pub fn run() {
             config_command(key, raw);
         }
         Some(Commands::Skill { command }) => match command {
-            SkillCommands::Ls { filter, scope, dupes } => {
+            SkillCommands::Ls {
+                filter,
+                scope,
+                dupes,
+            } => {
                 skill_ls_command(filter, scope, dupes);
             }
             SkillCommands::Copy {

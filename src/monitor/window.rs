@@ -966,11 +966,56 @@ fn fit_window_to_content() {
     };
     let sf = screen.visibleFrame();
     let max_w = sf.size.width * 0.9;
-    let max_h = sf.size.height * 0.8;
-    let content_h = calculate_content_height().clamp(MIN_WINDOW_HEIGHT, max_h);
     let content_w = calculate_fit_window_width().min(max_w);
-    let target_content_rect =
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(content_w, content_h));
+    resize_window_to_layout(
+        window,
+        calculate_layout_height(),
+        content_w,
+        sf.size.height * 0.8,
+        true,
+    );
+    save_window_frame();
+}
+
+fn calculate_layout_height() -> CGFloat {
+    let session_count = SESSION_LIST.lock().unwrap().len().max(1) as CGFloat;
+    HEADER_HEIGHT + 1.0 + session_count * ROW_HEIGHT + FOOTER_HEIGHT
+}
+
+fn calculate_target_content_height(
+    target_layout_h: CGFloat,
+    layout_inset_h: CGFloat,
+    max_content_h: CGFloat,
+) -> CGFloat {
+    let min_layout_h = (MIN_WINDOW_HEIGHT - layout_inset_h).max(0.0);
+    let max_layout_h = (max_content_h - layout_inset_h).max(min_layout_h);
+    let clamped_layout_h = target_layout_h.clamp(min_layout_h, max_layout_h);
+    (clamped_layout_h + layout_inset_h).clamp(MIN_WINDOW_HEIGHT, max_content_h)
+}
+
+fn resize_window_to_layout(
+    window: &NSWindow,
+    target_layout_h: CGFloat,
+    target_content_w: CGFloat,
+    max_content_h: CGFloat,
+    animate: bool,
+) {
+    let mtm = match MainThreadMarker::new() {
+        Some(m) => m,
+        None => return,
+    };
+    let layout_rect: NSRect = unsafe { msg_send![window, contentLayoutRect] };
+    let content_h = window
+        .contentView()
+        .map(|view| view.bounds().size.height)
+        .unwrap_or(layout_rect.size.height);
+    let layout_inset_h = (content_h - layout_rect.size.height).max(0.0);
+    let target_content_h =
+        calculate_target_content_height(target_layout_h, layout_inset_h, max_content_h);
+    let target_content_rect = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(target_content_w, target_content_h),
+    );
     let target_frame =
         NSWindow::frameRectForContentRect_styleMask(target_content_rect, window.styleMask(), mtm);
 
@@ -982,13 +1027,7 @@ fn fit_window_to_content() {
         NSPoint::new(old_frame.origin.x - dx, old_frame.origin.y - dy),
         target_frame.size,
     );
-    window.setFrame_display_animate(new_frame, true, true);
-    save_window_frame();
-}
-
-fn calculate_content_height() -> CGFloat {
-    let session_count = SESSION_LIST.lock().unwrap().len().max(1) as CGFloat;
-    HEADER_HEIGHT + 1.0 + session_count * ROW_HEIGHT + FOOTER_HEIGHT
+    window.setFrame_display_animate(new_frame, true, animate);
 }
 
 // --- Main entry point ---
@@ -1142,7 +1181,7 @@ fn setup_window(
         .union(NSWindowStyleMask::Resizable)
         .union(NSWindowStyleMask::Miniaturizable)
         .union(NSWindowStyleMask::FullSizeContentView);
-    let needed_h = calculate_content_height();
+    let needed_h = calculate_layout_height();
     let content_rect_h = needed_h.clamp(MIN_WINDOW_HEIGHT, max_window_h);
 
     // Restore saved window frame, or center on screen
@@ -1339,6 +1378,13 @@ fn setup_window(
 
     window.makeKeyAndOrderFront(None);
     window.makeFirstResponder(Some(&doc_view));
+    resize_window_to_layout(
+        &window,
+        calculate_layout_height(),
+        win_w,
+        max_window_h,
+        false,
+    );
 
     // Periodic refresh
     let block = block2::RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
@@ -1359,4 +1405,27 @@ fn setup_window(
     app.activateIgnoringOtherApps(true);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_content_height_includes_layout_inset() {
+        let target = calculate_target_content_height(120.0, 28.0, 240.0);
+        assert_eq!(target, 148.0);
+    }
+
+    #[test]
+    fn target_content_height_respects_max_height() {
+        let target = calculate_target_content_height(300.0, 28.0, 240.0);
+        assert_eq!(target, 240.0);
+    }
+
+    #[test]
+    fn target_content_height_respects_min_height() {
+        let target = calculate_target_content_height(40.0, 28.0, 240.0);
+        assert_eq!(target, MIN_WINDOW_HEIGHT);
+    }
 }
