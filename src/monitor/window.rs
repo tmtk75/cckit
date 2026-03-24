@@ -178,6 +178,15 @@ fn load_sessions() {
     let storage = Storage::new();
     let store = storage.load();
     let mut sessions: Vec<Session> = store.sessions.into_values().collect();
+    // Enrich sessions with context usage from transcripts
+    for session in &mut sessions {
+        if let Some(ref tp) = session.transcript_path {
+            let ctx = crate::monitor::hook::read_context_usage(tp);
+            session.context_used_tokens = ctx.used_tokens;
+            session.context_max_tokens = ctx.max_tokens;
+            session.model = ctx.model;
+        }
+    }
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     *SESSION_LIST.lock().unwrap() = sessions;
 }
@@ -215,6 +224,40 @@ fn format_session_stats(session: &Session) -> String {
         String::new()
     } else {
         parts.join("/")
+    }
+}
+
+struct ContextBarInfo {
+    ratio: f64,
+    label: String,
+}
+
+/// Extract context window usage info for rendering
+fn context_bar_info(session: &Session) -> Option<ContextBarInfo> {
+    let used = session.context_used_tokens?;
+    let max = session.context_max_tokens?;
+    if max == 0 {
+        return None;
+    }
+    let ratio = (used as f64 / max as f64).clamp(0.0, 1.0);
+    let pct = (ratio * 100.0) as u32;
+
+    Some(ContextBarInfo {
+        ratio,
+        label: format!("{}%", pct),
+    })
+}
+
+/// Color for context bar: green (low) → yellow (mid) → red (high)
+fn context_bar_color(ratio: f64) -> Retained<NSColor> {
+    if ratio < 0.5 {
+        // green → yellow (0.0..0.5)
+        let t = ratio / 0.5;
+        NSColor::colorWithRed_green_blue_alpha(t, 0.8, 0.2 * (1.0 - t), 0.9)
+    } else {
+        // yellow → red (0.5..1.0)
+        let t = (ratio - 0.5) / 0.5;
+        NSColor::colorWithRed_green_blue_alpha(0.9, 0.8 * (1.0 - t), 0.0, 0.9)
     }
 }
 
@@ -517,6 +560,10 @@ fn rebuild_view(view: &NSView) {
         .map(|sv| sv.bounds().size.width)
         .unwrap_or(WINDOW_WIDTH);
 
+    let any_has_context = sessions
+        .iter()
+        .any(|s| s.context_used_tokens.is_some() && s.context_max_tokens.is_some());
+
     let row_count = sessions.len().max(1) as CGFloat;
     let total_height = HEADER_HEIGHT + 1.0 + row_count * ROW_HEIGHT;
     view.setFrameSize(NSSize::new(view_width, total_height));
@@ -548,11 +595,13 @@ fn rebuild_view(view: &NSView) {
         FONT_SIZE,
     ));
 
-    let right_w = 230.0;
+    let hdr_ctx_w: CGFloat = if any_has_context { 70.0 } else { 0.0 };
+    let hdr_stats_w: CGFloat = 230.0;
+    let hdr_right_total = hdr_stats_w + hdr_ctx_w;
     let hdr_right = format!("{:>12} {:>6}  {:>5}  {:<2}", "STAT", "TOOL", "AGE", "AF");
     let hdr_right_rect = NSRect::new(
-        NSPoint::new(view_width - right_w - LEFT_PAD, 2.0),
-        NSSize::new(right_w, HEADER_HEIGHT - 2.0),
+        NSPoint::new(view_width - hdr_right_total - LEFT_PAD, 2.0),
+        NSSize::new(hdr_stats_w, HEADER_HEIGHT - 2.0),
     );
     let hdr_right_label = create_mono_label(
         mtm,
@@ -563,6 +612,22 @@ fn rebuild_view(view: &NSView) {
     );
     let _: () = unsafe { msg_send![&*hdr_right_label, setAlignment: 1_isize] };
     view.addSubview(&hdr_right_label);
+
+    if any_has_context {
+        let hdr_ctx_rect = NSRect::new(
+            NSPoint::new(view_width - hdr_ctx_w - LEFT_PAD, 2.0),
+            NSSize::new(hdr_ctx_w, HEADER_HEIGHT - 2.0),
+        );
+        let hdr_ctx_label = create_mono_label(
+            mtm,
+            "CONTEXT",
+            hdr_ctx_rect,
+            &color_dim(),
+            FONT_SIZE_SMALL,
+        );
+        let _: () = unsafe { msg_send![&*hdr_ctx_label, setAlignment: 1_isize] };
+        view.addSubview(&hdr_ctx_label);
+    }
 
     // Header separator
     view.addSubview(&create_colored_view(
@@ -591,6 +656,8 @@ fn rebuild_view(view: &NSView) {
         ));
         return;
     }
+
+    let right_col_w: CGFloat = if any_has_context { 230.0 + 70.0 } else { 230.0 };
 
     for (i, session) in sessions.iter().enumerate() {
         let y = y_start + (i as CGFloat) * ROW_HEIGHT;
@@ -657,7 +724,7 @@ fn rebuild_view(view: &NSView) {
 
         // Middle: path (dim, truncate middle)
         let path_x = TEXT_LEFT + 220.0;
-        let path_w = (view_width - path_x - 230.0 - LEFT_PAD).max(40.0);
+        let path_w = (view_width - path_x - right_col_w - LEFT_PAD).max(40.0);
         let path_rect = NSRect::new(
             NSPoint::new(path_x, y + 2.0),
             NSSize::new(path_w, ROW_HEIGHT - 4.0),
@@ -666,20 +733,73 @@ fn rebuild_view(view: &NSView) {
         let _: () = unsafe { msg_send![&*path_label, setLineBreakMode: 5_isize] };
         view.addSubview(&path_label);
 
-        // Right: stats + tool + elapsed + AF (right-aligned)
+        // Right: stats + tool + elapsed + AF (right-aligned), then context bar at far right
         let stats = format_session_stats(session);
+        let ctx_info = context_bar_info(session);
         let af_off = AF_DISABLED_PROJECTS.lock().unwrap().contains(&session.cwd);
         let af_col = if af_off { "⏸" } else { "✓" };
-        let right_w = 230.0;
+        let ctx_col_w: CGFloat = if any_has_context { 70.0 } else { 0.0 };
+        let stats_w: CGFloat = 230.0;
+        let right_w = stats_w + ctx_col_w;
         let right_text = format!("{:>12} {:>6}  {:>5}  {:<2}", stats, tool, elapsed, af_col);
         let right_rect = NSRect::new(
             NSPoint::new(view_width - right_w - LEFT_PAD, y + 2.0),
-            NSSize::new(right_w, ROW_HEIGHT - 4.0),
+            NSSize::new(stats_w, ROW_HEIGHT - 4.0),
         );
         let right_label =
             create_mono_label(mtm, &right_text, right_rect, &text_color, FONT_SIZE_SMALL);
         let _: () = unsafe { msg_send![&*right_label, setAlignment: 1_isize] }; // right
         view.addSubview(&right_label);
+
+        // Context bar column (far right): colored progress bar + label
+        if any_has_context {
+            let col_x = view_width - ctx_col_w - LEFT_PAD;
+            let bar_total_w = 30.0_f64;
+            let bar_h = 5.0_f64;
+            let bar_y = y + (ROW_HEIGHT - bar_h) / 2.0;
+
+            if let Some(ref info) = ctx_info {
+                // Bar background (dim track)
+                let track_rect = NSRect::new(
+                    NSPoint::new(col_x, bar_y),
+                    NSSize::new(bar_total_w, bar_h),
+                );
+                view.addSubview(&create_colored_view(
+                    mtm,
+                    track_rect,
+                    &NSColor::colorWithRed_green_blue_alpha(1.0, 1.0, 1.0, 0.1),
+                    3.0,
+                ));
+
+                // Bar fill (colored by usage)
+                let fill_w = (bar_total_w * info.ratio).max(1.0);
+                let fill_rect = NSRect::new(
+                    NSPoint::new(col_x, bar_y),
+                    NSSize::new(fill_w, bar_h),
+                );
+                view.addSubview(&create_colored_view(
+                    mtm,
+                    fill_rect,
+                    &context_bar_color(info.ratio),
+                    3.0,
+                ));
+
+                // Label (right of bar)
+                let label_x = col_x + bar_total_w + 4.0;
+                let label_w = ctx_col_w - bar_total_w - 4.0;
+                let label_rect = NSRect::new(
+                    NSPoint::new(label_x, y + 2.0),
+                    NSSize::new(label_w, ROW_HEIGHT - 4.0),
+                );
+                view.addSubview(&create_mono_label(
+                    mtm,
+                    &info.label,
+                    label_rect,
+                    &text_color,
+                    FONT_SIZE_SMALL,
+                ));
+            }
+        }
 
         // Row separator
         if i + 1 < sessions.len() {

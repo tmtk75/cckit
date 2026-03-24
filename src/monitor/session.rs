@@ -51,6 +51,15 @@ pub struct Session {
     /// Total number of tool invocations in this session
     #[serde(default)]
     pub tool_count: u32,
+    /// Context window usage: input tokens used in the last API call
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_used_tokens: Option<u64>,
+    /// Context window max tokens (derived from model name)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_max_tokens: Option<u64>,
+    /// Model name from the last API response
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl Session {
@@ -119,6 +128,9 @@ mod tests {
             tool_started_at: None,
             last_tool_duration_ms: None,
             tool_count: 0,
+            context_used_tokens: None,
+            context_max_tokens: None,
+            model: None,
         }
     }
 

@@ -557,6 +557,9 @@ mod tests {
             tool_started_at: None,
             last_tool_duration_ms: None,
             tool_count: 0,
+            context_used_tokens: None,
+            context_max_tokens: None,
+            model: None,
         }
     }
 

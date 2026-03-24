@@ -3193,8 +3193,10 @@ fn get_global_info() -> ProjectInfo {
     let agents = scan_agents(&claude_dir);
     let commands = scan_commands(&claude_dir);
     let plugins = scan_plugins(&claude_dir);
-    // Global doesn't have .mcp.json in the same way
-    let mcp_servers = Vec::new();
+    // Include plugin MCP servers as global MCP servers
+    let mcp_servers: Vec<McpServerInfo> = load_plugin_mcp_definitions()
+        .into_values()
+        .collect();
 
     ProjectInfo {
         path: "~/.claude (global)".to_string(),

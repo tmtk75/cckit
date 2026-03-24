@@ -6,6 +6,95 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::process::Command;
 
+/// Context usage extracted from transcript
+#[derive(Debug, Default)]
+pub struct ContextUsage {
+    pub used_tokens: Option<u64>,
+    pub max_tokens: Option<u64>,
+    pub model: Option<String>,
+}
+
+/// Derive max context window size from model name.
+/// Claude Code uses 1M context for Opus 4.x and Sonnet 4.x by default.
+pub fn model_max_tokens(model: &str) -> Option<u64> {
+    if model.contains("opus-4") || model.contains("sonnet-4") {
+        Some(1_000_000)
+    } else if model.contains("haiku")
+        || model.contains("opus")
+        || model.contains("sonnet")
+    {
+        Some(200_000)
+    } else {
+        None
+    }
+}
+
+/// Read the last assistant message from a transcript JSONL to extract usage info.
+/// Only reads the last 64KB to avoid loading entire (potentially multi-MB) files.
+pub fn read_context_usage(transcript_path: &str) -> ContextUsage {
+    use std::io::{Read as _, Seek, SeekFrom};
+
+    let mut usage = ContextUsage::default();
+
+    let mut file = match std::fs::File::open(transcript_path) {
+        Ok(f) => f,
+        Err(_) => return usage,
+    };
+
+    let metadata = match file.metadata() {
+        Ok(m) => m,
+        Err(_) => return usage,
+    };
+
+    let file_len = metadata.len();
+    // Read last 64KB (enough to contain the most recent assistant messages with usage)
+    let tail_size: u64 = 64 * 1024;
+    let start = file_len.saturating_sub(tail_size);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return usage;
+    }
+
+    let mut content = Vec::with_capacity(tail_size as usize);
+    if file.read_to_end(&mut content).is_err() {
+        return usage;
+    }
+
+    // Scan from the end to find the last line with "usage"
+    for line in content.rsplit(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        // Quick check before parsing JSON
+        if !line.windows(7).any(|w| w == b"\"usage\"") {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(line)
+            && let Some(msg) = val.get("message")
+            && let Some(u) = msg.get("usage")
+        {
+            let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let cache_read = u
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let cache_creation = u
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            usage.used_tokens = Some(input + cache_read + cache_creation + output);
+
+            if let Some(model) = msg.get("model").and_then(|v| v.as_str()) {
+                usage.model = Some(model.to_string());
+                usage.max_tokens = model_max_tokens(model);
+            }
+            return usage;
+        }
+    }
+
+    usage
+}
+
 #[derive(Debug, Deserialize)]
 pub struct HookInput {
     pub session_id: String,
@@ -60,6 +149,9 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                         tool_started_at: None,
                         last_tool_duration_ms: None,
                         tool_count: 0,
+                        context_used_tokens: None,
+                        context_max_tokens: None,
+                        model: None,
                     },
                 );
             }
@@ -84,6 +176,9 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                         tool_started_at: None,
                         last_tool_duration_ms: None,
                         tool_count: 0,
+                        context_used_tokens: None,
+                        context_max_tokens: None,
+                        model: None,
                     });
                 session.status = SessionStatus::Running;
                 session.updated_at = now;
@@ -124,6 +219,9 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                             tool_started_at: Some(now),
                             last_tool_duration_ms: None,
                             tool_count: 1,
+                            context_used_tokens: None,
+                            context_max_tokens: None,
+                            model: None,
                         },
                     );
                 }
@@ -144,6 +242,15 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(session) = store.sessions.get_mut(&key) {
                     session.status = SessionStatus::WaitingInput;
                     session.updated_at = now;
+                    // Update context usage from transcript
+                    if let Some(ref tp) = session.transcript_path {
+                        let ctx = read_context_usage(tp);
+                        if ctx.used_tokens.is_some() {
+                            session.context_used_tokens = ctx.used_tokens;
+                            session.context_max_tokens = ctx.max_tokens;
+                            session.model = ctx.model;
+                        }
+                    }
                 }
             }
 
