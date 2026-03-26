@@ -456,7 +456,11 @@ fn draw_sessions_table(frame: &mut Frame, area: Rect, app: &App) {
             Row::new(vec![
                 Cell::from(format!("{}", idx + 1)).style(Style::default().fg(Color::Gray)),
                 Cell::from(status_text).style(status_style),
-                Cell::from(session.short_cwd()),
+                Cell::from(if session.is_subagent() {
+                    format!("↳{}", session.subagent_name.as_deref().unwrap_or(&session.short_cwd()))
+                } else {
+                    session.short_cwd()
+                }),
                 Cell::from(tool_display).style(Style::default().fg(Color::Cyan)),
                 Cell::from(pid_display).style(Style::default().fg(Color::Gray)),
                 Cell::from(created).style(Style::default().fg(Color::Gray)),
@@ -560,6 +564,7 @@ mod tests {
             context_used_tokens: None,
             context_max_tokens: None,
             model: None,
+            subagent_name: None,
         }
     }
 

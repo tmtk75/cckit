@@ -249,7 +249,7 @@ impl MenubarStyle {
     }
 
     fn session_label(&self, session: &Session) -> String {
-        let project = session.project_name();
+        let project = session.display_name();
         let tool = session.last_tool.as_deref().unwrap_or("-");
         let elapsed = format_menu_elapsed(session.updated_at);
         let stats = format_menu_stats(session);

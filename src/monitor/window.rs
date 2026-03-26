@@ -91,7 +91,7 @@ fn reload_config() {
 
 // --- Layout constants ---
 
-const WINDOW_WIDTH: CGFloat = 560.0;
+const WINDOW_WIDTH: CGFloat = 640.0;
 const MIN_WINDOW_HEIGHT: CGFloat = 120.0;
 const ROW_HEIGHT: CGFloat = 22.0;
 const HEADER_HEIGHT: CGFloat = 20.0;
@@ -102,8 +102,10 @@ const HINT_FONT_SIZE: CGFloat = 10.5;
 const DOT_SIZE: CGFloat = 6.0;
 const LEFT_PAD: CGFloat = 10.0;
 const TEXT_LEFT: CGFloat = 24.0;
-const FIT_MIN_WIDTH: CGFloat = 560.0;
-const FIT_MAX_WIDTH: CGFloat = 760.0;
+const PROJECT_COL_WIDTH: CGFloat = 220.0;
+const PROJECT_COL_WIDTH_WIDE: CGFloat = 300.0;
+const FIT_MIN_WIDTH: CGFloat = 640.0;
+const FIT_MAX_WIDTH: CGFloat = 840.0;
 const FIT_PATH_CHAR_WIDTH: CGFloat = 6.0;
 const FIT_PATH_BASE_CHARS: usize = 18;
 const FIT_PATH_MAX_CHARS: usize = 34;
@@ -178,13 +180,25 @@ fn load_sessions() {
     let storage = Storage::new();
     let store = storage.load();
     let mut sessions: Vec<Session> = store.sessions.into_values().collect();
-    // Enrich sessions with context usage from transcripts
+    let now = chrono::Utc::now();
+    // Enrich sessions with context usage and subagent names from transcripts
     for session in &mut sessions {
         if let Some(ref tp) = session.transcript_path {
             let ctx = crate::monitor::hook::read_context_usage(tp);
             session.context_used_tokens = ctx.used_tokens;
             session.context_max_tokens = ctx.max_tokens;
             session.model = ctx.model;
+            // Backfill subagent name if missing
+            if session.subagent_name.is_none() && session.is_subagent() {
+                session.subagent_name = crate::monitor::hook::extract_subagent_name(tp);
+            }
+        }
+        // Subagents don't receive Stop events; mark as stopped if stale
+        if session.is_subagent() && session.status == SessionStatus::Running {
+            let idle_secs = now.signed_duration_since(session.updated_at).num_seconds();
+            if idle_secs > 180 {
+                session.status = SessionStatus::Stopped;
+            }
         }
     }
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -564,6 +578,13 @@ fn rebuild_view(view: &NSView) {
         .iter()
         .any(|s| s.context_used_tokens.is_some() && s.context_max_tokens.is_some());
 
+    let any_has_subagent_name = sessions.iter().any(|s| s.subagent_name.is_some());
+    let proj_w = if any_has_subagent_name {
+        PROJECT_COL_WIDTH_WIDE
+    } else {
+        PROJECT_COL_WIDTH
+    };
+
     let row_count = sessions.len().max(1) as CGFloat;
     let total_height = HEADER_HEIGHT + 1.0 + row_count * ROW_HEIGHT;
     view.setFrameSize(NSSize::new(view_width, total_height));
@@ -572,7 +593,7 @@ fn rebuild_view(view: &NSView) {
     let hdr_left = format!("{:>2}  {:<4}  {}", "#", "STAT", "PROJECT");
     let hdr_left_rect = NSRect::new(
         NSPoint::new(TEXT_LEFT, 2.0),
-        NSSize::new(220.0, HEADER_HEIGHT - 2.0),
+        NSSize::new(proj_w, HEADER_HEIGHT - 2.0),
     );
     view.addSubview(&create_mono_label(
         mtm,
@@ -582,7 +603,7 @@ fn rebuild_view(view: &NSView) {
         FONT_SIZE,
     ));
 
-    let path_x = TEXT_LEFT + 220.0;
+    let path_x = TEXT_LEFT + proj_w;
     let hdr_path_rect = NSRect::new(
         NSPoint::new(path_x, 2.0),
         NSSize::new(100.0, HEADER_HEIGHT - 2.0),
@@ -692,7 +713,7 @@ fn rebuild_view(view: &NSView) {
             dot / 2.0,
         ));
 
-        let project = session.project_name();
+        let project = session.display_name();
         let path = session.short_cwd();
         let tool = session.last_tool.as_deref().unwrap_or("-");
         let elapsed = format_elapsed(session.updated_at);
@@ -712,7 +733,7 @@ fn rebuild_view(view: &NSView) {
         );
         let left_rect = NSRect::new(
             NSPoint::new(TEXT_LEFT, y + 2.0),
-            NSSize::new(220.0, ROW_HEIGHT - 4.0),
+            NSSize::new(proj_w, ROW_HEIGHT - 4.0),
         );
         view.addSubview(&create_mono_label(
             mtm,
@@ -723,7 +744,7 @@ fn rebuild_view(view: &NSView) {
         ));
 
         // Middle: path (dim, truncate middle)
-        let path_x = TEXT_LEFT + 220.0;
+        let path_x = TEXT_LEFT + proj_w;
         let path_w = (view_width - path_x - right_col_w - LEFT_PAD).max(40.0);
         let path_rect = NSRect::new(
             NSPoint::new(path_x, y + 2.0),

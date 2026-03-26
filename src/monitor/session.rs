@@ -60,6 +60,9 @@ pub struct Session {
     /// Model name from the last API response
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Short label for subagent sessions (extracted from transcript)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_name: Option<String>,
 }
 
 impl Session {
@@ -71,6 +74,32 @@ impl Session {
     #[allow(dead_code)]
     pub fn project_name(&self) -> &str {
         self.cwd.rsplit('/').next().unwrap_or(&self.cwd)
+    }
+
+    /// Returns true if this session is a subagent.
+    /// Detection: transcript_path contains "/subagents/" (definitive),
+    /// or prompt_count == 0 with tool_count > 0 (heuristic fallback).
+    pub fn is_subagent(&self) -> bool {
+        if let Some(ref tp) = self.transcript_path {
+            if tp.contains("/subagents/") {
+                return true;
+            }
+        }
+        self.prompt_count == 0 && self.tool_count > 0
+    }
+
+    /// Display name: for subagents shows "↳{name}" if available, otherwise "↳{project}".
+    /// For normal sessions, returns project_name.
+    pub fn display_name(&self) -> String {
+        if self.is_subagent() {
+            if let Some(ref name) = self.subagent_name {
+                format!("↳{} ({})", self.project_name(), name)
+            } else {
+                format!("↳{}", self.project_name())
+            }
+        } else {
+            self.project_name().to_string()
+        }
     }
 
     pub fn short_cwd(&self) -> String {
@@ -131,6 +160,7 @@ mod tests {
             context_used_tokens: None,
             context_max_tokens: None,
             model: None,
+            subagent_name: None,
         }
     }
 

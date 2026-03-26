@@ -152,6 +152,7 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                         context_used_tokens: None,
                         context_max_tokens: None,
                         model: None,
+                        subagent_name: None,
                     },
                 );
             }
@@ -179,6 +180,7 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                         context_used_tokens: None,
                         context_max_tokens: None,
                         model: None,
+                        subagent_name: None,
                     });
                 session.status = SessionStatus::Running;
                 session.updated_at = now;
@@ -222,6 +224,7 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                             context_used_tokens: None,
                             context_max_tokens: None,
                             model: None,
+                            subagent_name: None,
                         },
                     );
                 }
@@ -281,6 +284,15 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(session) = store.sessions.get_mut(&key) {
                 if session.transcript_path.is_none() {
                     session.transcript_path = Some(tp.clone());
+                }
+            }
+        }
+
+        // Extract subagent name if this looks like a subagent and name is not yet set
+        if let Some(session) = store.sessions.get_mut(&key) {
+            if session.subagent_name.is_none() && session.is_subagent() {
+                if let Some(ref tp) = session.transcript_path {
+                    session.subagent_name = extract_subagent_name(tp);
                 }
             }
         }
@@ -401,6 +413,34 @@ fn extract_tool_summary(hook_input: &HookInput) -> Option<String> {
             .map(|s| truncate(s, 60)),
         _ => None,
     }
+}
+
+/// Extract a subagent name from the transcript's first line.
+/// Looks for `agentName` field (set by Claude Code for team/agent sessions).
+pub fn extract_subagent_name(transcript_path: &str) -> Option<String> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(transcript_path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    let first_line = reader.lines().next()?.ok()?;
+
+    let val: serde_json::Value = serde_json::from_str(&first_line).ok()?;
+
+    // Try agentName field first (team agents)
+    if let Some(name) = val.get("agentName").and_then(|v| v.as_str()) {
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+
+    // Fallback: extract from first user message content
+    if val.get("type")?.as_str()? == "user" {
+        let content = val.get("message")?.get("content")?.as_str()?;
+        let first = content.lines().next().unwrap_or(content);
+        return Some(truncate(first, 24));
+    }
+
+    None
 }
 
 fn truncate(s: &str, max: usize) -> String {
