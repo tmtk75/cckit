@@ -118,8 +118,8 @@ impl Storage {
         std::path::Path::new(tty).exists()
     }
 
-    /// Check if a claude process is running on the given TTY
-    fn has_claude_on_tty(tty: &str) -> bool {
+    /// Check if an AI coding tool (Claude Code or Codex) is running on the given TTY
+    fn has_ai_tool_on_tty(tty: &str) -> bool {
         // Strip /dev/ prefix for ps TTY matching
         let tty_short = tty.strip_prefix("/dev/").unwrap_or(tty);
         if let Ok(output) = std::process::Command::new("ps")
@@ -129,14 +129,17 @@ impl Storage {
             let stdout = String::from_utf8_lossy(&output.stdout);
             stdout.lines().any(|line| {
                 let cmd = line.trim();
-                cmd.contains("claude") || cmd.contains("Claude")
+                cmd.contains("claude")
+                    || cmd.contains("Claude")
+                    || cmd.contains("codex")
+                    || cmd.contains("Codex")
             })
         } else {
             true // If ps fails, assume alive to be safe
         }
     }
 
-    /// Check if a session is stale (TTY gone or no claude process on TTY)
+    /// Check if a session is stale (TTY gone or no AI tool process on TTY)
     ///
     /// Note: We don't use PID-based checks because the stored PID is the hook's
     /// parent shell process (short-lived /bin/sh), not the claude process itself.
@@ -145,7 +148,7 @@ impl Storage {
         if !Self::tty_exists(&session.tty) {
             return true;
         }
-        !Self::has_claude_on_tty(&session.tty)
+        !Self::has_ai_tool_on_tty(&session.tty)
     }
 
     /// Find stale sessions (TTY gone or process dead)

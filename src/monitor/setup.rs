@@ -1,7 +1,7 @@
 use colored::Colorize;
 use serde_json::{Map, Value, json};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 /// Core hook events required for basic session tracking
@@ -415,6 +415,287 @@ pub fn run_uninstall() -> io::Result<()> {
     println!(
         "{}",
         "Restart Claude Code sessions for changes to take effect.".yellow()
+    );
+
+    Ok(())
+}
+
+// --- Codex hook support ---
+
+/// Codex supports a subset of hook events
+const CODEX_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "PreToolUse",
+    "PostToolUse",
+    "UserPromptSubmit",
+    "Stop",
+];
+
+fn get_codex_dir() -> PathBuf {
+    dirs::home_dir()
+        .expect("Could not find home directory")
+        .join(".codex")
+}
+
+fn get_codex_hooks_path() -> PathBuf {
+    get_codex_dir().join("hooks.json")
+}
+
+fn get_codex_config_path() -> PathBuf {
+    get_codex_dir().join("config.toml")
+}
+
+/// Ensure codex_hooks feature flag is enabled in ~/.codex/config.toml
+fn ensure_codex_feature_flag() -> io::Result<bool> {
+    let config_path = get_codex_config_path();
+    let codex_dir = get_codex_dir();
+
+    if !codex_dir.exists() {
+        fs::create_dir_all(&codex_dir)?;
+    }
+
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path)?;
+        if content.contains("codex_hooks") {
+            return Ok(false); // already configured
+        }
+        // Check if [features] section already exists
+        if content.contains("[features]") {
+            // Insert under existing [features] section
+            let new_content = content.replace(
+                "[features]",
+                "[features]\ncodex_hooks = true  # Added by cckit (https://github.com/tmtk75/cckit)",
+            );
+            fs::write(&config_path, new_content)?;
+        } else {
+            // Append new [features] section
+            let mut file = fs::OpenOptions::new().append(true).open(&config_path)?;
+            file.write_all(
+                b"\n# Added by cckit (https://github.com/tmtk75/cckit)\n\
+                  [features]\ncodex_hooks = true\n",
+            )?;
+        }
+    } else {
+        fs::write(
+            &config_path,
+            "# Added by cckit (https://github.com/tmtk75/cckit)\n\
+             [features]\ncodex_hooks = true\n",
+        )?;
+    }
+
+    Ok(true)
+}
+
+fn build_codex_hooks(cckit_cmd: &str) -> Value {
+    let mut hooks = Map::new();
+    for event in CODEX_HOOK_EVENTS {
+        hooks.insert(event.to_string(), json!([create_hook_entry(cckit_cmd)]));
+    }
+    json!({ "hooks": Value::Object(hooks) })
+}
+
+pub fn run_install_codex(force: bool) -> io::Result<()> {
+    let hooks_path = get_codex_hooks_path();
+    let cckit_cmd = get_cckit_command();
+
+    println!("{}", "cckit session install --codex".bold());
+    println!();
+
+    // Ensure codex_hooks feature flag is enabled
+    match ensure_codex_feature_flag() {
+        Ok(true) => {
+            println!(
+                "{} Enabled codex_hooks in {}",
+                "✓".green(),
+                get_codex_config_path().display().to_string().dimmed()
+            );
+        }
+        Ok(false) => {
+            println!(
+                "{} codex_hooks already enabled in config.toml",
+                "✓".green()
+            );
+        }
+        Err(e) => {
+            println!(
+                "{} Failed to update config.toml: {}",
+                "⚠".yellow(),
+                e
+            );
+        }
+    }
+    println!();
+
+    if !hooks_path.exists() {
+        println!("{}", "No ~/.codex/hooks.json found.".yellow());
+        println!("Creating new hooks.json...");
+
+        let hooks = build_codex_hooks(&cckit_cmd);
+
+        if let Some(parent) = hooks_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(&hooks)?;
+        fs::write(&hooks_path, format!("{}\n", content))?;
+
+        println!(
+            "{} Created hooks.json with {} hooks",
+            "✓".green(),
+            CODEX_HOOK_EVENTS.len()
+        );
+        println!();
+        println!("Hooks file: {}", hooks_path.display().to_string().dimmed());
+        println!();
+        println!(
+            "{}",
+            "Restart Codex sessions for hooks to take effect.".yellow()
+        );
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&hooks_path)?;
+    let mut settings: Value = parse_settings(&content)?;
+    let hooks_obj = ensure_hooks_object(&mut settings)?;
+
+    let mut added: Vec<&str> = Vec::new();
+    let mut already_exists: Vec<&str> = Vec::new();
+
+    if force {
+        let mut empty_events: Vec<&str> = Vec::new();
+        for event in CODEX_HOOK_EVENTS {
+            if let Some(hook_array) = hooks_obj.get_mut(*event) {
+                remove_cckit_hooks_from_event(hook_array);
+                if hook_array.as_array().map_or(false, |arr| arr.is_empty()) {
+                    empty_events.push(event);
+                }
+            }
+        }
+        for event in &empty_events {
+            hooks_obj.remove(*event);
+        }
+    }
+
+    for event in CODEX_HOOK_EVENTS {
+        if let Some(existing_array) = hooks_obj.get(*event) {
+            if has_cckit_hook(existing_array) {
+                already_exists.push(event);
+                continue;
+            }
+            if let Some(arr) = hooks_obj.get_mut(*event).and_then(|v| v.as_array_mut()) {
+                arr.push(create_hook_entry(&cckit_cmd));
+                added.push(event);
+            }
+        } else {
+            hooks_obj.insert(event.to_string(), json!([create_hook_entry(&cckit_cmd)]));
+            added.push(event);
+        }
+    }
+
+    if !already_exists.is_empty() {
+        println!("{}:", "Already configured".yellow());
+        for event in &already_exists {
+            println!("  {} {}", "✓".green(), event);
+        }
+        println!();
+    }
+
+    if added.is_empty() {
+        println!("{}", "All cckit hooks are already configured.".green());
+        return Ok(());
+    }
+
+    println!("{}:", "Adding".cyan());
+    for event in &added {
+        println!("  {} {} session hook {}", "+".green(), cckit_cmd, event);
+    }
+    println!();
+
+    let new_content = serde_json::to_string_pretty(&settings)?;
+    fs::write(&hooks_path, format!("{}\n", new_content))?;
+
+    println!(
+        "{} Added {} hook(s) to hooks.json",
+        "✓".green(),
+        added.len()
+    );
+    println!();
+    println!("Hooks file: {}", hooks_path.display().to_string().dimmed());
+    println!();
+    println!(
+        "{}",
+        "Restart Codex sessions for hooks to take effect.".yellow()
+    );
+
+    Ok(())
+}
+
+pub fn run_uninstall_codex() -> io::Result<()> {
+    let hooks_path = get_codex_hooks_path();
+
+    if !hooks_path.exists() {
+        println!(
+            "{}",
+            "No ~/.codex/hooks.json found. Nothing to uninstall.".yellow()
+        );
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&hooks_path)?;
+    let mut settings: Value = parse_settings(&content)?;
+    let hooks = match settings.get_mut("hooks") {
+        Some(h) => h,
+        None => {
+            println!("{}", "No hooks found. Nothing to uninstall.".yellow());
+            return Ok(());
+        }
+    };
+
+    let mut removed: Vec<&str> = Vec::new();
+    let mut empty_events: Vec<&str> = Vec::new();
+
+    println!("{}", "cckit session uninstall --codex".bold());
+    println!();
+
+    for event in CODEX_HOOK_EVENTS {
+        if let Some(hook_array) = hooks.get_mut(*event) {
+            if remove_cckit_hooks_from_event(hook_array) {
+                removed.push(event);
+            }
+            if hook_array.as_array().map_or(false, |arr| arr.is_empty()) {
+                empty_events.push(event);
+            }
+        }
+    }
+
+    if let Some(hooks_obj) = hooks.as_object_mut() {
+        for event in &empty_events {
+            hooks_obj.remove(*event);
+        }
+    }
+
+    if removed.is_empty() {
+        println!("{}", "No cckit hooks found. Nothing to uninstall.".yellow());
+        return Ok(());
+    }
+
+    println!("{}:", "Removing".red());
+    for event in &removed {
+        println!("  {} {}", "-".red(), event);
+    }
+    println!();
+
+    let new_content = serde_json::to_string_pretty(&settings)?;
+    fs::write(&hooks_path, format!("{}\n", new_content))?;
+
+    println!(
+        "{} Removed {} hook(s) from hooks.json",
+        "✓".green(),
+        removed.len()
+    );
+    println!();
+    println!(
+        "{}",
+        "Restart Codex sessions for changes to take effect.".yellow()
     );
 
     Ok(())

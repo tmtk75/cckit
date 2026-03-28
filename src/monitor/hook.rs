@@ -106,6 +106,9 @@ pub struct HookInput {
     pub tool_input: Option<serde_json::Value>,
     #[serde(default)]
     pub transcript_path: Option<String>,
+    /// Model name (always present in Codex hooks, absent in Claude Code hooks)
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
@@ -284,6 +287,15 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(session) = store.sessions.get_mut(&key) {
                 if session.transcript_path.is_none() {
                     session.transcript_path = Some(tp.clone());
+                }
+            }
+        }
+
+        // Set model from hook input if provided (Codex always sends this)
+        if let Some(ref model) = hook_input.model {
+            if let Some(session) = store.sessions.get_mut(&key) {
+                if session.model.is_none() {
+                    session.model = Some(model.clone());
                 }
             }
         }
@@ -491,6 +503,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(json!({"command": "ls -la"})),
             transcript_path: None,
+            model: None,
         };
         assert_eq!(
             extract_tool_summary(&hook_input),
@@ -507,6 +520,7 @@ mod tests {
             tool_name: Some("Read".to_string()),
             tool_input: Some(json!({"file_path": "/path/to/file.rs"})),
             transcript_path: None,
+            model: None,
         };
         assert_eq!(
             extract_tool_summary(&hook_input),
@@ -523,6 +537,7 @@ mod tests {
             tool_name: Some("Write".to_string()),
             tool_input: Some(json!({"file_path": "/path/to/file.rs"})),
             transcript_path: None,
+            model: None,
         };
         assert_eq!(
             extract_tool_summary(&hook_input),
@@ -539,6 +554,7 @@ mod tests {
             tool_name: Some("Glob".to_string()),
             tool_input: Some(json!({"pattern": "**/*.rs"})),
             transcript_path: None,
+            model: None,
         };
         assert_eq!(
             extract_tool_summary(&hook_input),
@@ -555,6 +571,7 @@ mod tests {
             tool_name: Some("Task".to_string()),
             tool_input: Some(json!({"description": "Explore codebase"})),
             transcript_path: None,
+            model: None,
         };
         assert_eq!(
             extract_tool_summary(&hook_input),
@@ -571,6 +588,7 @@ mod tests {
             tool_name: Some("UnknownTool".to_string()),
             tool_input: Some(json!({"foo": "bar"})),
             transcript_path: None,
+            model: None,
         };
         assert_eq!(extract_tool_summary(&hook_input), None);
     }
@@ -584,6 +602,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: None,
             transcript_path: None,
+            model: None,
         };
         assert_eq!(extract_tool_summary(&hook_input), None);
     }

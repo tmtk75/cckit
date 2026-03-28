@@ -214,17 +214,22 @@ enum SessionCommands {
     /// Handle hook events from Claude Code (internal use)
     Hook,
 
-    /// Configure Claude Code hooks in ~/.claude/settings.json
+    /// Configure hooks (Claude Code by default, --codex for Codex)
     Install {
         #[arg(long, help = "Force reconfigure all hooks")]
         force: bool,
+        #[arg(long, help = "Install hooks for OpenAI Codex (~/.codex/hooks.json)")]
+        codex: bool,
     },
 
     /// Show hook configuration status
     Status,
 
-    /// Remove cckit hooks from ~/.claude/settings.json
-    Uninstall,
+    /// Remove cckit hooks (Claude Code by default, --codex for Codex)
+    Uninstall {
+        #[arg(long, help = "Uninstall hooks for OpenAI Codex")]
+        codex: bool,
+    },
 
     /// Sync sessions.json with actual state (remove stale sessions)
     Sync {
@@ -4975,8 +4980,13 @@ pub fn run() {
                         std::process::exit(1);
                     }
                 }
-                Some(SessionCommands::Install { force }) => {
-                    if let Err(e) = monitor::setup::run_install(force) {
+                Some(SessionCommands::Install { force, codex }) => {
+                    let result = if codex {
+                        monitor::setup::run_install_codex(force)
+                    } else {
+                        monitor::setup::run_install(force)
+                    };
+                    if let Err(e) = result {
                         eprintln!("{}: {}", "Error installing hooks".red(), e);
                         std::process::exit(1);
                     }
@@ -4987,8 +4997,13 @@ pub fn run() {
                         std::process::exit(1);
                     }
                 }
-                Some(SessionCommands::Uninstall) => {
-                    if let Err(e) = monitor::setup::run_uninstall() {
+                Some(SessionCommands::Uninstall { codex }) => {
+                    let result = if codex {
+                        monitor::setup::run_uninstall_codex()
+                    } else {
+                        monitor::setup::run_uninstall()
+                    };
+                    if let Err(e) = result {
                         eprintln!("{}: {}", "Error uninstalling hooks".red(), e);
                         std::process::exit(1);
                     }

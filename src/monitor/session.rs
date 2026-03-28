@@ -88,8 +88,7 @@ impl Session {
         self.prompt_count == 0 && self.tool_count > 0
     }
 
-    /// Display name: for subagents shows "↳{name}" if available, otherwise "↳{project}".
-    /// For normal sessions, returns project_name.
+    /// Display name: for subagents shows "↳{project} ({name})", otherwise project_name.
     pub fn display_name(&self) -> String {
         if self.is_subagent() {
             if let Some(ref name) = self.subagent_name {
