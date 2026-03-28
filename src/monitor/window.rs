@@ -178,6 +178,8 @@ pub static AF_DISABLED_PROJECTS: std::sync::LazyLock<Mutex<std::collections::Has
 
 fn load_sessions() {
     let storage = Storage::new();
+    // Remove stale sessions (exited processes) from storage
+    let _ = storage.sync_sessions();
     let store = storage.load();
     let mut sessions: Vec<Session> = store.sessions.into_values().collect();
     let now = chrono::Utc::now();
@@ -187,7 +189,9 @@ fn load_sessions() {
             let ctx = crate::monitor::hook::read_context_usage(tp);
             session.context_used_tokens = ctx.used_tokens;
             session.context_max_tokens = ctx.max_tokens;
-            session.model = ctx.model;
+            if ctx.model.is_some() {
+                session.model = ctx.model;
+            }
             // Backfill subagent name if missing
             if session.subagent_name.is_none() && session.is_subagent() {
                 session.subagent_name = crate::monitor::hook::extract_subagent_name(tp);
@@ -335,7 +339,18 @@ fn focus_selected() {
     if let Some(session) = sessions.get(index) {
         let tty = session.tty.clone();
         let project = session.project_name().to_string();
+        let session_id = session.session_id.clone();
+        let cwd = session.cwd.clone();
         drop(sessions);
+
+        // Skip focus for sessions without a known TTY (e.g. Codex Desktop)
+        if tty == "unknown" {
+            eprintln!(
+                "[cckit] focus skipped: tty=unknown session={} cwd={}",
+                session_id, cwd
+            );
+            return;
+        }
 
         match focus::focus_ghostty_tab_by_tty(&tty) {
             Ok(true) => {}
@@ -430,19 +445,32 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
     let session_count = SESSION_LIST.lock().unwrap().len();
     let current = *SELECTED_INDEX.lock().unwrap();
 
+    // Find next/prev focusable index (skip tty=unknown sessions)
+    let find_focusable = |range: Box<dyn Iterator<Item = usize>>| -> Option<usize> {
+        let sessions = SESSION_LIST.lock().unwrap();
+        range
+            .filter(|&i| sessions.get(i).map_or(false, |s| s.tty != "unknown"))
+            .next()
+    };
+
     match key_code {
         // Up arrow
         126 => {
-            let idx = current.unwrap_or(1);
-            *SELECTED_INDEX.lock().unwrap() = Some(idx.saturating_sub(1));
+            let from = current.unwrap_or(1);
+            let target = find_focusable(Box::new((0..from).rev()))
+                .or_else(|| find_focusable(Box::new(0..session_count)));
+            if let Some(idx) = target {
+                *SELECTED_INDEX.lock().unwrap() = Some(idx);
+            }
         }
         // Down arrow
         125 => {
-            if session_count == 0 {
-                return;
+            let from = current.map(|i| i + 1).unwrap_or(0);
+            let target = find_focusable(Box::new(from..session_count))
+                .or_else(|| find_focusable(Box::new(0..session_count)));
+            if let Some(idx) = target {
+                *SELECTED_INDEX.lock().unwrap() = Some(idx);
             }
-            let idx = current.map(|i| i + 1).unwrap_or(0);
-            *SELECTED_INDEX.lock().unwrap() = Some(idx.min(session_count - 1));
         }
         // Enter
         36 => {
@@ -460,15 +488,20 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
         }
         _ => match char_str.as_str() {
             "k" => {
-                let idx = current.unwrap_or(1);
-                *SELECTED_INDEX.lock().unwrap() = Some(idx.saturating_sub(1));
+                let from = current.unwrap_or(1);
+                let target = find_focusable(Box::new((0..from).rev()))
+                    .or_else(|| find_focusable(Box::new(0..session_count)));
+                if let Some(idx) = target {
+                    *SELECTED_INDEX.lock().unwrap() = Some(idx);
+                }
             }
             "j" => {
-                if session_count == 0 {
-                    return;
+                let from = current.map(|i| i + 1).unwrap_or(0);
+                let target = find_focusable(Box::new(from..session_count))
+                    .or_else(|| find_focusable(Box::new(0..session_count)));
+                if let Some(idx) = target {
+                    *SELECTED_INDEX.lock().unwrap() = Some(idx);
                 }
-                let idx = current.map(|i| i + 1).unwrap_or(0);
-                *SELECTED_INDEX.lock().unwrap() = Some(idx.min(session_count - 1));
             }
             "f" => {
                 if let Some(idx) = current {
@@ -695,21 +728,17 @@ fn rebuild_view(view: &NSView) {
             view.addSubview(&create_colored_view(mtm, row_rect, &tint, 4.0));
         }
 
-        // Status dot (larger for states needing attention)
-        let needs_attention = matches!(
-            session.status,
-            SessionStatus::AwaitingApproval | SessionStatus::WaitingInput
-        );
-        let dot = if needs_attention {
-            DOT_SIZE + 2.0
-        } else {
-            DOT_SIZE
-        };
+        let dot = DOT_SIZE;
         let dot_y = y + (ROW_HEIGHT - dot) / 2.0;
+        let dot_color = if session.tty == "unknown" {
+            color_dim()
+        } else {
+            status_color(&session.status)
+        };
         view.addSubview(&create_colored_view(
             mtm,
             NSRect::new(NSPoint::new(LEFT_PAD, dot_y), NSSize::new(dot, dot)),
-            &status_color(&session.status),
+            &dot_color,
             dot / 2.0,
         ));
 
@@ -717,8 +746,9 @@ fn rebuild_view(view: &NSView) {
         let path = session.short_cwd();
         let tool = session.last_tool.as_deref().unwrap_or("-");
         let elapsed = format_elapsed(session.updated_at);
+        let unfocusable = session.tty == "unknown";
 
-        let text_color = if session.status == SessionStatus::Stopped {
+        let text_color = if unfocusable || session.status == SessionStatus::Stopped {
             color_dim()
         } else {
             color_text()

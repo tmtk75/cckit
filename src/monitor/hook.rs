@@ -343,7 +343,7 @@ fn get_current_tty() -> String {
     }
 
     // Fallback: get parent process TTY via ps command
-    // This works when stdin is piped (e.g., in Claude Code hooks)
+    // This works when stdin is piped (e.g., in Claude Code / Codex hooks)
     if let Ok(ppid) = std::env::var("PPID").or_else(|_| {
         // If PPID env var not available, try to get it from ps
         Command::new("ps")

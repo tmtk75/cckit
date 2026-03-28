@@ -258,34 +258,44 @@ fn run_tui_core(
                         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
                         KeyCode::Enter | KeyCode::Char('f') => {
                             if let Some(session) = app.selected_session() {
-                                // Use TTY-based focus (works with tmux)
-                                match focus::focus_ghostty_tab_by_tty(&session.tty) {
-                                    Ok(true) => {
-                                        app.message =
-                                            Some(format!("Focused: {}", session.short_cwd()));
-                                    }
-                                    Ok(false) => {
-                                        // Fallback to project name matching
-                                        let project_name = std::path::Path::new(&session.cwd)
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or(&session.cwd);
-                                        match focus::focus_ghostty_tab(project_name) {
-                                            Ok(true) => {
-                                                app.message =
-                                                    Some(format!("Focused: {}", project_name));
-                                            }
-                                            Ok(false) => {
-                                                app.message =
-                                                    Some(format!("No tab: {}", project_name));
-                                            }
-                                            Err(e) => {
-                                                app.message = Some(format!("Error: {}", e));
+                                if session.tty == "unknown" {
+                                    // Skip focus for sessions without a known TTY (e.g. Codex Desktop)
+                                    app.message = Some("No TTY (desktop app)".to_string());
+                                } else {
+                                    // Use TTY-based focus (works with tmux)
+                                    match focus::focus_ghostty_tab_by_tty(&session.tty) {
+                                        Ok(true) => {
+                                            app.message =
+                                                Some(format!("Focused: {}", session.short_cwd()));
+                                        }
+                                        Ok(false) => {
+                                            // Fallback to project name matching
+                                            let project_name =
+                                                std::path::Path::new(&session.cwd)
+                                                    .file_name()
+                                                    .and_then(|n| n.to_str())
+                                                    .unwrap_or(&session.cwd);
+                                            match focus::focus_ghostty_tab(project_name) {
+                                                Ok(true) => {
+                                                    app.message = Some(format!(
+                                                        "Focused: {}",
+                                                        project_name
+                                                    ));
+                                                }
+                                                Ok(false) => {
+                                                    app.message = Some(format!(
+                                                        "No tab: {}",
+                                                        project_name
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    app.message = Some(format!("Error: {}", e));
+                                                }
                                             }
                                         }
-                                    }
-                                    Err(e) => {
-                                        app.message = Some(format!("Error: {}", e));
+                                        Err(e) => {
+                                            app.message = Some(format!("Error: {}", e));
+                                        }
                                     }
                                 }
                             }

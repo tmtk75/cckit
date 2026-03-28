@@ -145,10 +145,23 @@ impl Storage {
     /// parent shell process (short-lived /bin/sh), not the claude process itself.
     /// Instead, we check if any claude process is running on the session's TTY.
     fn is_stale(session: &super::session::Session) -> bool {
+        if session.tty == "unknown" {
+            // No TTY (e.g. desktop app): check if pid is still alive
+            return session
+                .pid
+                .map_or(true, |pid| !Self::pid_alive(pid as u32));
+        }
         if !Self::tty_exists(&session.tty) {
             return true;
         }
         !Self::has_ai_tool_on_tty(&session.tty)
+    }
+
+    fn pid_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map_or(false, |o| o.status.success())
     }
 
     /// Find stale sessions (TTY gone or process dead)
