@@ -5,13 +5,14 @@
 
 If you run Claude Code across many projects, you've probably faced these issues. cckit helps you stay organized.
 
-Claude Code Kit - A toolkit for Claude Code that provides project inspection and session monitoring capabilities.
+Claude Code Kit - A toolkit for managing Claude Code and OpenAI Codex environments. Provides session monitoring, project inspection, and cleanup tools.
 
 ## Overview
 
-cckit helps you manage and monitor your Claude Code environment:
+cckit helps you manage and monitor your AI coding tool sessions:
 
-- **Session Monitoring** (`session`) - Track active Claude Code sessions in real-time with an interactive TUI
+- **Session Monitoring** (`session`) - Track active Claude Code and Codex sessions in real-time with an interactive TUI
+- **Multi-tool Support** - Works with both Claude Code and OpenAI Codex via hooks
 - **Project Inspection** (`ls`) - View all Claude Code projects with their skills, agents, commands, plugins, and MCP servers at a glance
 - **Permissions Audit** (`permissions`) - List, audit, and clean risky allow/deny rules across all projects
 - **Cleanup Tools** (`prune`, `sync`) - Remove stale project paths and orphaned sessions
@@ -54,10 +55,15 @@ The `session` command shows all session states at a glance, so you always know "
 
 ### Setup
 
-First, install hooks to enable session tracking:
+Install hooks to enable session tracking:
 
 ```bash
+# For Claude Code (writes to ~/.claude/settings.json)
 cckit session install
+
+# For OpenAI Codex (writes to ~/.codex/hooks.json + enables feature flag)
+# Requires codex-cli >= 0.117.0
+cckit session install --codex
 ```
 
 ### Usage
@@ -99,14 +105,18 @@ cckit session ls --menubar --no-tui
 ### Hook Management
 
 ```bash
-# Install hooks to ~/.claude/settings.json
+# Install hooks for Claude Code
 cckit session install
+
+# Install hooks for OpenAI Codex
+cckit session install --codex
 
 # Show hook configuration status
 cckit session status
 
 # Remove hooks
-cckit session uninstall
+cckit session uninstall          # Claude Code
+cckit session uninstall --codex  # Codex
 
 # Clean up stale sessions
 cckit session sync --execute
@@ -407,9 +417,11 @@ open dist/CCKit.app
 
 ### session command
 
-1. Uses Claude Code hooks to track session lifecycle events
+1. Uses Claude Code / Codex hooks to track session lifecycle events
 2. Stores session data in `~/Library/Application Support/cckit/sessions.json` (macOS)
-3. TUI displays active sessions with status, working directory, and last tool info
+3. TUI/window app displays active sessions with status, working directory, and last tool info
+4. Detects subagent sessions (Claude Code teams/agents) and shows agent names
+5. Auto-removes stale sessions when the underlying process exits
 
 ### ls command
 

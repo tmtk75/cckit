@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-cckit (Claude Code Kit) is a Rust CLI toolkit for managing Claude Code environments. It provides session monitoring (TUI/menubar), project inspection, and cleanup tools. macOS-specific features include a menubar app and desktop notifications via native Objective-C bindings.
+cckit (Claude Code Kit) is a Rust CLI toolkit for managing AI coding tool environments (Claude Code and OpenAI Codex). It provides session monitoring (TUI/menubar/window app), project inspection, and cleanup tools. macOS-specific features include a menubar app and desktop notifications via native Objective-C bindings.
 
 ## Build & Development Commands
 
@@ -46,15 +46,19 @@ mise run build-app              # runs scripts/macos/build_app.sh
 |------|------|
 | `session.rs` | `Session`, `SessionStatus`, `SessionStore` data models |
 | `storage.rs` | File-based storage with `fs2` file locking, atomic writes (tmp + rename) |
-| `hook.rs` | Claude Code hook event handler (reads stdin JSON from hook events) |
-| `setup.rs` | Install/uninstall hooks in `~/.claude/settings.json` |
+| `hook.rs` | Hook event handler for Claude Code and Codex (reads stdin JSON) |
+| `setup.rs` | Install/uninstall hooks in `~/.claude/settings.json` or `~/.codex/hooks.json` |
 | `tui.rs` | ratatui-based interactive TUI |
 | `menubar.rs` | macOS NSStatusBar/NSMenu via objc2 |
 | `window.rs` | macOS NSWindow session monitor app via objc2 (`run_app` unifies window + menubar) |
 | `notification.rs` | macOS custom notification window via objc2 |
 | `focus.rs` | Terminal focus via AppleScript (iTerm2, Terminal.app, Ghostty) |
 
-**Data flow**: Claude Code hooks → `cckit session hook` (stdin JSON) → `storage.rs` (sessions.json with file lock) → TUI/menubar reads and displays.
+**Data flow**: Claude Code / Codex hooks → `cckit session hook` (stdin JSON) → `storage.rs` (sessions.json with file lock) → TUI/menubar/window reads and displays.
+
+**Subagent detection**: Sessions with `prompt_count == 0 && tool_count > 0` and a Claude model are detected as subagents. Agent names are extracted from the transcript's `agentName` field. Non-Claude models (Codex) are excluded from this heuristic.
+
+**Stale session cleanup**: `load_sessions()` in window.rs calls `sync_sessions()` to remove sessions whose TTY is gone or process has exited. For `tty=unknown` sessions (Codex Desktop), PID liveness is checked via `kill -0`.
 
 ## Key Conventions
 
@@ -62,6 +66,6 @@ mise run build-app              # runs scripts/macos/build_app.sh
 - **Rust edition 2024**, targets macOS primarily (conditional deps for macOS-only features)
 - **Version**: embedded via `build.rs` running `git describe --always --dirty`
 - **Data directory**: `~/Library/Application Support/cckit/` (macOS) or `~/.local/share/cckit/` (Linux)
-- **Config**: reads `~/.claude.json` for project list, `~/.claude/settings.json` for hooks
+- **Config**: reads `~/.claude.json` for project list, `~/.claude/settings.json` for Claude Code hooks, `~/.codex/hooks.json` for Codex hooks
 - Project-local config: `cckit.toml` (optional, for `disable_paths`)
 - Uses `serde_json` with `preserve_order` feature for JSON field ordering
