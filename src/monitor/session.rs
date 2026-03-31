@@ -82,20 +82,17 @@ impl Session {
     /// or prompt_count == 0 with tool_count > 0 for Claude models only
     /// (Codex may have prompt_count=0 due to different UserPromptSubmit behavior).
     pub fn is_subagent(&self) -> bool {
-        if let Some(ref tp) = self.transcript_path {
-            if tp.contains("/subagents/") {
-                return true;
-            }
+        if let Some(ref tp) = self.transcript_path
+            && tp.contains("/subagents/")
+        {
+            return true;
         }
         if self.subagent_name.is_some() {
             return true;
         }
         // Heuristic only for Claude sessions (or unknown model)
         if self.prompt_count == 0 && self.tool_count > 0 {
-            return self
-                .model
-                .as_deref()
-                .map_or(true, |m| m.contains("claude"));
+            return self.model.as_deref().is_none_or(|m| m.contains("claude"));
         }
         false
     }

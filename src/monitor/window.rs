@@ -1,8 +1,10 @@
 // macOS window app for session monitoring
 
+use crate::monitor::display;
 use crate::monitor::focus;
 use crate::monitor::session::{Session, SessionStatus};
 use crate::monitor::storage::Storage;
+use crate::monitor::theme::{self, AgentType, StatusColor, anim, palette};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
@@ -17,7 +19,8 @@ use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSSt
 type CGFloat = f64;
 
 use std::path::PathBuf;
-use std::sync::{Mutex, Once};
+use std::sync::{Mutex, Once, OnceLock};
+use std::time::Instant;
 
 // --- Config ---
 
@@ -89,23 +92,26 @@ fn reload_config() {
     apply_config();
 }
 
-// --- Layout constants ---
+// --- Theme ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowThemeId {
+    Classic,
+    #[allow(dead_code)]
+    MissionControl,
+}
+
+static CURRENT_THEME: Mutex<WindowThemeId> = Mutex::new(WindowThemeId::Classic);
+
+// --- Layout constants (shared / window-level) ---
 
 const WINDOW_WIDTH: CGFloat = 640.0;
 const MIN_WINDOW_HEIGHT: CGFloat = 120.0;
 const ROW_HEIGHT: CGFloat = 22.0;
 const HEADER_HEIGHT: CGFloat = 20.0;
 const FOOTER_HEIGHT: CGFloat = 22.0;
-const FONT_SIZE: CGFloat = 11.5;
-const FONT_SIZE_SMALL: CGFloat = 10.0;
-const HINT_FONT_SIZE: CGFloat = 10.5;
-const DOT_SIZE: CGFloat = 6.0;
 const LEFT_PAD: CGFloat = 10.0;
-const TEXT_LEFT: CGFloat = 24.0;
-const PROJECT_COL_WIDTH: CGFloat = 220.0;
-const PROJECT_COL_WIDTH_WIDE: CGFloat = 300.0;
-const FIT_MIN_WIDTH: CGFloat = 640.0;
-const FIT_MAX_WIDTH: CGFloat = 840.0;
+const HINT_FONT_SIZE: CGFloat = 10.5;
 const FIT_PATH_CHAR_WIDTH: CGFloat = 6.0;
 const FIT_PATH_BASE_CHARS: usize = 18;
 const FIT_PATH_MAX_CHARS: usize = 34;
@@ -162,6 +168,32 @@ fn status_row_bg(status: &SessionStatus) -> Retained<NSColor> {
     }
 }
 
+// --- MC theme helpers ---
+
+fn rgb_to_f64(c: (u8, u8, u8)) -> (f64, f64, f64) {
+    (c.0 as f64 / 255.0, c.1 as f64 / 255.0, c.2 as f64 / 255.0)
+}
+
+fn color_surface() -> Retained<NSColor> {
+    let config = WINDOW_CONFIG.lock().unwrap();
+    let opacity = config.as_ref().map(|c| c.background_opacity).unwrap_or(0.5);
+    drop(config);
+    let alpha = (opacity - 0.05).max(0.0);
+    let (r, g, b) = rgb_to_f64(palette::SURFACE);
+    NSColor::colorWithRed_green_blue_alpha(r, g, b, alpha)
+}
+
+fn agent_accent_color_alpha(agent: AgentType, alpha: f64) -> Retained<NSColor> {
+    let (r, g, b) = agent.accent_f64();
+    NSColor::colorWithRed_green_blue_alpha(r, g, b, alpha)
+}
+
+static ANIMATION_START: OnceLock<Instant> = OnceLock::new();
+
+fn elapsed_secs() -> f64 {
+    ANIMATION_START.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
 // --- Data ---
 
 static SESSION_LIST: Mutex<Vec<Session>> = Mutex::new(Vec::new());
@@ -210,30 +242,11 @@ fn load_sessions() {
 }
 
 fn format_elapsed(dt: chrono::DateTime<chrono::Utc>) -> String {
-    let secs = chrono::Utc::now()
-        .signed_duration_since(dt)
-        .num_seconds()
-        .max(0);
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{}h", secs / 3600)
-    }
+    display::format_elapsed_short(dt)
 }
 
 fn format_session_stats(session: &Session) -> String {
-    let mut parts = Vec::new();
-    if session.prompt_count > 0 {
-        parts.push(format!("{}p", session.prompt_count));
-    }
-    if session.tool_count > 0 {
-        parts.push(format!("{}t", session.tool_count));
-    }
-    if session.compact_count > 0 {
-        parts.push(format!("{}c", session.compact_count));
-    }
+    let mut parts = display::session_count_parts(session);
     let dur = format_tool_duration(session);
     if !dur.is_empty() {
         parts.push(dur);
@@ -281,14 +294,14 @@ fn context_bar_color(ratio: f64) -> Retained<NSColor> {
 
 fn format_tool_duration(session: &Session) -> String {
     // Show live elapsed time if tool is currently running
-    if let Some(started) = session.tool_started_at {
-        if session.status == SessionStatus::AwaitingApproval {
-            let ms = chrono::Utc::now()
-                .signed_duration_since(started)
-                .num_milliseconds()
-                .max(0);
-            return format_duration_ms(ms);
-        }
+    if let Some(started) = session.tool_started_at
+        && session.status == SessionStatus::AwaitingApproval
+    {
+        let ms = chrono::Utc::now()
+            .signed_duration_since(started)
+            .num_milliseconds()
+            .max(0);
+        return format_duration_ms(ms);
     }
     // Otherwise show last completed tool duration
     match session.last_tool_duration_ms {
@@ -317,7 +330,20 @@ fn calculate_fit_window_width() -> CGFloat {
         .clamp(FIT_PATH_BASE_CHARS, FIT_PATH_MAX_CHARS);
     let extra_chars = longest_path_chars.saturating_sub(FIT_PATH_BASE_CHARS) as CGFloat;
 
-    (FIT_MIN_WIDTH + extra_chars * FIT_PATH_CHAR_WIDTH).clamp(FIT_MIN_WIDTH, FIT_MAX_WIDTH)
+    let theme = *CURRENT_THEME.lock().unwrap();
+    match theme {
+        WindowThemeId::Classic => {
+            let min_w = 640.0;
+            let max_w = 840.0;
+            (min_w + extra_chars * FIT_PATH_CHAR_WIDTH).clamp(min_w, max_w)
+        }
+        WindowThemeId::MissionControl => {
+            // TODO: MC-specific width calculation
+            let min_w = 640.0;
+            let max_w = 840.0;
+            (min_w + extra_chars * FIT_PATH_CHAR_WIDTH).clamp(min_w, max_w)
+        }
+    }
 }
 
 fn status_label(status: &SessionStatus) -> &'static str {
@@ -446,11 +472,9 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
     let current = *SELECTED_INDEX.lock().unwrap();
 
     // Find next/prev focusable index (skip tty=unknown sessions)
-    let find_focusable = |range: Box<dyn Iterator<Item = usize>>| -> Option<usize> {
+    let find_focusable = |mut range: Box<dyn Iterator<Item = usize>>| -> Option<usize> {
         let sessions = SESSION_LIST.lock().unwrap();
-        range
-            .filter(|&i| sessions.get(i).map_or(false, |s| s.tty != "unknown"))
-            .next()
+        range.find(|&i| sessions.get(i).is_some_and(|s| s.tty != "unknown"))
     };
 
     match key_code {
@@ -594,6 +618,29 @@ fn update_af_label() {
 }
 
 fn rebuild_view(view: &NSView) {
+    let theme = *CURRENT_THEME.lock().unwrap();
+    match theme {
+        WindowThemeId::Classic => rebuild_view_classic(view),
+        WindowThemeId::MissionControl => rebuild_view_mission_control(view),
+    }
+}
+
+// --- Classic theme (v0.1.0 verbatim) ---
+
+fn rebuild_view_classic(view: &NSView) {
+    // Classic theme own layout constants
+    const ROW_HEIGHT: CGFloat = 22.0;
+    const HEADER_HEIGHT: CGFloat = 20.0;
+    #[allow(dead_code)]
+    const FOOTER_HEIGHT: CGFloat = 22.0;
+    const FONT_SIZE: CGFloat = 11.5;
+    const FONT_SIZE_SMALL: CGFloat = 10.0;
+    const DOT_SIZE: CGFloat = 6.0;
+    const LEFT_PAD: CGFloat = 10.0;
+    const TEXT_LEFT: CGFloat = 24.0;
+    const PROJECT_COL_WIDTH: CGFloat = 220.0;
+    const PROJECT_COL_WIDTH_WIDE: CGFloat = 300.0;
+
     let mtm = MainThreadMarker::new().unwrap();
     let sessions = SESSION_LIST.lock().unwrap();
     let selected = *SELECTED_INDEX.lock().unwrap();
@@ -672,13 +719,8 @@ fn rebuild_view(view: &NSView) {
             NSPoint::new(view_width - hdr_ctx_w - LEFT_PAD, 2.0),
             NSSize::new(hdr_ctx_w, HEADER_HEIGHT - 2.0),
         );
-        let hdr_ctx_label = create_mono_label(
-            mtm,
-            "CONTEXT",
-            hdr_ctx_rect,
-            &color_dim(),
-            FONT_SIZE_SMALL,
-        );
+        let hdr_ctx_label =
+            create_mono_label(mtm, "CONTEXT", hdr_ctx_rect, &color_dim(), FONT_SIZE_SMALL);
         let _: () = unsafe { msg_send![&*hdr_ctx_label, setAlignment: 1_isize] };
         view.addSubview(&hdr_ctx_label);
     }
@@ -811,10 +853,8 @@ fn rebuild_view(view: &NSView) {
 
             if let Some(ref info) = ctx_info {
                 // Bar background (dim track)
-                let track_rect = NSRect::new(
-                    NSPoint::new(col_x, bar_y),
-                    NSSize::new(bar_total_w, bar_h),
-                );
+                let track_rect =
+                    NSRect::new(NSPoint::new(col_x, bar_y), NSSize::new(bar_total_w, bar_h));
                 view.addSubview(&create_colored_view(
                     mtm,
                     track_rect,
@@ -824,10 +864,7 @@ fn rebuild_view(view: &NSView) {
 
                 // Bar fill (colored by usage)
                 let fill_w = (bar_total_w * info.ratio).max(1.0);
-                let fill_rect = NSRect::new(
-                    NSPoint::new(col_x, bar_y),
-                    NSSize::new(fill_w, bar_h),
-                );
+                let fill_rect = NSRect::new(NSPoint::new(col_x, bar_y), NSSize::new(fill_w, bar_h));
                 view.addSubview(&create_colored_view(
                     mtm,
                     fill_rect,
@@ -864,6 +901,301 @@ fn rebuild_view(view: &NSView) {
                 0.0,
             ));
         }
+    }
+}
+
+// --- Mission Control theme ---
+
+fn rebuild_view_mission_control(view: &NSView) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let sessions = SESSION_LIST.lock().unwrap();
+    let selected = *SELECTED_INDEX.lock().unwrap();
+
+    let subviews = view.subviews();
+    for subview in subviews.iter() {
+        subview.removeFromSuperview();
+    }
+
+    let view_width = unsafe { view.superview() }
+        .map(|sv| sv.bounds().size.width)
+        .unwrap_or(WINDOW_WIDTH);
+
+    // MC layout constants
+    const MC_CARD_HEIGHT: CGFloat = 38.0;
+    const MC_CARD_SPACING: CGFloat = 6.0;
+    const MC_CARD_CORNER_RADIUS: CGFloat = 6.0;
+    const MC_HEADER_HEIGHT: CGFloat = 28.0;
+    const MC_FONT_SIZE: CGFloat = 11.5;
+    const MC_FONT_SIZE_SMALL: CGFloat = 10.0;
+    const MC_DOT_SIZE: CGFloat = 6.0;
+    const MC_LEFT_PAD: CGFloat = 8.0;
+    const MC_CONTENT_LEFT: CGFloat = 8.0;
+    const MC_GRID_SPACING: CGFloat = 20.0;
+    const MC_GRID_DOT_RADIUS: CGFloat = 1.0;
+
+    // --- Background dot grid ---
+    {
+        let (gr, gg, gb) = rgb_to_f64(palette::GRID);
+        let grid_color = NSColor::colorWithRed_green_blue_alpha(gr, gg, gb, 0.10);
+        let view_h = view.frame().size.height.max(400.0);
+        let mut gx = MC_GRID_SPACING;
+        while gx < view_width {
+            let mut gy = MC_GRID_SPACING;
+            while gy < view_h {
+                let dot_view = create_colored_view(
+                    mtm,
+                    NSRect::new(
+                        NSPoint::new(gx - MC_GRID_DOT_RADIUS, gy - MC_GRID_DOT_RADIUS),
+                        NSSize::new(MC_GRID_DOT_RADIUS * 2.0, MC_GRID_DOT_RADIUS * 2.0),
+                    ),
+                    &grid_color,
+                    MC_GRID_DOT_RADIUS,
+                );
+                view.addSubview(&dot_view);
+                gy += MC_GRID_SPACING;
+            }
+            gx += MC_GRID_SPACING;
+        }
+    }
+
+    let active_count = sessions
+        .iter()
+        .filter(|s| s.status != SessionStatus::Stopped)
+        .count();
+    let total_count = sessions.len();
+
+    let card_count = sessions.len().max(1) as CGFloat;
+    let total_height = MC_HEADER_HEIGHT + card_count * (MC_CARD_HEIGHT + MC_CARD_SPACING);
+    view.setFrameSize(NSSize::new(view_width, total_height));
+
+    // --- Header ---
+    let hdr_left_rect = NSRect::new(
+        NSPoint::new(MC_LEFT_PAD, 4.0),
+        NSSize::new(250.0, MC_HEADER_HEIGHT - 4.0),
+    );
+    let hdr_left_label = create_mono_label(
+        mtm,
+        "\u{25C9} cckit mission control",
+        hdr_left_rect,
+        &color_text(),
+        MC_FONT_SIZE,
+    );
+    let bold_font = NSFont::monospacedSystemFontOfSize_weight(MC_FONT_SIZE, 0.7);
+    hdr_left_label.setFont(Some(&bold_font));
+    view.addSubview(&hdr_left_label);
+
+    let hdr_right_text = format!("{} active / {} total", active_count, total_count);
+    let hdr_right_rect = NSRect::new(
+        NSPoint::new(view_width - 200.0 - MC_LEFT_PAD, 4.0),
+        NSSize::new(200.0, MC_HEADER_HEIGHT - 4.0),
+    );
+    let hdr_right_label = create_mono_label(
+        mtm,
+        &hdr_right_text,
+        hdr_right_rect,
+        &color_dim(),
+        MC_FONT_SIZE_SMALL,
+    );
+    let _: () = unsafe { msg_send![&*hdr_right_label, setAlignment: 2_isize] };
+    view.addSubview(&hdr_right_label);
+
+    let y_start = MC_HEADER_HEIGHT;
+
+    if sessions.is_empty() {
+        let rect = NSRect::new(
+            NSPoint::new(MC_LEFT_PAD + MC_CONTENT_LEFT, y_start + 20.0),
+            NSSize::new(view_width - MC_LEFT_PAD * 2.0, 20.0),
+        );
+        view.addSubview(&create_mono_label(
+            mtm,
+            "no active sessions",
+            rect,
+            &color_dim(),
+            MC_FONT_SIZE,
+        ));
+        return;
+    }
+
+    for (i, session) in sessions.iter().enumerate() {
+        let card_y = y_start + (i as CGFloat) * (MC_CARD_HEIGHT + MC_CARD_SPACING);
+        let card_w = view_width - MC_LEFT_PAD * 2.0;
+        let agent = session.agent_type();
+        let is_stopped = session.status == SessionStatus::Stopped;
+        let card_alpha: CGFloat = if is_stopped { 0.5 } else { 1.0 };
+
+        // Card background
+        let card_rect = NSRect::new(
+            NSPoint::new(MC_LEFT_PAD, card_y),
+            NSSize::new(card_w, MC_CARD_HEIGHT),
+        );
+        let card_bg = if Some(i) == selected {
+            color_selection()
+        } else {
+            color_surface()
+        };
+        let card_view = create_colored_view(mtm, card_rect, &card_bg, MC_CARD_CORNER_RADIUS);
+        if is_stopped {
+            let _: () = unsafe { msg_send![&*card_view, setAlphaValue: card_alpha] };
+        }
+
+        // Card border glow animation
+        if let Some(layer) = card_view.layer() {
+            let glow_alpha = match session.status {
+                SessionStatus::Running => {
+                    let phase = (elapsed_secs() / anim::GLOW_PERIOD) * std::f64::consts::TAU;
+                    ((phase.sin() + 1.0) / 2.0) * 0.3
+                }
+                SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs()) * 0.3,
+                _ => 0.0,
+            };
+            if glow_alpha > 0.0 {
+                let border_color = agent_accent_color_alpha(agent, glow_alpha);
+                layer.setBorderColor(Some(&border_color.CGColor()));
+                let _: () = unsafe { msg_send![&*layer, setBorderWidth: 1.0_f64] };
+            }
+        }
+
+        // Row 1: status dot + agent + project + elapsed
+        let row1_y: CGFloat = 4.0;
+        let row1_h: CGFloat = 16.0;
+        let content_x = MC_CONTENT_LEFT;
+
+        let dot = MC_DOT_SIZE;
+        let dot_y = row1_y + (row1_h - dot) / 2.0;
+        let dot_color = if session.tty == "unknown" {
+            color_dim()
+        } else {
+            status_color(&session.status)
+        };
+        let dot_view = create_colored_view(
+            mtm,
+            NSRect::new(NSPoint::new(content_x, dot_y), NSSize::new(dot, dot)),
+            &dot_color,
+            dot / 2.0,
+        );
+        let dot_alpha: f64 = match session.status {
+            SessionStatus::Running => theme::breathing_pulse(elapsed_secs()),
+            SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs()),
+            SessionStatus::WaitingInput => theme::slow_fade(elapsed_secs()),
+            SessionStatus::Stopped => 1.0,
+        };
+        let _: () = unsafe { msg_send![&*dot_view, setAlphaValue: dot_alpha] };
+        card_view.addSubview(&dot_view);
+
+        let project = session.display_name();
+        let elapsed = format_elapsed(session.updated_at);
+        let unfocusable = session.tty == "unknown";
+        let text_color = if unfocusable || is_stopped {
+            color_dim()
+        } else {
+            color_text()
+        };
+
+        let agent_label_text = match agent {
+            AgentType::Claude => "Claude",
+            AgentType::Codex => "Codex",
+            AgentType::Gemini => "Gemini",
+            AgentType::Unknown => "Agent",
+        };
+        let row1_text = format!("{} \u{2022} {}", agent_label_text, project);
+        let label_x = content_x + dot + 4.0;
+        let row1_rect = NSRect::new(
+            NSPoint::new(label_x, row1_y),
+            NSSize::new(card_w - label_x - 120.0, row1_h),
+        );
+        let row1_label =
+            create_mono_label(mtm, &row1_text, row1_rect, &text_color, MC_FONT_SIZE);
+        let bold_font_row1 = NSFont::monospacedSystemFontOfSize_weight(MC_FONT_SIZE, 0.5);
+        row1_label.setFont(Some(&bold_font_row1));
+        let _: () = unsafe { msg_send![&*row1_label, setLineBreakMode: 5_isize] };
+        card_view.addSubview(&row1_label);
+
+        // Elapsed + context %
+        let ctx_info = context_bar_info(session);
+        let mini_ctx = ctx_info
+            .as_ref()
+            .map(|c| format!("  {}", c.label))
+            .unwrap_or_default();
+        let row1_right_text = format!("{}{}", elapsed, mini_ctx);
+        let row1_right_rect = NSRect::new(
+            NSPoint::new(card_w - 110.0, row1_y),
+            NSSize::new(100.0, row1_h),
+        );
+        let row1_right = create_mono_label(
+            mtm,
+            &row1_right_text,
+            row1_right_rect,
+            &color_dim(),
+            MC_FONT_SIZE_SMALL,
+        );
+        let _: () = unsafe { msg_send![&*row1_right, setAlignment: 2_isize] };
+        card_view.addSubview(&row1_right);
+
+        // Row 2: tool + stats + path + context bar + AF
+        let row2_y: CGFloat = 20.0;
+        let row2_h: CGFloat = 14.0;
+
+        let tool = session.last_tool.as_deref().unwrap_or("-");
+        let stats = format_session_stats(session);
+        let path = session.short_cwd();
+        let af_off = AF_DISABLED_PROJECTS.lock().unwrap().contains(&session.cwd);
+        let af_icon = if af_off { "\u{23F8}" } else { "\u{2713}" };
+
+        let bar_w: CGFloat = 60.0;
+        let bar_h: CGFloat = 3.0;
+        let bar_x = card_w - 80.0;
+        let bar_y = row2_y + (row2_h - bar_h) / 2.0;
+
+        let row2_text = format!(
+            "{} \u{2022} {} \u{2022} {} \u{2022} AF:{}",
+            tool, stats, path, af_icon
+        );
+        let row2_rect = NSRect::new(
+            NSPoint::new(content_x, row2_y),
+            NSSize::new(card_w - content_x - 90.0, row2_h),
+        );
+        let row2_label =
+            create_mono_label(mtm, &row2_text, row2_rect, &color_dim(), MC_FONT_SIZE_SMALL);
+        let _: () = unsafe { msg_send![&*row2_label, setLineBreakMode: 5_isize] };
+        card_view.addSubview(&row2_label);
+
+        // Inline context gauge bar
+        if let Some(ref info) = ctx_info {
+            let track_rect = NSRect::new(NSPoint::new(bar_x, bar_y), NSSize::new(bar_w, bar_h));
+            card_view.addSubview(&create_colored_view(
+                mtm,
+                track_rect,
+                &NSColor::colorWithRed_green_blue_alpha(1.0, 1.0, 1.0, 0.08),
+                1.5,
+            ));
+            let fill_w = (bar_w * info.ratio).max(1.0);
+            let fill_rect = NSRect::new(NSPoint::new(bar_x, bar_y), NSSize::new(fill_w, bar_h));
+            card_view.addSubview(&create_colored_view(
+                mtm,
+                fill_rect,
+                &context_bar_color(info.ratio),
+                1.5,
+            ));
+            if fill_w > 4.0 && !is_stopped {
+                let pulse_w = 4.0_f64.min(fill_w);
+                let phase = (elapsed_secs() * std::f64::consts::TAU / anim::CONTEXT_PULSE_PERIOD)
+                    .sin()
+                    .max(0.0);
+                let pulse_alpha = 0.6 + 0.4 * phase;
+                let pulse_rect = NSRect::new(
+                    NSPoint::new(bar_x + fill_w - pulse_w, bar_y),
+                    NSSize::new(pulse_w, bar_h),
+                );
+                card_view.addSubview(&create_colored_view(
+                    mtm,
+                    pulse_rect,
+                    &NSColor::colorWithRed_green_blue_alpha(1.0, 1.0, 1.0, pulse_alpha * 0.5),
+                    1.5,
+                ));
+            }
+        }
+
+        view.addSubview(&card_view);
     }
 }
 
@@ -1000,24 +1332,24 @@ fn update_sessions_and_redraw() {
             if disabled.contains(&s.cwd) {
                 continue;
             }
-            if s.status == SessionStatus::AwaitingApproval && !notified.contains(&s.key()) {
-                if let Some(started) = s.tool_started_at {
-                    let elapsed_ms = now.signed_duration_since(started).num_milliseconds();
-                    if elapsed_ms >= 3000 {
-                        approval = true;
-                        notified.insert(s.key());
-                    }
+            if s.status == SessionStatus::AwaitingApproval
+                && !notified.contains(&s.key())
+                && let Some(started) = s.tool_started_at
+            {
+                let elapsed_ms = now.signed_duration_since(started).num_milliseconds();
+                if elapsed_ms >= 3000 {
+                    approval = true;
+                    notified.insert(s.key());
                 }
             }
-            if let Some(prev_status) = prev.get(&s.key()) {
-                if s.status == SessionStatus::WaitingInput
-                    && matches!(
-                        prev_status,
-                        SessionStatus::Running | SessionStatus::AwaitingApproval
-                    )
-                {
-                    done = true;
-                }
+            if let Some(prev_status) = prev.get(&s.key())
+                && s.status == SessionStatus::WaitingInput
+                && matches!(
+                    prev_status,
+                    SessionStatus::Running | SessionStatus::AwaitingApproval
+                )
+            {
+                done = true;
             }
         }
         drop(disabled);
@@ -1149,8 +1481,21 @@ fn fit_window_to_content() {
 }
 
 fn calculate_layout_height() -> CGFloat {
+    let theme = *CURRENT_THEME.lock().unwrap();
+    match theme {
+        WindowThemeId::Classic => calculate_layout_height_classic(),
+        WindowThemeId::MissionControl => calculate_layout_height_mc(),
+    }
+}
+
+fn calculate_layout_height_classic() -> CGFloat {
     let session_count = SESSION_LIST.lock().unwrap().len().max(1) as CGFloat;
-    HEADER_HEIGHT + 1.0 + session_count * ROW_HEIGHT + FOOTER_HEIGHT
+    20.0 + 1.0 + session_count * 22.0 + 22.0 // HEADER + separator + rows + FOOTER
+}
+
+fn calculate_layout_height_mc() -> CGFloat {
+    let session_count = SESSION_LIST.lock().unwrap().len().max(1) as CGFloat;
+    28.0 + session_count * (38.0 + 6.0) // MC_HEADER + cards * (height + spacing)
 }
 
 fn calculate_target_content_height(

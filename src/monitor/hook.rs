@@ -19,10 +19,7 @@ pub struct ContextUsage {
 pub fn model_max_tokens(model: &str) -> Option<u64> {
     if model.contains("opus-4") || model.contains("sonnet-4") {
         Some(1_000_000)
-    } else if model.contains("haiku")
-        || model.contains("opus")
-        || model.contains("sonnet")
-    {
+    } else if model.contains("haiku") || model.contains("opus") || model.contains("sonnet") {
         Some(200_000)
     } else {
         None
@@ -283,30 +280,28 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Update transcript_path if provided (may arrive on any event)
-        if let Some(ref tp) = transcript {
-            if let Some(session) = store.sessions.get_mut(&key) {
-                if session.transcript_path.is_none() {
-                    session.transcript_path = Some(tp.clone());
-                }
-            }
+        if let Some(ref tp) = transcript
+            && let Some(session) = store.sessions.get_mut(&key)
+            && session.transcript_path.is_none()
+        {
+            session.transcript_path = Some(tp.clone());
         }
 
         // Set model from hook input if provided (Codex always sends this)
-        if let Some(ref model) = hook_input.model {
-            if let Some(session) = store.sessions.get_mut(&key) {
-                if session.model.is_none() {
-                    session.model = Some(model.clone());
-                }
-            }
+        if let Some(ref model) = hook_input.model
+            && let Some(session) = store.sessions.get_mut(&key)
+            && session.model.is_none()
+        {
+            session.model = Some(model.clone());
         }
 
         // Extract subagent name if this looks like a subagent and name is not yet set
-        if let Some(session) = store.sessions.get_mut(&key) {
-            if session.subagent_name.is_none() && session.is_subagent() {
-                if let Some(ref tp) = session.transcript_path {
-                    session.subagent_name = extract_subagent_name(tp);
-                }
-            }
+        if let Some(session) = store.sessions.get_mut(&key)
+            && session.subagent_name.is_none()
+            && session.is_subagent()
+            && let Some(ref tp) = session.transcript_path
+        {
+            session.subagent_name = extract_subagent_name(tp);
         }
 
         store.updated_at = Utc::now();
@@ -353,15 +348,13 @@ fn get_current_tty() -> String {
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string())
             .ok_or(std::env::VarError::NotPresent)
-    }) {
-        if let Ok(output) = Command::new("ps")
-            .args(["-o", "tty=", "-p", &ppid])
-            .output()
-        {
-            let tty = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !tty.is_empty() && tty != "??" {
-                return format!("/dev/{}", tty);
-            }
+    }) && let Ok(output) = Command::new("ps")
+        .args(["-o", "tty=", "-p", &ppid])
+        .output()
+    {
+        let tty = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !tty.is_empty() && tty != "??" {
+            return format!("/dev/{}", tty);
         }
     }
 
@@ -370,22 +363,20 @@ fn get_current_tty() -> String {
 
 fn get_parent_pid() -> Option<u32> {
     // Try PPID env var first
-    if let Ok(ppid) = std::env::var("PPID") {
-        if let Ok(pid) = ppid.parse::<u32>() {
-            return Some(pid);
-        }
+    if let Ok(ppid) = std::env::var("PPID")
+        && let Ok(pid) = ppid.parse::<u32>()
+    {
+        return Some(pid);
     }
 
     // Fallback: get PPID via ps command
     if let Ok(output) = Command::new("ps")
         .args(["-o", "ppid=", "-p", &std::process::id().to_string()])
         .output()
+        && let Ok(ppid_str) = String::from_utf8(output.stdout)
+        && let Ok(pid) = ppid_str.trim().parse::<u32>()
     {
-        if let Ok(ppid_str) = String::from_utf8(output.stdout) {
-            if let Ok(pid) = ppid_str.trim().parse::<u32>() {
-                return Some(pid);
-            }
-        }
+        return Some(pid);
     }
 
     None
@@ -439,10 +430,10 @@ pub fn extract_subagent_name(transcript_path: &str) -> Option<String> {
     let val: serde_json::Value = serde_json::from_str(&first_line).ok()?;
 
     // Try agentName field first (team agents)
-    if let Some(name) = val.get("agentName").and_then(|v| v.as_str()) {
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
+    if let Some(name) = val.get("agentName").and_then(|v| v.as_str())
+        && !name.is_empty()
+    {
+        return Some(name.to_string());
     }
 
     // Fallback: extract from first user message content

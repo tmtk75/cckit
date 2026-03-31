@@ -1,5 +1,6 @@
 // macOS custom notification window implementation
 
+use super::paths;
 use objc2::rc::Retained;
 use objc2::{MainThreadOnly, msg_send};
 use objc2_app_kit::{
@@ -27,19 +28,9 @@ pub struct MenubarPosition {
 
 const MENUBAR_POSITION_FILE: &str = "menubar_position.json";
 
-fn get_data_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .expect("Could not find home directory")
-                .join(".local/share")
-        })
-        .join("cckit")
-}
-
 /// Load menubar position from shared file
 pub fn load_menubar_position() -> Option<MenubarPosition> {
-    let path = get_data_dir().join(MENUBAR_POSITION_FILE);
+    let path = paths::data_dir().join(MENUBAR_POSITION_FILE);
     let content = std::fs::read_to_string(&path).ok()?;
     let pos: MenubarPosition = serde_json::from_str(&content).ok()?;
 
@@ -54,7 +45,7 @@ pub fn load_menubar_position() -> Option<MenubarPosition> {
 
 /// Save menubar position to shared file
 pub fn save_menubar_position(pos: &MenubarPosition) -> std::io::Result<()> {
-    let dir = get_data_dir();
+    let dir = paths::data_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(MENUBAR_POSITION_FILE);
     let content = serde_json::to_string(pos)?;
@@ -287,18 +278,17 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
 
     // Create subtitle label if present
     let subtitle_y = title_y - SUBTITLE_HEIGHT;
-    if let Some(ref subtitle) = opts.subtitle {
-        if !subtitle.is_empty() {
-            let subtitle_rect = NSRect::new(
-                NSPoint::new(PADDING, subtitle_y),
-                NSSize::new(content_width, SUBTITLE_HEIGHT),
-            );
-            let subtitle_label =
-                create_label(mtm, subtitle, subtitle_rect, SUBTITLE_FONT_SIZE, false);
-            let sub_color = NSColor::colorWithRed_green_blue_alpha(0.55, 0.58, 0.65, 1.0);
-            subtitle_label.setTextColor(Some(&sub_color));
-            content_view.addSubview(&subtitle_label);
-        }
+    if let Some(ref subtitle) = opts.subtitle
+        && !subtitle.is_empty()
+    {
+        let subtitle_rect = NSRect::new(
+            NSPoint::new(PADDING, subtitle_y),
+            NSSize::new(content_width, SUBTITLE_HEIGHT),
+        );
+        let subtitle_label = create_label(mtm, subtitle, subtitle_rect, SUBTITLE_FONT_SIZE, false);
+        let sub_color = NSColor::colorWithRed_green_blue_alpha(0.55, 0.58, 0.65, 1.0);
+        subtitle_label.setTextColor(Some(&sub_color));
+        content_view.addSubview(&subtitle_label);
     }
 
     // Separator line
@@ -515,7 +505,7 @@ fn calculate_text_height(
             total_lines += 1; // Empty line
         } else {
             // Calculate wrapped lines for this line
-            total_lines += (line_chars + chars_per_line - 1) / chars_per_line;
+            total_lines += line_chars.div_ceil(chars_per_line);
         }
     }
 

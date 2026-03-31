@@ -1,3 +1,4 @@
+use super::display;
 use super::focus;
 #[cfg(target_os = "macos")]
 use super::menubar;
@@ -237,108 +238,98 @@ fn run_tui_core(
         }
 
         // Event polling with short timeout for responsive Ctrl+C
-        if event::poll(event_timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.message = None; // Clear message on key press
+        if event::poll(event_timeout)?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            app.message = None; // Clear message on key press
 
-                    // Handle Ctrl+C
-                    if key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        app.should_quit = true;
-                        continue;
-                    }
+            // Handle Ctrl+C
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.should_quit = true;
+                continue;
+            }
 
-                    match key.code {
-                        KeyCode::Esc => {
-                            app.should_quit = true;
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => app.select_previous(),
-                        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
-                        KeyCode::Enter | KeyCode::Char('f') => {
-                            if let Some(session) = app.selected_session() {
-                                if session.tty == "unknown" {
-                                    // Skip focus for sessions without a known TTY (e.g. Codex Desktop)
-                                    app.message = Some("No TTY (desktop app)".to_string());
-                                } else {
-                                    // Use TTY-based focus (works with tmux)
-                                    match focus::focus_ghostty_tab_by_tty(&session.tty) {
+            match key.code {
+                KeyCode::Esc => {
+                    app.should_quit = true;
+                }
+                KeyCode::Up | KeyCode::Char('k') => app.select_previous(),
+                KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+                KeyCode::Enter | KeyCode::Char('f') => {
+                    if let Some(session) = app.selected_session() {
+                        if session.tty == "unknown" {
+                            // Skip focus for sessions without a known TTY (e.g. Codex Desktop)
+                            app.message = Some("No TTY (desktop app)".to_string());
+                        } else {
+                            // Use TTY-based focus (works with tmux)
+                            match focus::focus_ghostty_tab_by_tty(&session.tty) {
+                                Ok(true) => {
+                                    app.message = Some(format!("Focused: {}", session.short_cwd()));
+                                }
+                                Ok(false) => {
+                                    // Fallback to project name matching
+                                    let project_name = std::path::Path::new(&session.cwd)
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or(&session.cwd);
+                                    match focus::focus_ghostty_tab(project_name) {
                                         Ok(true) => {
                                             app.message =
-                                                Some(format!("Focused: {}", session.short_cwd()));
+                                                Some(format!("Focused: {}", project_name));
                                         }
                                         Ok(false) => {
-                                            // Fallback to project name matching
-                                            let project_name =
-                                                std::path::Path::new(&session.cwd)
-                                                    .file_name()
-                                                    .and_then(|n| n.to_str())
-                                                    .unwrap_or(&session.cwd);
-                                            match focus::focus_ghostty_tab(project_name) {
-                                                Ok(true) => {
-                                                    app.message = Some(format!(
-                                                        "Focused: {}",
-                                                        project_name
-                                                    ));
-                                                }
-                                                Ok(false) => {
-                                                    app.message = Some(format!(
-                                                        "No tab: {}",
-                                                        project_name
-                                                    ));
-                                                }
-                                                Err(e) => {
-                                                    app.message = Some(format!("Error: {}", e));
-                                                }
-                                            }
+                                            app.message = Some(format!("No tab: {}", project_name));
                                         }
                                         Err(e) => {
                                             app.message = Some(format!("Error: {}", e));
                                         }
                                     }
                                 }
-                            }
-                        }
-                        KeyCode::Char('r') => {
-                            app.update_sessions(&storage);
-                            app.message = Some("Refreshed".to_string());
-                        }
-                        KeyCode::Char('d') => {
-                            if let Some(session) = app.selected_session() {
-                                let key = session.key();
-                                let path = session.short_cwd();
-                                match storage.remove_session(&key) {
-                                    Ok(true) => {
-                                        app.message = Some(format!("Deleted: {}", path));
-                                        app.update_sessions(&storage);
-                                    }
-                                    Ok(false) => {
-                                        app.message = Some("Session not found".to_string());
-                                    }
-                                    Err(e) => {
-                                        app.message = Some(format!("Error: {}", e));
-                                    }
+                                Err(e) => {
+                                    app.message = Some(format!("Error: {}", e));
                                 }
                             }
                         }
-                        KeyCode::Char(c @ '1'..='9') => {
-                            let idx = (c as usize) - ('1' as usize);
-                            if idx < app.sessions.len() {
-                                app.selected_index = idx;
-                            }
-                        }
-                        _ => {}
                     }
                 }
+                KeyCode::Char('r') => {
+                    app.update_sessions(&storage);
+                    app.message = Some("Refreshed".to_string());
+                }
+                KeyCode::Char('d') => {
+                    if let Some(session) = app.selected_session() {
+                        let key = session.key();
+                        let path = session.short_cwd();
+                        match storage.remove_session(&key) {
+                            Ok(true) => {
+                                app.message = Some(format!("Deleted: {}", path));
+                                app.update_sessions(&storage);
+                            }
+                            Ok(false) => {
+                                app.message = Some("Session not found".to_string());
+                            }
+                            Err(e) => {
+                                app.message = Some(format!("Error: {}", e));
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    let idx = (c as usize) - ('1' as usize);
+                    if idx < app.sessions.len() {
+                        app.selected_index = idx;
+                    }
+                }
+                _ => {}
             }
         }
 
         // Check for quit signal from external source (Ctrl+C handler)
-        if let Some(ref quit_flag) = external_quit {
-            if quit_flag.load(Ordering::SeqCst) {
-                app.should_quit = true;
-            }
+        if let Some(ref quit_flag) = external_quit
+            && quit_flag.load(Ordering::SeqCst)
+        {
+            app.should_quit = true;
         }
 
         if app.should_quit {
@@ -460,14 +451,20 @@ fn draw_sessions_table(frame: &mut Frame, area: Rect, app: &App) {
                 .pid
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "-".to_string());
-            let created = format_relative_time(session.created_at);
-            let updated = format_relative_time(session.updated_at);
+            let created = display::format_relative_time(session.created_at);
+            let updated = display::format_relative_time(session.updated_at);
 
             Row::new(vec![
                 Cell::from(format!("{}", idx + 1)).style(Style::default().fg(Color::Gray)),
                 Cell::from(status_text).style(status_style),
                 Cell::from(if session.is_subagent() {
-                    format!("↳{}", session.subagent_name.as_deref().unwrap_or(&session.short_cwd()))
+                    format!(
+                        "↳{}",
+                        session
+                            .subagent_name
+                            .as_deref()
+                            .unwrap_or(&session.short_cwd())
+                    )
                 } else {
                     session.short_cwd()
                 }),
@@ -532,21 +529,6 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 
     let footer = Paragraph::new(content);
     frame.render_widget(footer, area);
-}
-
-fn format_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
-    let now = chrono::Utc::now();
-    let duration = now.signed_duration_since(dt);
-
-    if duration.num_seconds() < 60 {
-        format!("{}s ago", duration.num_seconds())
-    } else if duration.num_minutes() < 60 {
-        format!("{}m ago", duration.num_minutes())
-    } else if duration.num_hours() < 24 {
-        format!("{}h ago", duration.num_hours())
-    } else {
-        format!("{}d ago", duration.num_days())
-    }
 }
 
 #[cfg(test)]

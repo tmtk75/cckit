@@ -498,35 +498,10 @@ fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>) {
 }
 
 fn scan_skills(dir: &Path) -> Vec<SkillInfo> {
-    let skills_dir = dir.join("skills");
-    let mut skills = Vec::new();
-
-    if !skills_dir.exists() {
-        return skills;
-    }
-
-    if let Ok(entries) = fs::read_dir(&skills_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let skill_file = path.join("SKILL.md");
-                if skill_file.exists() {
-                    if let Ok(content) = fs::read_to_string(&skill_file) {
-                        let (name, description) = parse_frontmatter(&content);
-                        let name = name.unwrap_or_else(|| {
-                            path.file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string()
-                        });
-                        skills.push(SkillInfo { name, description });
-                    }
-                }
-            }
-        }
-    }
-
-    skills
+    scan_skills_with_paths(dir)
+        .into_iter()
+        .map(|skill| skill.info)
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -550,22 +525,22 @@ fn scan_skills_with_paths(dir: &Path) -> Vec<SkillSource> {
             let path = entry.path();
             if path.is_dir() {
                 let skill_file = path.join("SKILL.md");
-                if skill_file.exists() {
-                    if let Ok(content) = fs::read_to_string(&skill_file) {
-                        let (name, description) = parse_frontmatter(&content);
-                        let dir_name = path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string();
-                        let name = name.unwrap_or_else(|| dir_name.clone());
-                        results.push(SkillSource {
-                            project_display: String::new(),
-                            skill_dir: path.clone(),
-                            dir_name,
-                            info: SkillInfo { name, description },
-                        });
-                    }
+                if skill_file.exists()
+                    && let Ok(content) = fs::read_to_string(&skill_file)
+                {
+                    let (name, description) = parse_frontmatter(&content);
+                    let dir_name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let name = name.unwrap_or_else(|| dir_name.clone());
+                    results.push(SkillSource {
+                        project_display: String::new(),
+                        skill_dir: path.clone(),
+                        dir_name,
+                        info: SkillInfo { name, description },
+                    });
                 }
             }
         }
@@ -594,15 +569,15 @@ fn collect_all_skills(from: Option<&str>) -> Vec<SkillSource> {
         }
 
         // All projects from ~/.claude.json
-        if let Ok(config) = load_claude_config() {
-            if let Some(projects) = config.projects {
-                for project_path in projects.keys() {
-                    let claude_dir = Path::new(project_path).join(".claude");
-                    let display = shorten_path(project_path);
-                    for mut skill in scan_skills_with_paths(&claude_dir) {
-                        skill.project_display = display.clone();
-                        all_skills.push(skill);
-                    }
+        if let Ok(config) = load_claude_config()
+            && let Some(projects) = config.projects
+        {
+            for project_path in projects.keys() {
+                let claude_dir = Path::new(project_path).join(".claude");
+                let display = shorten_path(project_path);
+                for mut skill in scan_skills_with_paths(&claude_dir) {
+                    skill.project_display = display.clone();
+                    all_skills.push(skill);
                 }
             }
         }
@@ -617,29 +592,37 @@ fn collect_all_skills(from: Option<&str>) -> Vec<SkillSource> {
     all_skills
 }
 
-fn select_skill_fzf(skills: &[SkillSource], filter: Option<&str>) -> Option<usize> {
+fn has_fzf() -> bool {
+    Command::new("fzf")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+fn select_with_fzf<T, F>(
+    items: &[T],
+    filter: Option<&str>,
+    header: &str,
+    render: F,
+) -> Option<usize>
+where
+    F: Fn(usize, &T) -> String,
+{
     use std::io::Write;
 
-    // Build input lines for fzf
-    let lines: Vec<String> = skills
+    let lines: Vec<String> = items
         .iter()
         .enumerate()
-        .map(|(i, s)| {
-            let desc = s
-                .info
-                .description
-                .as_ref()
-                .map(|d| truncate_str(d, 60))
-                .unwrap_or_default();
-            format!("{}\t{}\t[{}]\t{}", i, s.info.name, s.project_display, desc)
-        })
+        .map(|(i, item)| render(i, item))
         .collect();
     let input = lines.join("\n");
 
     let mut cmd = Command::new("fzf");
     cmd.args([
         "--header",
-        "Select a skill to copy (TAB to preview)",
+        header,
         "--delimiter",
         "\t",
         "--with-nth",
@@ -687,35 +670,34 @@ fn select_skill_fzf(skills: &[SkillSource], filter: Option<&str>) -> Option<usiz
         .and_then(|idx| idx.parse::<usize>().ok())
 }
 
-fn select_skill_numbered(skills: &[SkillSource]) -> Option<usize> {
+fn select_numbered<T, F>(
+    items: &[T],
+    empty_message: &str,
+    count_label: &str,
+    prompt: &str,
+    render: F,
+) -> Option<usize>
+where
+    F: Fn(usize, &T) -> String,
+{
     use std::io::{self, BufRead, Write};
 
-    if skills.is_empty() {
-        println!("{}", "No skills found.".yellow());
+    if items.is_empty() {
+        println!("{}", empty_message.yellow());
         return None;
     }
 
-    let max_name_len = skills.iter().map(|s| s.info.name.len()).max().unwrap_or(0);
-    println!("{} skills found:\n", skills.len().to_string().cyan());
-    for (i, skill) in skills.iter().enumerate() {
-        let desc = skill
-            .info
-            .description
-            .as_ref()
-            .map(|d| format!(" - {}", truncate_str(d, 50).dimmed()))
-            .unwrap_or_default();
-        println!(
-            "  {:>3}) {:<width$} {}{}",
-            (i + 1).to_string().cyan(),
-            skill.info.name.green(),
-            format!("[{}]", skill.project_display).dimmed(),
-            desc,
-            width = max_name_len
-        );
+    println!(
+        "{} {} found:\n",
+        items.len().to_string().cyan(),
+        count_label
+    );
+    for (i, item) in items.iter().enumerate() {
+        println!("{}", render(i, item));
     }
 
     println!();
-    print!("{}", "Select skill number (or 'q' to quit): ".bold());
+    print!("{}", prompt.bold());
     io::stdout().flush().ok();
 
     let stdin = io::stdin();
@@ -734,7 +716,7 @@ fn select_skill_numbered(skills: &[SkillSource]) -> Option<usize> {
         }
     };
 
-    if num == 0 || num > skills.len() {
+    if num == 0 || num > items.len() {
         eprintln!("{}: out of range: {}", "Error".red(), num);
         return None;
     }
@@ -742,19 +724,77 @@ fn select_skill_numbered(skills: &[SkillSource]) -> Option<usize> {
     Some(num - 1)
 }
 
-fn select_skill(skills: &[SkillSource], filter: Option<&str>) -> Option<usize> {
-    // Try fzf first
-    if Command::new("fzf")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-    {
-        return select_skill_fzf(skills, filter);
+struct SelectionConfig<'a> {
+    filter: Option<&'a str>,
+    fzf_header: &'a str,
+    empty_message: &'a str,
+    count_label: &'a str,
+    prompt: &'a str,
+}
+
+fn select_from_list<T, FFzf, FNumbered>(
+    items: &[T],
+    config: SelectionConfig<'_>,
+    fzf_render: FFzf,
+    numbered_render: FNumbered,
+) -> Option<usize>
+where
+    FFzf: Fn(usize, &T) -> String,
+    FNumbered: Fn(usize, &T) -> String,
+{
+    if has_fzf() {
+        select_with_fzf(items, config.filter, config.fzf_header, fzf_render)
+    } else {
+        select_numbered(
+            items,
+            config.empty_message,
+            config.count_label,
+            config.prompt,
+            numbered_render,
+        )
     }
-    // Fallback to numbered list
-    select_skill_numbered(skills)
+}
+
+fn select_skill(skills: &[SkillSource], filter: Option<&str>) -> Option<usize> {
+    let max_name_len = skills.iter().map(|s| s.info.name.len()).max().unwrap_or(0);
+    select_from_list(
+        skills,
+        SelectionConfig {
+            filter,
+            fzf_header: "Select a skill to copy (TAB to preview)",
+            empty_message: "No skills found.",
+            count_label: "skills",
+            prompt: "Select skill number (or 'q' to quit): ",
+        },
+        |i, skill| {
+            let desc = skill
+                .info
+                .description
+                .as_ref()
+                .map(|d| truncate_str(d, 60))
+                .unwrap_or_default();
+            format!(
+                "{}\t{}\t[{}]\t{}",
+                i, skill.info.name, skill.project_display, desc
+            )
+        },
+        |i, skill| {
+            let desc = skill
+                .info
+                .description
+                .as_ref()
+                .map(|d| format!(" - {}", truncate_str(d, 50).dimmed()))
+                .unwrap_or_default();
+            format!(
+                "  {:>3}) {:<width$} {}{}",
+                (i + 1).to_string().cyan(),
+                skill.info.name.green(),
+                format!("[{}]", skill.project_display).dimmed(),
+                desc,
+                width = max_name_len
+            )
+        },
+    )
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<u64, Box<dyn std::error::Error>> {
@@ -883,31 +923,30 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) 
     // Deduplicate by (skill_name, content_hash) to handle submodules with identical content
     let mut seen_content: std::collections::HashSet<(String, u64)> =
         std::collections::HashSet::new();
-    if let Ok(config) = load_claude_config() {
-        if let Some(projects) = config.projects {
-            for project_path in projects.keys() {
-                let claude_dir = Path::new(project_path).join(".claude");
-                if claude_dir.join("skills").exists() {
-                    for skill_source in scan_skills_with_paths(&claude_dir) {
-                        let content_hash =
-                            fs::read_to_string(skill_source.skill_dir.join("SKILL.md"))
-                                .map(|c| {
-                                    use std::hash::{Hash, Hasher};
-                                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                                    c.hash(&mut h);
-                                    h.finish()
-                                })
-                                .unwrap_or(0);
-                        let key = (skill_source.info.name.clone(), content_hash);
-                        if seen_content.insert(key) {
-                            let origin = detect_skill_origin(&skill_source.skill_dir);
-                            entries.push(SkillEntry {
-                                name: skill_source.info.name,
-                                description: skill_source.info.description,
-                                origin,
-                                scope: format!("project:{}", shorten_path(project_path)),
-                            });
-                        }
+    if let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
+    {
+        for project_path in projects.keys() {
+            let claude_dir = Path::new(project_path).join(".claude");
+            if claude_dir.join("skills").exists() {
+                for skill_source in scan_skills_with_paths(&claude_dir) {
+                    let content_hash = fs::read_to_string(skill_source.skill_dir.join("SKILL.md"))
+                        .map(|c| {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            c.hash(&mut h);
+                            h.finish()
+                        })
+                        .unwrap_or(0);
+                    let key = (skill_source.info.name.clone(), content_hash);
+                    if seen_content.insert(key) {
+                        let origin = detect_skill_origin(&skill_source.skill_dir);
+                        entries.push(SkillEntry {
+                            name: skill_source.info.name,
+                            description: skill_source.info.description,
+                            origin,
+                            scope: format!("project:{}", shorten_path(project_path)),
+                        });
                     }
                 }
             }
@@ -1038,7 +1077,9 @@ fn skill_how_to_remove_command(filter: Option<String>) {
                 .to_string_lossy()
                 .to_string();
             let name = if let Ok(content) = fs::read_to_string(path.join("SKILL.md")) {
-                parse_frontmatter(&content).0.unwrap_or_else(|| dir_name.clone())
+                parse_frontmatter(&content)
+                    .0
+                    .unwrap_or_else(|| dir_name.clone())
             } else {
                 dir_name.clone()
             };
@@ -1078,53 +1119,55 @@ fn skill_how_to_remove_command(filter: Option<String>) {
     }
 
     // 3. Project skills
-    if let Ok(config) = load_claude_config() {
-        if let Some(projects) = config.projects {
-            let mut seen: std::collections::HashSet<(String, u64)> =
-                std::collections::HashSet::new();
-            for project_path in projects.keys() {
-                let claude_dir = Path::new(project_path).join(".claude");
-                if claude_dir.join("skills").exists() {
-                    for skill_source in scan_skills_with_paths(&claude_dir) {
-                        let content_hash =
-                            fs::read_to_string(skill_source.skill_dir.join("SKILL.md"))
-                                .map(|c| {
-                                    use std::hash::{Hash, Hasher};
-                                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                                    c.hash(&mut h);
-                                    h.finish()
-                                })
-                                .unwrap_or(0);
-                        let key = (skill_source.info.name.clone(), content_hash);
-                        if !seen.insert(key) {
-                            continue;
-                        }
-                        let dir_name = skill_source
-                            .skill_dir
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string();
-                        let short = shorten_path(project_path);
-                        let origin = detect_skill_origin(&skill_source.skill_dir);
-                        let (installed_via, command, also) = if origin == "marketplace" {
-                            (
-                                Some("npx @anthropic/skills add (symlinked)".to_string()),
-                                format!("rm {}/.claude/skills/{}", project_path, dir_name),
-                                Some(format!("npx @anthropic/skills remove {}", dir_name)),
-                            )
-                        } else {
-                            (None, format!("rm -rf {}/.claude/skills/{}", project_path, dir_name), None)
-                        };
-                        entries.push(RemoveEntry {
-                            name: skill_source.info.name,
-                            origin,
-                            scope: format!("project:{}", short),
-                            installed_via,
-                            command,
-                            also,
-                        });
+    if let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
+    {
+        let mut seen: std::collections::HashSet<(String, u64)> = std::collections::HashSet::new();
+        for project_path in projects.keys() {
+            let claude_dir = Path::new(project_path).join(".claude");
+            if claude_dir.join("skills").exists() {
+                for skill_source in scan_skills_with_paths(&claude_dir) {
+                    let content_hash = fs::read_to_string(skill_source.skill_dir.join("SKILL.md"))
+                        .map(|c| {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            c.hash(&mut h);
+                            h.finish()
+                        })
+                        .unwrap_or(0);
+                    let key = (skill_source.info.name.clone(), content_hash);
+                    if !seen.insert(key) {
+                        continue;
                     }
+                    let dir_name = skill_source
+                        .skill_dir
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let short = shorten_path(project_path);
+                    let origin = detect_skill_origin(&skill_source.skill_dir);
+                    let (installed_via, command, also) = if origin == "marketplace" {
+                        (
+                            Some("npx @anthropic/skills add (symlinked)".to_string()),
+                            format!("rm {}/.claude/skills/{}", project_path, dir_name),
+                            Some(format!("npx @anthropic/skills remove {}", dir_name)),
+                        )
+                    } else {
+                        (
+                            None,
+                            format!("rm -rf {}/.claude/skills/{}", project_path, dir_name),
+                            None,
+                        )
+                    };
+                    entries.push(RemoveEntry {
+                        name: skill_source.info.name,
+                        origin,
+                        scope: format!("project:{}", short),
+                        installed_via,
+                        command,
+                        also,
+                    });
                 }
             }
         }
@@ -1141,12 +1184,14 @@ fn skill_how_to_remove_command(filter: Option<String>) {
         return;
     }
 
-    println!(
-        "{} skills found\n",
-        entries.len().to_string().cyan()
-    );
+    println!("{} skills found\n", entries.len().to_string().cyan());
 
-    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(10).min(30);
+    let max_name = entries
+        .iter()
+        .map(|e| e.name.len())
+        .max()
+        .unwrap_or(10)
+        .min(30);
 
     for entry in &entries {
         let origin_colored = match entry.origin.as_str() {
@@ -1172,17 +1217,9 @@ fn skill_how_to_remove_command(filter: Option<String>) {
         } else {
             "remove:"
         };
-        println!(
-            "    {} {}",
-            remove_label.dimmed(),
-            entry.command.bold(),
-        );
+        println!("    {} {}", remove_label.dimmed(), entry.command.bold(),);
         if let Some(ref also) = entry.also {
-            println!(
-                "    {} {}",
-                "full uninstall:".dimmed(),
-                also.bold(),
-            );
+            println!("    {} {}", "full uninstall:".dimmed(), also.bold(),);
         }
         println!();
     }
@@ -1222,22 +1259,22 @@ fn agent_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) 
     }
 
     // 3. Project agents
-    if let Ok(config) = load_claude_config() {
-        if let Some(projects) = config.projects {
-            let mut seen: std::collections::HashSet<(String, String)> =
-                std::collections::HashSet::new();
-            for project_path in projects.keys() {
-                let claude_dir = Path::new(project_path).join(".claude");
-                if claude_dir.join("agents").exists() {
-                    for agent in scan_agents(&claude_dir) {
-                        let key = (agent.name.clone(), shorten_path(project_path));
-                        if seen.insert(key) {
-                            entries.push(AgentEntry {
-                                name: agent.name,
-                                description: agent.description,
-                                scope: format!("project:{}", shorten_path(project_path)),
-                            });
-                        }
+    if let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
+    {
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for project_path in projects.keys() {
+            let claude_dir = Path::new(project_path).join(".claude");
+            if claude_dir.join("agents").exists() {
+                for agent in scan_agents(&claude_dir) {
+                    let key = (agent.name.clone(), shorten_path(project_path));
+                    if seen.insert(key) {
+                        entries.push(AgentEntry {
+                            name: agent.name,
+                            description: agent.description,
+                            scope: format!("project:{}", shorten_path(project_path)),
+                        });
                     }
                 }
             }
@@ -1330,38 +1367,36 @@ fn agent_how_to_remove_command(filter: Option<String>) {
 
     // 1. Global agents
     let agents_dir = global_claude.join("agents");
-    if agents_dir.exists() {
-        if let Ok(dirs) = fs::read_dir(&agents_dir) {
-            for entry in dirs.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().is_some_and(|e| e == "md") {
-                    let file_name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let name = if let Ok(content) = fs::read_to_string(&path) {
-                        parse_frontmatter(&content)
-                            .0
-                            .unwrap_or_else(|| {
-                                path.file_stem()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .to_string()
-                            })
-                    } else {
+    if agents_dir.exists()
+        && let Ok(dirs) = fs::read_dir(&agents_dir)
+    {
+        for entry in dirs.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().is_some_and(|e| e == "md") {
+                let file_name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let name = if let Ok(content) = fs::read_to_string(&path) {
+                    parse_frontmatter(&content).0.unwrap_or_else(|| {
                         path.file_stem()
                             .unwrap_or_default()
                             .to_string_lossy()
                             .to_string()
-                    };
-                    entries.push(AgentRemoveEntry {
-                        name,
-                        scope: "global".to_string(),
-                        installed_via: None,
-                        command: format!("rm ~/.claude/agents/{}", file_name),
-                    });
-                }
+                    })
+                } else {
+                    path.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                };
+                entries.push(AgentRemoveEntry {
+                    name,
+                    scope: "global".to_string(),
+                    installed_via: None,
+                    command: format!("rm ~/.claude/agents/{}", file_name),
+                });
             }
         }
     }
@@ -1380,46 +1415,44 @@ fn agent_how_to_remove_command(filter: Option<String>) {
     }
 
     // 3. Project agents
-    if let Ok(config) = load_claude_config() {
-        if let Some(projects) = config.projects {
-            for project_path in projects.keys() {
-                let claude_dir = Path::new(project_path).join(".claude");
-                let agents_dir = claude_dir.join("agents");
-                if !agents_dir.exists() {
-                    continue;
-                }
-                if let Ok(dirs) = fs::read_dir(&agents_dir) {
-                    for entry in dirs.flatten() {
-                        let path = entry.path();
-                        if path.is_file() && path.extension().is_some_and(|e| e == "md") {
-                            let file_name = path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string();
-                            let name = if let Ok(content) = fs::read_to_string(&path) {
-                                parse_frontmatter(&content)
-                                    .0
-                                    .unwrap_or_else(|| {
-                                        path.file_stem()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                            .to_string()
-                                    })
-                            } else {
+    if let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
+    {
+        for project_path in projects.keys() {
+            let claude_dir = Path::new(project_path).join(".claude");
+            let agents_dir = claude_dir.join("agents");
+            if !agents_dir.exists() {
+                continue;
+            }
+            if let Ok(dirs) = fs::read_dir(&agents_dir) {
+                for entry in dirs.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().is_some_and(|e| e == "md") {
+                        let file_name = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        let name = if let Ok(content) = fs::read_to_string(&path) {
+                            parse_frontmatter(&content).0.unwrap_or_else(|| {
                                 path.file_stem()
                                     .unwrap_or_default()
                                     .to_string_lossy()
                                     .to_string()
-                            };
-                            let short = shorten_path(project_path);
-                            entries.push(AgentRemoveEntry {
-                                name,
-                                scope: format!("project:{}", short),
-                                installed_via: None,
-                                command: format!("rm {}/.claude/agents/{}", project_path, file_name),
-                            });
-                        }
+                            })
+                        } else {
+                            path.file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string()
+                        };
+                        let short = shorten_path(project_path);
+                        entries.push(AgentRemoveEntry {
+                            name,
+                            scope: format!("project:{}", short),
+                            installed_via: None,
+                            command: format!("rm {}/.claude/agents/{}", project_path, file_name),
+                        });
                     }
                 }
             }
@@ -1439,7 +1472,12 @@ fn agent_how_to_remove_command(filter: Option<String>) {
 
     println!("{} agents found\n", entries.len().to_string().cyan());
 
-    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(10).min(30);
+    let max_name = entries
+        .iter()
+        .map(|e| e.name.len())
+        .max()
+        .unwrap_or(10)
+        .min(30);
 
     for entry in &entries {
         println!(
@@ -1499,21 +1537,21 @@ fn mcp_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) {
     }
 
     // 3. Project MCP servers
-    if let Ok(config) = load_claude_config() {
-        if let Some(projects) = config.projects {
-            for project_path in projects.keys() {
-                let project_dir = Path::new(project_path);
-                if !project_dir.exists() {
-                    continue;
-                }
-                for server in scan_mcp_servers(project_dir) {
-                    entries.push(McpEntry {
-                        name: server.name,
-                        server_type: server.server_type,
-                        command: server.command,
-                        scope: format!("project:{}", shorten_path(project_path)),
-                    });
-                }
+    if let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
+    {
+        for project_path in projects.keys() {
+            let project_dir = Path::new(project_path);
+            if !project_dir.exists() {
+                continue;
+            }
+            for server in scan_mcp_servers(project_dir) {
+                entries.push(McpEntry {
+                    name: server.name,
+                    server_type: server.server_type,
+                    command: server.command,
+                    scope: format!("project:{}", shorten_path(project_path)),
+                });
             }
         }
     }
@@ -1645,30 +1683,30 @@ fn mcp_how_to_remove_command(filter: Option<String>) {
     }
 
     // 3. Project MCP servers
-    if let Ok(config) = load_claude_config() {
-        if let Some(projects) = config.projects {
-            for project_path in projects.keys() {
-                let project_dir = Path::new(project_path);
-                if !project_dir.exists() {
-                    continue;
-                }
-                let mcp_file = project_dir.join(".mcp.json");
-                if !mcp_file.exists() {
-                    continue;
-                }
-                for server in parse_mcp_json(&mcp_file) {
-                    let short = shorten_path(project_path);
-                    entries.push(McpRemoveEntry {
-                        name: server.name.clone(),
-                        server_type: server.server_type,
-                        scope: format!("project:{}", short),
-                        installed_via: None,
-                        command: format!(
-                            "Edit {}/.mcp.json and remove \"{}\" from mcpServers",
-                            project_path, server.name
-                        ),
-                    });
-                }
+    if let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
+    {
+        for project_path in projects.keys() {
+            let project_dir = Path::new(project_path);
+            if !project_dir.exists() {
+                continue;
+            }
+            let mcp_file = project_dir.join(".mcp.json");
+            if !mcp_file.exists() {
+                continue;
+            }
+            for server in parse_mcp_json(&mcp_file) {
+                let short = shorten_path(project_path);
+                entries.push(McpRemoveEntry {
+                    name: server.name.clone(),
+                    server_type: server.server_type,
+                    scope: format!("project:{}", short),
+                    installed_via: None,
+                    command: format!(
+                        "Edit {}/.mcp.json and remove \"{}\" from mcpServers",
+                        project_path, server.name
+                    ),
+                });
             }
         }
     }
@@ -1686,7 +1724,12 @@ fn mcp_how_to_remove_command(filter: Option<String>) {
 
     println!("{} MCP servers found\n", entries.len().to_string().cyan());
 
-    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(10).min(30);
+    let max_name = entries
+        .iter()
+        .map(|e| e.name.len())
+        .max()
+        .unwrap_or(10)
+        .min(30);
 
     for entry in &entries {
         let type_colored = match entry.server_type.as_str() {
@@ -1718,12 +1761,12 @@ fn skill_copy_command(
     let mut skills = collect_all_skills(from.as_deref());
 
     // Apply filter when using --name (fzf handles its own filtering via --query)
-    if name.is_some() {
-        if let Some(ref pattern) = filter {
-            skills.retain(|s| {
-                s.info.name.contains(pattern.as_str()) || s.dir_name.contains(pattern.as_str())
-            });
-        }
+    if name.is_some()
+        && let Some(ref pattern) = filter
+    {
+        skills.retain(|s| {
+            s.info.name.contains(pattern.as_str()) || s.dir_name.contains(pattern.as_str())
+        });
     }
 
     if skills.is_empty() {
@@ -1815,15 +1858,15 @@ fn collect_project_skills_grouped() -> Vec<(String, Vec<SkillSource>)> {
     let home = dirs::home_dir().expect("Could not find home directory");
     let mut all_skills = Vec::new();
 
-    if let Ok(config) = load_claude_config() {
-        if let Some(projects) = config.projects {
-            for project_path in projects.keys() {
-                let claude_dir = Path::new(project_path).join(".claude");
-                let display = shorten_path(project_path);
-                for mut skill in scan_skills_with_paths(&claude_dir) {
-                    skill.project_display = display.clone();
-                    all_skills.push(skill);
-                }
+    if let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
+    {
+        for project_path in projects.keys() {
+            let claude_dir = Path::new(project_path).join(".claude");
+            let display = shorten_path(project_path);
+            for mut skill in scan_skills_with_paths(&claude_dir) {
+                skill.project_display = display.clone();
+                all_skills.push(skill);
             }
         }
     }
@@ -1873,14 +1916,12 @@ fn check_npx_installed(skill_dir: &Path, dir_name: &str) -> Option<String> {
     // Check ~/.agents/.skill-lock.json
     if let Some(home) = dirs::home_dir() {
         let lock_file = home.join(".agents").join(".skill-lock.json");
-        if let Ok(content) = fs::read_to_string(&lock_file) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(skills) = json.get("skills").and_then(|s| s.as_object()) {
-                    if skills.contains_key(dir_name) {
-                        return Some(format!("claude /uninstall-skill {}", dir_name));
-                    }
-                }
-            }
+        if let Ok(content) = fs::read_to_string(&lock_file)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(skills) = json.get("skills").and_then(|s| s.as_object())
+            && skills.contains_key(dir_name)
+        {
+            return Some(format!("claude /uninstall-skill {}", dir_name));
         }
     }
     None
@@ -1902,13 +1943,13 @@ fn diff_skill_dirs(dirs: &[&Path]) -> Option<String> {
             .arg(other)
             .output();
 
-        if let Ok(output) = output {
-            if !output.status.success() {
-                let diff_text = String::from_utf8_lossy(&output.stdout);
-                for line in diff_text.lines() {
-                    if !diffs.contains(&line.to_string()) {
-                        diffs.push(line.to_string());
-                    }
+        if let Ok(output) = output
+            && !output.status.success()
+        {
+            let diff_text = String::from_utf8_lossy(&output.stdout);
+            for line in diff_text.lines() {
+                if !diffs.contains(&line.to_string()) {
+                    diffs.push(line.to_string());
                 }
             }
         }
@@ -2778,15 +2819,14 @@ fn scan_local_scripts_recursive(
         let p = entry.path();
         if p.is_dir() {
             scan_local_scripts_recursive(base, &p, findings);
-        } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-            if is_script_file(name) {
-                if let Ok(content) = fs::read_to_string(&p) {
-                    let rel = p.strip_prefix(base).unwrap_or(&p);
-                    let display = rel.to_string_lossy().to_string();
-                    let mut file_findings = scan_script_content(&display, &content);
-                    findings.append(&mut file_findings);
-                }
-            }
+        } else if let Some(name) = p.file_name().and_then(|n| n.to_str())
+            && is_script_file(name)
+            && let Ok(content) = fs::read_to_string(&p)
+        {
+            let rel = p.strip_prefix(base).unwrap_or(&p);
+            let display = rel.to_string_lossy().to_string();
+            let mut file_findings = scan_script_content(&display, &content);
+            findings.append(&mut file_findings);
         }
     }
 }
@@ -2952,9 +2992,7 @@ fn checkbox_select(items: &[&str]) -> Vec<usize> {
         {
             match code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if cursor_pos > 0 {
-                        cursor_pos -= 1;
-                    }
+                    cursor_pos = cursor_pos.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if cursor_pos < items.len() - 1 {
@@ -2966,9 +3004,7 @@ fn checkbox_select(items: &[&str]) -> Vec<usize> {
                 }
                 KeyCode::Char('a') => {
                     let all_checked = checked.iter().all(|&c| c);
-                    for c in &mut checked {
-                        *c = !all_checked;
-                    }
+                    checked.fill(!all_checked);
                 }
                 KeyCode::Enter => {
                     terminal::disable_raw_mode().ok();
@@ -3110,7 +3146,7 @@ fn collect_local_skill_paths() -> Vec<(String, std::path::PathBuf)> {
                 let p = entry.path();
                 // Resolve symlink for is_dir check
                 let is_dir = if p.is_symlink() {
-                    fs::read_link(&p).map_or(false, |t| t.is_dir())
+                    fs::read_link(&p).is_ok_and(|t| t.is_dir())
                 } else {
                     p.is_dir()
                 };
@@ -3138,13 +3174,13 @@ fn collect_local_skill_paths() -> Vec<(String, std::path::PathBuf)> {
     add_from_dir(&home.join(".claude"), "global", &mut results, &mut seen);
 
     // 2. All projects from ~/.claude.json
-    if let Ok(config) = load_claude_config() {
-        if let Some(projects) = config.projects {
-            for project_path in projects.keys() {
-                let claude_dir = Path::new(project_path).join(".claude");
-                let scope = shorten_path(project_path);
-                add_from_dir(&claude_dir, &scope, &mut results, &mut seen);
-            }
+    if let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
+    {
+        for project_path in projects.keys() {
+            let claude_dir = Path::new(project_path).join(".claude");
+            let scope = shorten_path(project_path);
+            add_from_dir(&claude_dir, &scope, &mut results, &mut seen);
         }
     }
 
@@ -3333,17 +3369,18 @@ fn scan_agents(dir: &Path) -> Vec<AgentInfo> {
     if let Ok(entries) = fs::read_dir(&agents_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |e| e == "md") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    let (name, description) = parse_frontmatter(&content);
-                    let name = name.unwrap_or_else(|| {
-                        path.file_stem()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string()
-                    });
-                    agents.push(AgentInfo { name, description });
-                }
+            if path.is_file()
+                && path.extension().is_some_and(|e| e == "md")
+                && let Ok(content) = fs::read_to_string(&path)
+            {
+                let (name, description) = parse_frontmatter(&content);
+                let name = name.unwrap_or_else(|| {
+                    path.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                });
+                agents.push(AgentInfo { name, description });
             }
         }
     }
@@ -3366,17 +3403,18 @@ fn scan_commands(dir: &Path) -> Vec<CommandInfo> {
                 if path.is_dir() {
                     // Recursively scan subdirectories
                     scan_dir(&path, commands);
-                } else if path.is_file() && path.extension().map_or(false, |e| e == "md") {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        let (name, description) = parse_frontmatter(&content);
-                        let name = name.unwrap_or_else(|| {
-                            path.file_stem()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string()
-                        });
-                        commands.push(CommandInfo { name, description });
-                    }
+                } else if path.is_file()
+                    && path.extension().is_some_and(|e| e == "md")
+                    && let Ok(content) = fs::read_to_string(&path)
+                {
+                    let (name, description) = parse_frontmatter(&content);
+                    let name = name.unwrap_or_else(|| {
+                        path.file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
+                    });
+                    commands.push(CommandInfo { name, description });
                 }
             }
         }
@@ -3470,10 +3508,10 @@ fn scan_local_mcp_servers(
 
     if let Some(enabled) = json.get("enabledMcpjsonServers").and_then(|v| v.as_array()) {
         for entry in enabled {
-            if let Some(name) = entry.as_str() {
-                if !mcp_json_names.contains(name) {
-                    server_names.insert(name.to_string());
-                }
+            if let Some(name) = entry.as_str()
+                && !mcp_json_names.contains(name)
+            {
+                server_names.insert(name.to_string());
             }
         }
     }
@@ -3645,14 +3683,14 @@ fn collect_all_mcp_servers(from: Option<&str>) -> Vec<McpSource> {
             all.push(src);
         }
     } else {
-        if let Ok(config) = load_claude_config() {
-            if let Some(projects) = config.projects {
-                for project_path in projects.keys() {
-                    let display = shorten_path(project_path);
-                    for mut src in scan_mcp_sources(Path::new(project_path)) {
-                        src.project_display = display.clone();
-                        all.push(src);
-                    }
+        if let Ok(config) = load_claude_config()
+            && let Some(projects) = config.projects
+        {
+            for project_path in projects.keys() {
+                let display = shorten_path(project_path);
+                for mut src in scan_mcp_sources(Path::new(project_path)) {
+                    src.project_display = display.clone();
+                    all.push(src);
                 }
             }
         }
@@ -3668,14 +3706,24 @@ fn collect_all_mcp_servers(from: Option<&str>) -> Vec<McpSource> {
     all
 }
 
-fn select_mcp_fzf(servers: &[McpSource], filter: Option<&str>) -> Option<usize> {
-    use std::io::Write;
-
-    let lines: Vec<String> = servers
+fn select_mcp(servers: &[McpSource], filter: Option<&str>) -> Option<usize> {
+    let max_name_len = servers
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let cmd = s
+        .map(|s| s.server_name.len())
+        .max()
+        .unwrap_or(0);
+
+    select_from_list(
+        servers,
+        SelectionConfig {
+            filter,
+            fzf_header: "Select an MCP server to copy",
+            empty_message: "No MCP servers found.",
+            count_label: "MCP servers",
+            prompt: "Select MCP server number (or 'q' to quit): ",
+        },
+        |i, server| {
+            let cmd = server
                 .info
                 .command
                 .as_ref()
@@ -3683,133 +3731,27 @@ fn select_mcp_fzf(servers: &[McpSource], filter: Option<&str>) -> Option<usize> 
                 .unwrap_or_default();
             format!(
                 "{}\t{}\t[{}]\t({}) {}",
-                i, s.server_name, s.project_display, s.info.server_type, cmd
+                i, server.server_name, server.project_display, server.info.server_type, cmd
             )
-        })
-        .collect();
-    let input = lines.join("\n");
-
-    let mut cmd = Command::new("fzf");
-    cmd.args([
-        "--header",
-        "Select an MCP server to copy",
-        "--delimiter",
-        "\t",
-        "--with-nth",
-        "2..",
-        "--no-multi",
-        "--ansi",
-    ]);
-    if let Some(q) = filter {
-        cmd.args(["--query", q]);
-    }
-
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit());
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-
-    if let Some(ref mut stdin) = child.stdin {
-        let _ = stdin.write_all(input.as_bytes());
-    }
-    drop(child.stdin.take());
-
-    let output = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(_) => return None,
-    };
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let selected = String::from_utf8_lossy(&output.stdout);
-    let selected = selected.trim();
-    if selected.is_empty() {
-        return None;
-    }
-
-    selected
-        .split('\t')
-        .next()
-        .and_then(|idx| idx.parse::<usize>().ok())
-}
-
-fn select_mcp_numbered(servers: &[McpSource]) -> Option<usize> {
-    use std::io::{self, BufRead, Write};
-
-    if servers.is_empty() {
-        println!("{}", "No MCP servers found.".yellow());
-        return None;
-    }
-
-    let max_name_len = servers
-        .iter()
-        .map(|s| s.server_name.len())
-        .max()
-        .unwrap_or(0);
-    println!("{} MCP servers found:\n", servers.len().to_string().cyan());
-    for (i, server) in servers.iter().enumerate() {
-        let cmd = server
-            .info
-            .command
-            .as_ref()
-            .map(|c| format!(" {}", truncate_str(c, 40).dimmed()))
-            .unwrap_or_default();
-        println!(
-            "  {:>3}) {:<width$} {} {}{}",
-            (i + 1).to_string().cyan(),
-            server.server_name.bright_blue(),
-            format!("[{}]", server.project_display).dimmed(),
-            format!("({})", server.info.server_type).dimmed(),
-            cmd,
-            width = max_name_len
-        );
-    }
-
-    println!();
-    print!("{}", "Select MCP server number (or 'q' to quit): ".bold());
-    io::stdout().flush().ok();
-
-    let stdin = io::stdin();
-    let line = stdin.lock().lines().next()?.ok()?;
-    let line = line.trim().to_string();
-
-    if line == "q" || line == "Q" || line.is_empty() {
-        return None;
-    }
-
-    let num: usize = match line.parse() {
-        Ok(n) => n,
-        Err(_) => {
-            eprintln!("{}: invalid number: {}", "Error".red(), line);
-            return None;
-        }
-    };
-
-    if num == 0 || num > servers.len() {
-        eprintln!("{}: out of range: {}", "Error".red(), num);
-        return None;
-    }
-
-    Some(num - 1)
-}
-
-fn select_mcp(servers: &[McpSource], filter: Option<&str>) -> Option<usize> {
-    if Command::new("fzf")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-    {
-        return select_mcp_fzf(servers, filter);
-    }
-    select_mcp_numbered(servers)
+        },
+        |i, server| {
+            let cmd = server
+                .info
+                .command
+                .as_ref()
+                .map(|c| format!(" {}", truncate_str(c, 40).dimmed()))
+                .unwrap_or_default();
+            format!(
+                "  {:>3}) {:<width$} {} {}{}",
+                (i + 1).to_string().cyan(),
+                server.server_name.bright_blue(),
+                format!("[{}]", server.project_display).dimmed(),
+                format!("({})", server.info.server_type).dimmed(),
+                cmd,
+                width = max_name_len
+            )
+        },
+    )
 }
 
 fn mcp_copy_command(
@@ -3820,10 +3762,10 @@ fn mcp_copy_command(
 ) {
     let mut servers = collect_all_mcp_servers(from.as_deref());
 
-    if name.is_some() {
-        if let Some(ref pattern) = filter {
-            servers.retain(|s| s.server_name.contains(pattern.as_str()));
-        }
+    if name.is_some()
+        && let Some(ref pattern) = filter
+    {
+        servers.retain(|s| s.server_name.contains(pattern.as_str()));
     }
 
     if servers.is_empty() {
@@ -3974,9 +3916,7 @@ fn get_global_info() -> ProjectInfo {
     let commands = scan_commands(&claude_dir);
     let plugins = scan_plugins(&claude_dir);
     // Include plugin MCP servers as global MCP servers
-    let mcp_servers: Vec<McpServerInfo> = load_plugin_mcp_definitions()
-        .into_values()
-        .collect();
+    let mcp_servers: Vec<McpServerInfo> = load_plugin_mcp_definitions().into_values().collect();
 
     ProjectInfo {
         path: "~/.claude (global)".to_string(),
@@ -4054,12 +3994,11 @@ fn load_cckit_config() -> ClamonConfig {
     ];
 
     for candidate in candidates.into_iter().flatten() {
-        if candidate.exists() {
-            if let Ok(content) = fs::read_to_string(&candidate) {
-                if let Ok(config) = toml::from_str(&content) {
-                    return config;
-                }
-            }
+        if candidate.exists()
+            && let Ok(content) = fs::read_to_string(&candidate)
+            && let Ok(config) = toml::from_str(&content)
+        {
+            return config;
         }
     }
     ClamonConfig::default()
@@ -4079,10 +4018,10 @@ fn is_path_disabled(path: &str, disable_paths: &[String]) -> bool {
     for pattern in disable_paths {
         if pattern.contains('*') || pattern.contains('?') {
             // Glob pattern matching
-            if let Ok(glob_pattern) = glob::Pattern::new(pattern) {
-                if glob_pattern.matches(path) {
-                    return true;
-                }
+            if let Ok(glob_pattern) = glob::Pattern::new(pattern)
+                && glob_pattern.matches(path)
+            {
+                return true;
             }
         } else {
             // Prefix matching
@@ -4282,9 +4221,9 @@ fn get_file_info(path: &Path) -> String {
                 let modified = m
                     .modified()
                     .ok()
-                    .and_then(|t| {
+                    .map(|t| {
                         let datetime: chrono::DateTime<chrono::Local> = t.into();
-                        Some(datetime.format("%Y-%m-%d %H:%M:%S").to_string())
+                        datetime.format("%Y-%m-%d %H:%M:%S").to_string()
                     })
                     .unwrap_or_else(|| "unknown".to_string());
                 format!(
@@ -4716,19 +4655,19 @@ fn collect_settings_files(home: &std::path::Path) -> Vec<(String, std::path::Pat
         home.join(".claude").join("settings.json"),
     )];
 
-    if let Ok(config) = load_claude_config() {
-        if let Some(projects) = config.projects {
-            let mut paths: Vec<&String> = projects.keys().collect();
-            paths.sort();
+    if let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
+    {
+        let mut paths: Vec<&String> = projects.keys().collect();
+        paths.sort();
 
-            for project_path in paths {
-                let base = Path::new(project_path);
-                for filename in &["settings.json", "settings.local.json"] {
-                    let settings_path = base.join(".claude").join(filename);
-                    if settings_path.exists() {
-                        let label = shorten_path(&settings_path.to_string_lossy());
-                        files.push((label, settings_path));
-                    }
+        for project_path in paths {
+            let base = Path::new(project_path);
+            for filename in &["settings.json", "settings.local.json"] {
+                let settings_path = base.join(".claude").join(filename);
+                if settings_path.exists() {
+                    let label = shorten_path(&settings_path.to_string_lossy());
+                    files.push((label, settings_path));
                 }
             }
         }
@@ -4965,11 +4904,7 @@ fn status_command() {
         } else {
             shorten_path(&path.to_string_lossy())
         };
-        println!(
-            "  {}  {}",
-            format!("{:<28}", display_path),
-            get_file_info(path)
-        );
+        println!("  {:<28}  {}", display_path, get_file_info(path));
     }
 
     println!();
@@ -4985,21 +4920,19 @@ fn status_command() {
     println!();
 
     // Session summary
-    if sessions_json.exists() {
-        if let Ok(content) = fs::read_to_string(&sessions_json) {
-            if let Ok(store) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(sessions) = store.get("sessions").and_then(|s| s.as_object()) {
-                    let total = sessions.len();
-                    let active = sessions
-                        .values()
-                        .filter(|s| s.get("status").and_then(|v| v.as_str()) != Some("stopped"))
-                        .count();
-                    println!("{}", "Session Summary:".cyan());
-                    println!("  Total sessions: {}", total);
-                    println!("  Active: {}", active);
-                }
-            }
-        }
+    if sessions_json.exists()
+        && let Ok(content) = fs::read_to_string(&sessions_json)
+        && let Ok(store) = serde_json::from_str::<serde_json::Value>(&content)
+        && let Some(sessions) = store.get("sessions").and_then(|s| s.as_object())
+    {
+        let total = sessions.len();
+        let active = sessions
+            .values()
+            .filter(|s| s.get("status").and_then(|v| v.as_str()) != Some("stopped"))
+            .count();
+        println!("{}", "Session Summary:".cyan());
+        println!("  Total sessions: {}", total);
+        println!("  Active: {}", active);
     }
 }
 
@@ -5068,16 +5001,13 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
                         path.is_dir()
                     };
                     if is_dir && path.join("SKILL.md").exists() {
-                        let name = if let Ok(content) = fs::read_to_string(path.join("SKILL.md"))
-                        {
-                            parse_frontmatter(&content)
-                                .0
-                                .unwrap_or_else(|| {
-                                    path.file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .to_string()
-                                })
+                        let name = if let Ok(content) = fs::read_to_string(path.join("SKILL.md")) {
+                            parse_frontmatter(&content).0.unwrap_or_else(|| {
+                                path.file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string()
+                            })
                         } else {
                             path.file_name()
                                 .unwrap_or_default()
@@ -5090,26 +5020,23 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
             }
 
             // Project skills
-            if let Ok(config) = load_claude_config() {
-                if let Some(projects) = config.projects {
-                    for project_path in projects.keys() {
-                        let claude_dir = Path::new(project_path).join(".claude");
-                        if claude_dir.join("skills").exists() {
-                            for skill_source in scan_skills_with_paths(&claude_dir) {
-                                by_name
-                                    .entry(skill_source.info.name)
-                                    .or_default()
-                                    .push(shorten_path(project_path));
-                            }
+            if let Ok(config) = load_claude_config()
+                && let Some(projects) = config.projects
+            {
+                for project_path in projects.keys() {
+                    let claude_dir = Path::new(project_path).join(".claude");
+                    if claude_dir.join("skills").exists() {
+                        for skill_source in scan_skills_with_paths(&claude_dir) {
+                            by_name
+                                .entry(skill_source.info.name)
+                                .or_default()
+                                .push(shorten_path(project_path));
                         }
                     }
                 }
             }
 
-            let dupes: Vec<_> = by_name
-                .iter()
-                .filter(|(_, locs)| locs.len() > 1)
-                .collect();
+            let dupes: Vec<_> = by_name.iter().filter(|(_, locs)| locs.len() > 1).collect();
             if dupes.is_empty() {
                 println!("  {} No duplicate skills", "✓".green());
             } else {
@@ -5145,12 +5072,12 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
         // Check 2: Non-existent project paths
         {
             let mut stale_projects = Vec::new();
-            if let Ok(config) = load_claude_config() {
-                if let Some(projects) = config.projects {
-                    for project_path in projects.keys() {
-                        if !Path::new(project_path).exists() {
-                            stale_projects.push(shorten_path(project_path));
-                        }
+            if let Ok(config) = load_claude_config()
+                && let Some(projects) = config.projects
+            {
+                for project_path in projects.keys() {
+                    if !Path::new(project_path).exists() {
+                        stale_projects.push(shorten_path(project_path));
                     }
                 }
             }
@@ -5166,13 +5093,13 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
                     println!("    {} {}", "↳".dimmed(), p.dimmed());
                 }
                 if stale_projects.len() > 5 {
-                    println!("    {} ... and {} more", "↳".dimmed(), stale_projects.len() - 5);
+                    println!(
+                        "    {} ... and {} more",
+                        "↳".dimmed(),
+                        stale_projects.len() - 5
+                    );
                 }
-                println!(
-                    "    {} {}",
-                    "→".dimmed(),
-                    "cckit prune --execute".cyan()
-                );
+                println!("    {} {}", "→".dimmed(), "cckit prune --execute".cyan());
                 warning_count += 1;
             }
             println!();
@@ -5218,11 +5145,7 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
                 );
                 println!("    Largest:");
                 for (name, tokens) in skill_tokens.iter().take(5) {
-                    println!(
-                        "      {} (~{})",
-                        name.dimmed(),
-                        format_token_count(*tokens)
-                    );
+                    println!("      {} (~{})", name.dimmed(), format_token_count(*tokens));
                 }
                 println!(
                     "    {} Consider removing unused skills to save context budget",
@@ -5281,27 +5204,24 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
         {
             let mut by_name: std::collections::HashMap<String, Vec<String>> =
                 std::collections::HashMap::new();
-            if let Ok(config) = load_claude_config() {
-                if let Some(projects) = config.projects {
-                    for project_path in projects.keys() {
-                        let project_dir = Path::new(project_path);
-                        if !project_dir.exists() {
-                            continue;
-                        }
-                        for server in scan_mcp_servers(project_dir) {
-                            by_name
-                                .entry(server.name)
-                                .or_default()
-                                .push(shorten_path(project_path));
-                        }
+            if let Ok(config) = load_claude_config()
+                && let Some(projects) = config.projects
+            {
+                for project_path in projects.keys() {
+                    let project_dir = Path::new(project_path);
+                    if !project_dir.exists() {
+                        continue;
+                    }
+                    for server in scan_mcp_servers(project_dir) {
+                        by_name
+                            .entry(server.name)
+                            .or_default()
+                            .push(shorten_path(project_path));
                     }
                 }
             }
 
-            let dupes: Vec<_> = by_name
-                .iter()
-                .filter(|(_, locs)| locs.len() >= 3)
-                .collect();
+            let dupes: Vec<_> = by_name.iter().filter(|(_, locs)| locs.len() >= 3).collect();
             if dupes.is_empty() {
                 println!("  {} No widely duplicated MCP servers", "✓".green());
             } else {
@@ -5316,11 +5236,7 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
                         println!("    {} {}", "↳".dimmed(), loc.dimmed());
                     }
                     if locations.len() > 5 {
-                        println!(
-                            "    {} ... and {} more",
-                            "↳".dimmed(),
-                            locations.len() - 5
-                        );
+                        println!("    {} ... and {} more", "↳".dimmed(), locations.len() - 5);
                     }
                     println!(
                         "    {} Consider moving to ~/.claude/.mcp.json for global access",
@@ -5335,38 +5251,38 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
         // Check 6: MCP servers with missing binaries
         {
             let mut missing = Vec::new();
-            if let Ok(config) = load_claude_config() {
-                if let Some(projects) = config.projects {
-                    for project_path in projects.keys() {
-                        let project_dir = Path::new(project_path);
-                        if !project_dir.exists() {
+            if let Ok(config) = load_claude_config()
+                && let Some(projects) = config.projects
+            {
+                for project_path in projects.keys() {
+                    let project_dir = Path::new(project_path);
+                    if !project_dir.exists() {
+                        continue;
+                    }
+                    for server in scan_mcp_servers(project_dir) {
+                        if server.server_type != "stdio" {
                             continue;
                         }
-                        for server in scan_mcp_servers(project_dir) {
-                            if server.server_type != "stdio" {
+                        if let Some(ref cmd) = server.command {
+                            let bin = cmd.split_whitespace().next().unwrap_or(cmd);
+                            // Skip dynamic resolvers
+                            if bin == "npx" || bin == "uvx" || bin == "bunx" {
                                 continue;
                             }
-                            if let Some(ref cmd) = server.command {
-                                let bin = cmd.split_whitespace().next().unwrap_or(cmd);
-                                // Skip dynamic resolvers
-                                if bin == "npx" || bin == "uvx" || bin == "bunx" {
-                                    continue;
-                                }
-                                let found = if bin.starts_with('/') || bin.starts_with('.') {
-                                    Path::new(bin).exists()
-                                } else {
-                                    std::process::Command::new("which")
-                                        .arg(bin)
-                                        .output()
-                                        .map_or(false, |o| o.status.success())
-                                };
-                                if !found {
-                                    missing.push((
-                                        server.name.clone(),
-                                        bin.to_string(),
-                                        shorten_path(project_path),
-                                    ));
-                                }
+                            let found = if bin.starts_with('/') || bin.starts_with('.') {
+                                Path::new(bin).exists()
+                            } else {
+                                std::process::Command::new("which")
+                                    .arg(bin)
+                                    .output()
+                                    .is_ok_and(|o| o.status.success())
+                            };
+                            if !found {
+                                missing.push((
+                                    server.name.clone(),
+                                    bin.to_string(),
+                                    shorten_path(project_path),
+                                ));
                             }
                         }
                     }
@@ -5405,11 +5321,9 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
                 } else {
                     path.is_dir()
                 };
-                if is_dir {
-                    if let Ok(content) = fs::read_to_string(path.join("SKILL.md")) {
-                        global_skill_tokens += content.len() / 4;
-                        global_skill_count += 1;
-                    }
+                if is_dir && let Ok(content) = fs::read_to_string(path.join("SKILL.md")) {
+                    global_skill_tokens += content.len() / 4;
+                    global_skill_count += 1;
                 }
             }
         }
@@ -5436,11 +5350,11 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
         if let Ok(dirs) = fs::read_dir(&agents_dir) {
             for entry in dirs.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|e| e == "md") {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        agent_tokens += content.len() / 4;
-                        agent_count += 1;
-                    }
+                if path.extension().is_some_and(|e| e == "md")
+                    && let Ok(content) = fs::read_to_string(&path)
+                {
+                    agent_tokens += content.len() / 4;
+                    agent_count += 1;
                 }
             }
         }
@@ -5867,13 +5781,13 @@ fn ls_command(opts: LsOptions) {
 
     // Check if global matches filter criteria
     let global_matches_filters = {
-        let mcp_ok = opts.mcp_filter.as_ref().map_or(true, |filter| {
+        let mcp_ok = opts.mcp_filter.as_ref().is_none_or(|filter| {
             global_info
                 .mcp_servers
                 .iter()
                 .any(|s| s.name.contains(filter.as_str()))
         });
-        let skill_ok = opts.skill_filter.as_ref().map_or(true, |filter| {
+        let skill_ok = opts.skill_filter.as_ref().is_none_or(|filter| {
             global_info
                 .skills
                 .iter()
@@ -6007,10 +5921,10 @@ fn build_stop_message(hook_json: &serde_json::Value) -> String {
     }
 
     // Get last assistant message from transcript
-    if let Some(transcript_path) = hook_json.get("transcript_path").and_then(|v| v.as_str()) {
-        if let Some(msg) = get_last_assistant_message(transcript_path) {
-            lines.push(msg);
-        }
+    if let Some(transcript_path) = hook_json.get("transcript_path").and_then(|v| v.as_str())
+        && let Some(msg) = get_last_assistant_message(transcript_path)
+    {
+        lines.push(msg);
     }
 
     if lines.is_empty() {
@@ -6040,30 +5954,24 @@ fn get_last_assistant_message(transcript_path: &str) -> Option<String> {
             continue;
         }
 
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-            if json.get("type").and_then(|t| t.as_str()) == Some("assistant") {
-                if let Some(content_arr) = json
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line)
+            && json.get("type").and_then(|t| t.as_str()) == Some("assistant")
+            && let Some(content_arr) = json
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+        {
+            for item in content_arr {
+                if item.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && let Some(text) = item.get("text").and_then(|t| t.as_str())
                 {
-                    for item in content_arr {
-                        if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                                // Take first 3 lines, truncate to 200 chars
-                                let summary: String =
-                                    text.lines().take(3).collect::<Vec<_>>().join("\n");
-                                let chars: Vec<char> = summary.chars().collect();
-                                if chars.len() > 200 {
-                                    return Some(format!(
-                                        "{}...",
-                                        chars[..200].iter().collect::<String>()
-                                    ));
-                                }
-                                return Some(summary);
-                            }
-                        }
+                    // Take first 3 lines, truncate to 200 chars
+                    let summary: String = text.lines().take(3).collect::<Vec<_>>().join("\n");
+                    let chars: Vec<char> = summary.chars().collect();
+                    if chars.len() > 200 {
+                        return Some(format!("{}...", chars[..200].iter().collect::<String>()));
                     }
+                    return Some(summary);
                 }
             }
         }
@@ -6365,7 +6273,7 @@ pub fn run() {
             if warn_if_hooks_missing() {
                 std::process::exit(1);
             }
-            if let Some(s) = monitor::menubar::MenubarStyle::from_str(&style) {
+            if let Ok(s) = style.parse::<monitor::menubar::MenubarStyle>() {
                 monitor::menubar::set_style(s);
             } else {
                 eprintln!(

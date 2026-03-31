@@ -1,10 +1,10 @@
+use super::paths;
 use super::session::{SessionStore, TuiState};
 use chrono::Utc;
 use fs2::FileExt;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::io::Write;
-use std::path::PathBuf;
 
 const SESSIONS_FILE: &str = "sessions.json";
 const LOCK_FILE: &str = "sessions.lock";
@@ -12,24 +12,14 @@ const TUI_STATE_FILE: &str = "tui_state.json";
 const AF_CONFIG_FILE: &str = "af_disabled.json";
 const WINDOW_FRAME_FILE: &str = "window_frame.json";
 
-fn get_data_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .expect("Could not find home directory")
-                .join(".local/share")
-        })
-        .join("cckit")
-}
-
 pub struct Storage {
-    path: PathBuf,
-    lock_path: PathBuf,
+    path: std::path::PathBuf,
+    lock_path: std::path::PathBuf,
 }
 
 impl Storage {
     pub fn new() -> Self {
-        let dir = get_data_dir();
+        let dir = paths::data_dir();
         let path = dir.join(SESSIONS_FILE);
         let lock_path = dir.join(LOCK_FILE);
         Self { path, lock_path }
@@ -62,7 +52,7 @@ impl Storage {
         let dir = self
             .path
             .parent()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid sessions file path"))?;
+            .ok_or_else(|| io::Error::other("Invalid sessions file path"))?;
         let tmp_path = dir.join(format!("{}.tmp.{}", SESSIONS_FILE, std::process::id()));
 
         {
@@ -147,9 +137,7 @@ impl Storage {
     fn is_stale(session: &super::session::Session) -> bool {
         if session.tty == "unknown" {
             // No TTY (e.g. desktop app): check if pid is still alive
-            return session
-                .pid
-                .map_or(true, |pid| !Self::pid_alive(pid as u32));
+            return session.pid.is_none_or(|pid| !Self::pid_alive(pid));
         }
         if !Self::tty_exists(&session.tty) {
             return true;
@@ -161,7 +149,7 @@ impl Storage {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .output()
-            .map_or(false, |o| o.status.success())
+            .is_ok_and(|o| o.status.success())
     }
 
     /// Find stale sessions (TTY gone or process dead)
@@ -254,7 +242,7 @@ impl Storage {
         let dir = self
             .path
             .parent()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid data path"))?;
+            .ok_or_else(|| io::Error::other("Invalid data path"))?;
         let af_path = dir.join(AF_CONFIG_FILE);
         let tmp_path = dir.join(format!("{}.tmp.{}", AF_CONFIG_FILE, std::process::id()));
         let content = serde_json::to_string_pretty(disabled)?;
@@ -286,7 +274,7 @@ impl Storage {
         let dir = self
             .path
             .parent()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid data path"))?;
+            .ok_or_else(|| io::Error::other("Invalid data path"))?;
         let path = dir.join(WINDOW_FRAME_FILE);
         let tmp_path = dir.join(format!("{}.tmp.{}", WINDOW_FRAME_FILE, std::process::id()));
         let content = serde_json::to_string(&frame)?;

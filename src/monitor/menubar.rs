@@ -1,5 +1,6 @@
 // macOS menubar implementation using objc2
 
+use super::display;
 use super::focus;
 use super::notification::{MenubarPosition, save_menubar_position};
 use super::session::{Session, SessionStatus};
@@ -172,16 +173,6 @@ pub enum MenubarStyle {
 }
 
 impl MenubarStyle {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "emoji" => Some(Self::Emoji),
-            "terminal" | "term" => Some(Self::Terminal),
-            "htop" => Some(Self::Htop),
-            "compact" => Some(Self::Compact),
-            _ => None,
-        }
-    }
-
     fn all() -> &'static [MenubarStyle] {
         &[Self::Emoji, Self::Terminal, Self::Htop, Self::Compact]
     }
@@ -308,6 +299,20 @@ impl MenubarStyle {
     }
 }
 
+impl std::str::FromStr for MenubarStyle {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "emoji" => Ok(Self::Emoji),
+            "terminal" | "term" => Ok(Self::Terminal),
+            "htop" => Ok(Self::Htop),
+            "compact" => Ok(Self::Compact),
+            _ => Err(()),
+        }
+    }
+}
+
 static MENUBAR_STYLE: Mutex<MenubarStyle> = Mutex::new(MenubarStyle::Terminal);
 
 pub fn set_style(style: MenubarStyle) {
@@ -319,30 +324,11 @@ fn current_style() -> MenubarStyle {
 }
 
 fn format_menu_elapsed(dt: chrono::DateTime<chrono::Utc>) -> String {
-    let secs = chrono::Utc::now()
-        .signed_duration_since(dt)
-        .num_seconds()
-        .max(0);
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{}h", secs / 3600)
-    }
+    display::format_elapsed_short(dt)
 }
 
 fn format_menu_stats(session: &Session) -> String {
-    let mut parts = Vec::new();
-    if session.prompt_count > 0 {
-        parts.push(format!("{}p", session.prompt_count));
-    }
-    if session.tool_count > 0 {
-        parts.push(format!("{}t", session.tool_count));
-    }
-    if session.compact_count > 0 {
-        parts.push(format!("{}c", session.compact_count));
-    }
+    let parts = display::session_count_parts(session);
     if parts.is_empty() {
         String::new()
     } else {
@@ -433,10 +419,10 @@ extern "C" fn focus_session_action(_this: *mut AnyObject, _cmd: Sel, sender: *mu
     }
 
     // Try TTY-based focus first (works with tmux)
-    if let Some(tty) = get_session_tty(tag) {
-        if let Ok(true) = focus::focus_ghostty_tab_by_tty(&tty) {
-            return;
-        }
+    if let Some(tty) = get_session_tty(tag)
+        && let Ok(true) = focus::focus_ghostty_tab_by_tty(&tty)
+    {
+        return;
     }
 
     // Fallback to project name matching
@@ -611,10 +597,10 @@ impl MenubarApp {
             item.setTag(TUI_MENU_TAG);
 
             // Set terminal app icon
-            if let Some(app_name) = get_cached_terminal_app(&tui_state.tty) {
-                if let Some(icon) = get_app_icon(&app_name, self.mtm) {
-                    item.setImage(Some(&icon));
-                }
+            if let Some(app_name) = get_cached_terminal_app(&tui_state.tty)
+                && let Some(icon) = get_app_icon(&app_name, self.mtm)
+            {
+                item.setImage(Some(&icon));
             }
 
             unsafe {
@@ -662,10 +648,10 @@ impl MenubarApp {
                 cwd_map.insert(tag, session.cwd.clone());
 
                 // Set terminal app icon (terminal detection cached)
-                if let Some(app_name) = get_cached_terminal_app(&session.tty) {
-                    if let Some(icon) = get_app_icon(&app_name, self.mtm) {
-                        item.setImage(Some(&icon));
-                    }
+                if let Some(app_name) = get_cached_terminal_app(&session.tty)
+                    && let Some(icon) = get_app_icon(&app_name, self.mtm)
+                {
+                    item.setImage(Some(&icon));
                 }
 
                 // Set action and target for focus

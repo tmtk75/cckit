@@ -1,9 +1,11 @@
+pub mod display;
 pub mod focus;
 pub mod hook;
 #[cfg(target_os = "macos")]
 pub mod menubar;
 #[cfg(target_os = "macos")]
 pub mod notification;
+pub mod paths;
 pub mod session;
 pub mod setup;
 pub mod storage;
@@ -47,7 +49,7 @@ pub fn print_sessions_list() {
         };
 
         let tool = session.last_tool.as_deref().unwrap_or("-");
-        let updated = format_relative_time(session.updated_at);
+        let updated = display::format_relative_time(session.updated_at);
 
         println!(
             "{} {} {} [{}] {}",
@@ -61,20 +63,5 @@ pub fn print_sessions_list() {
         if let Some(ref input) = session.last_tool_input {
             println!("    {}", input.dimmed());
         }
-    }
-}
-
-fn format_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
-    let now = chrono::Utc::now();
-    let duration = now.signed_duration_since(dt);
-
-    if duration.num_seconds() < 60 {
-        format!("{}s ago", duration.num_seconds())
-    } else if duration.num_minutes() < 60 {
-        format!("{}m ago", duration.num_minutes())
-    } else if duration.num_hours() < 24 {
-        format!("{}h ago", duration.num_hours())
-    } else {
-        format!("{}d ago", duration.num_days())
     }
 }

@@ -78,21 +78,19 @@ pub mod ax {
         target_title: &str,
     ) -> Result<bool, String> {
         // Check if this element is a tab (AXRadioButton in tab group)
-        if let Some(role) = unsafe { get_role(element) } {
-            if role == "AXRadioButton" || role == "AXButton" {
-                if let Some(title) = unsafe { get_title(element) } {
-                    // Match if either contains the other (bidirectional matching)
-                    // e.g., tab "tank" matches search "tank-workspace" and vice versa
-                    if title.contains(target_title) || target_title.contains(&title) {
-                        // Found matching tab, press it
-                        let action = CFString::new("AXPress");
-                        let err = unsafe {
-                            AXUIElementPerformAction(element, action.as_concrete_TypeRef())
-                        };
-                        if err == kAXErrorSuccess {
-                            return Ok(true);
-                        }
-                    }
+        if let Some(role) = unsafe { get_role(element) }
+            && (role == "AXRadioButton" || role == "AXButton")
+            && let Some(title) = unsafe { get_title(element) }
+        {
+            // Match if either contains the other (bidirectional matching)
+            // e.g., tab "tank" matches search "tank-workspace" and vice versa
+            if title.contains(target_title) || target_title.contains(&title) {
+                // Found matching tab, press it
+                let action = CFString::new("AXPress");
+                let err =
+                    unsafe { AXUIElementPerformAction(element, action.as_concrete_TypeRef()) };
+                if err == kAXErrorSuccess {
+                    return Ok(true);
                 }
             }
         }
