@@ -91,6 +91,12 @@ enum Commands {
         command: McpCommands,
     },
 
+    /// Manage agents across projects
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
+
     /// Show cckit status and file paths
     Status,
 
@@ -372,6 +378,27 @@ enum McpCommands {
 
         #[arg(long, help = "Overwrite existing MCP server without confirmation")]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// List all agents with their origin
+    Ls {
+        #[arg(short, long, help = "Filter agents by name pattern")]
+        filter: Option<String>,
+
+        #[arg(long, help = "Show only a specific scope (global, plugin, project)")]
+        scope: Option<String>,
+
+        #[arg(long, help = "Show only agents that exist in multiple projects")]
+        dupes: bool,
+    },
+
+    /// Show how to remove/uninstall each agent
+    HowToRemove {
+        #[arg(short, long, help = "Filter agents by name pattern")]
+        filter: Option<String>,
     },
 }
 
@@ -1157,6 +1184,274 @@ fn skill_how_to_remove_command(filter: Option<String>) {
                 also.bold(),
             );
         }
+        println!();
+    }
+}
+
+fn agent_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) {
+    let home = dirs::home_dir().expect("Could not find home directory");
+    let global_claude = home.join(".claude");
+
+    struct AgentEntry {
+        name: String,
+        description: Option<String>,
+        scope: String,
+    }
+
+    let mut entries: Vec<AgentEntry> = Vec::new();
+
+    // 1. Global agents (~/.claude/agents/)
+    for agent in scan_agents(&global_claude) {
+        entries.push(AgentEntry {
+            name: agent.name,
+            description: agent.description,
+            scope: "global".to_string(),
+        });
+    }
+
+    // 2. Plugin agents
+    let plugins = scan_plugins(&global_claude);
+    for plugin in &plugins {
+        for agent in &plugin.agents {
+            entries.push(AgentEntry {
+                name: agent.name.clone(),
+                description: agent.description.clone(),
+                scope: format!("plugin:{}", plugin.name),
+            });
+        }
+    }
+
+    // 3. Project agents
+    if let Ok(config) = load_claude_config() {
+        if let Some(projects) = config.projects {
+            let mut seen: std::collections::HashSet<(String, String)> =
+                std::collections::HashSet::new();
+            for project_path in projects.keys() {
+                let claude_dir = Path::new(project_path).join(".claude");
+                if claude_dir.join("agents").exists() {
+                    for agent in scan_agents(&claude_dir) {
+                        let key = (agent.name.clone(), shorten_path(project_path));
+                        if seen.insert(key) {
+                            entries.push(AgentEntry {
+                                name: agent.name,
+                                description: agent.description,
+                                scope: format!("project:{}", shorten_path(project_path)),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply filters
+    if let Some(ref f) = filter {
+        let f_lower = f.to_lowercase();
+        entries.retain(|e| e.name.to_lowercase().contains(&f_lower));
+    }
+    if let Some(ref s) = scope {
+        entries.retain(|e| e.scope.starts_with(s.as_str()));
+    }
+
+    if entries.is_empty() {
+        println!("{}", "No agents found.".dimmed());
+        return;
+    }
+
+    // Group by name
+    let mut by_name: std::collections::BTreeMap<String, Vec<&AgentEntry>> =
+        std::collections::BTreeMap::new();
+    for entry in &entries {
+        by_name.entry(entry.name.clone()).or_default().push(entry);
+    }
+
+    if dupes {
+        by_name.retain(|_, locs| locs.len() > 1);
+        if by_name.is_empty() {
+            println!("{}", "No duplicate agents found.".dimmed());
+            return;
+        }
+        println!(
+            "{} agents in multiple locations\n",
+            by_name.len().to_string().cyan()
+        );
+    } else {
+        println!(
+            "{} unique agents ({} total across projects)\n",
+            by_name.len().to_string().cyan(),
+            entries.len().to_string().dimmed()
+        );
+    }
+
+    let max_name = by_name.keys().map(|n| n.len()).max().unwrap_or(10).min(30);
+
+    for (name, locations) in &by_name {
+        let first = locations[0];
+        let desc = first
+            .description
+            .as_deref()
+            .map(|d| truncate_str(d.lines().next().unwrap_or(d), 50))
+            .unwrap_or_default();
+
+        if locations.len() == 1 {
+            println!(
+                "  {:<width$} {} {}",
+                name.bright_cyan(),
+                desc.dimmed(),
+                format!("[{}]", first.scope).dimmed(),
+                width = max_name,
+            );
+        } else {
+            println!(
+                "  {:<width$} {}",
+                name.bright_cyan(),
+                desc.dimmed(),
+                width = max_name,
+            );
+            for loc in locations {
+                println!("    {} {}", "↳".dimmed(), loc.scope.dimmed());
+            }
+        }
+    }
+}
+
+fn agent_how_to_remove_command(filter: Option<String>) {
+    let home = dirs::home_dir().expect("Could not find home directory");
+    let global_claude = home.join(".claude");
+
+    struct AgentRemoveEntry {
+        name: String,
+        scope: String,
+        installed_via: Option<String>,
+        command: String,
+    }
+
+    let mut entries: Vec<AgentRemoveEntry> = Vec::new();
+
+    // 1. Global agents
+    let agents_dir = global_claude.join("agents");
+    if agents_dir.exists() {
+        if let Ok(dirs) = fs::read_dir(&agents_dir) {
+            for entry in dirs.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().is_some_and(|e| e == "md") {
+                    let file_name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let name = if let Ok(content) = fs::read_to_string(&path) {
+                        parse_frontmatter(&content)
+                            .0
+                            .unwrap_or_else(|| {
+                                path.file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string()
+                            })
+                    } else {
+                        path.file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
+                    };
+                    entries.push(AgentRemoveEntry {
+                        name,
+                        scope: "global".to_string(),
+                        installed_via: None,
+                        command: format!("rm ~/.claude/agents/{}", file_name),
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Plugin agents
+    let plugins = scan_plugins(&global_claude);
+    for plugin in &plugins {
+        for agent in &plugin.agents {
+            entries.push(AgentRemoveEntry {
+                name: agent.name.clone(),
+                scope: format!("plugin:{}", plugin.name),
+                installed_via: Some(format!("claude plugin install {}", plugin.name)),
+                command: format!("claude plugin uninstall {}", plugin.name),
+            });
+        }
+    }
+
+    // 3. Project agents
+    if let Ok(config) = load_claude_config() {
+        if let Some(projects) = config.projects {
+            for project_path in projects.keys() {
+                let claude_dir = Path::new(project_path).join(".claude");
+                let agents_dir = claude_dir.join("agents");
+                if !agents_dir.exists() {
+                    continue;
+                }
+                if let Ok(dirs) = fs::read_dir(&agents_dir) {
+                    for entry in dirs.flatten() {
+                        let path = entry.path();
+                        if path.is_file() && path.extension().is_some_and(|e| e == "md") {
+                            let file_name = path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string();
+                            let name = if let Ok(content) = fs::read_to_string(&path) {
+                                parse_frontmatter(&content)
+                                    .0
+                                    .unwrap_or_else(|| {
+                                        path.file_stem()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_string()
+                                    })
+                            } else {
+                                path.file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string()
+                            };
+                            let short = shorten_path(project_path);
+                            entries.push(AgentRemoveEntry {
+                                name,
+                                scope: format!("project:{}", short),
+                                installed_via: None,
+                                command: format!("rm {}/.claude/agents/{}", project_path, file_name),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply filter
+    if let Some(ref f) = filter {
+        let f_lower = f.to_lowercase();
+        entries.retain(|e| e.name.to_lowercase().contains(&f_lower));
+    }
+
+    if entries.is_empty() {
+        println!("{}", "No agents found.".dimmed());
+        return;
+    }
+
+    println!("{} agents found\n", entries.len().to_string().cyan());
+
+    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(10).min(30);
+
+    for entry in &entries {
+        println!(
+            "  {:<width$} {}",
+            entry.name.bright_cyan(),
+            format!("[{}]", entry.scope).dimmed(),
+            width = max_name,
+        );
+        if let Some(ref via) = entry.installed_via {
+            println!("    {} {}", "installed via:".dimmed(), via);
+        }
+        println!("    {} {}", "remove:".dimmed(), entry.command.bold());
         println!();
     }
 }
@@ -5859,6 +6154,18 @@ pub fn run() {
                 force,
             } => {
                 mcp_copy_command(filter, from, name, force);
+            }
+        },
+        Some(Commands::Agent { command }) => match command {
+            AgentCommands::Ls {
+                filter,
+                scope,
+                dupes,
+            } => {
+                agent_ls_command(filter, scope, dupes);
+            }
+            AgentCommands::HowToRemove { filter } => {
+                agent_how_to_remove_command(filter);
             }
         },
         Some(Commands::Status) => {
