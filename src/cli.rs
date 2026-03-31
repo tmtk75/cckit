@@ -299,6 +299,12 @@ Origins:
         dry_run: bool,
     },
 
+    /// Show how to remove/uninstall each skill
+    HowToRemove {
+        #[arg(short, long, help = "Filter skills by name pattern")]
+        filter: Option<String>,
+    },
+
     /// Validate a skill's SKILL.md for security concerns (e.g. embedded shell commands)
     #[command(after_help = "\
 Examples:
@@ -933,6 +939,195 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) 
                 println!("    {} {}", "↳".dimmed(), loc.scope.dimmed(),);
             }
         }
+    }
+}
+
+fn skill_how_to_remove_command(filter: Option<String>) {
+    let home = dirs::home_dir().expect("Could not find home directory");
+    let global_claude = home.join(".claude");
+
+    struct RemoveEntry {
+        name: String,
+        origin: String,
+        scope: String,
+        /// How it was installed (shown as "installed via: ...")
+        installed_via: Option<String>,
+        /// Primary removal command
+        command: String,
+        /// Additional removal step (e.g. full uninstall after symlink removal)
+        also: Option<String>,
+    }
+
+    let mut entries: Vec<RemoveEntry> = Vec::new();
+
+    // 1. Global user skills
+    let global_skills_dir = global_claude.join("skills");
+    if global_skills_dir.exists()
+        && let Ok(dirs) = fs::read_dir(&global_skills_dir)
+    {
+        for entry in dirs.flatten() {
+            let path = entry.path();
+            let is_dir = if path.is_symlink() {
+                fs::metadata(&path).is_ok_and(|m| m.is_dir())
+            } else {
+                path.is_dir()
+            };
+            if !is_dir || !path.join("SKILL.md").exists() {
+                continue;
+            }
+            let dir_name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let name = if let Ok(content) = fs::read_to_string(path.join("SKILL.md")) {
+                parse_frontmatter(&content).0.unwrap_or_else(|| dir_name.clone())
+            } else {
+                dir_name.clone()
+            };
+            let origin = detect_skill_origin(&path);
+            let (installed_via, command) = if origin == "marketplace" {
+                (
+                    Some("npx @anthropic/skills add".to_string()),
+                    format!("npx @anthropic/skills remove {}", dir_name),
+                )
+            } else {
+                (None, format!("rm -rf ~/.claude/skills/{}", dir_name))
+            };
+            entries.push(RemoveEntry {
+                name,
+                origin,
+                scope: "global".to_string(),
+                installed_via,
+                command,
+                also: None,
+            });
+        }
+    }
+
+    // 2. Plugin skills
+    let plugins = scan_plugins(&global_claude);
+    for plugin in &plugins {
+        for skill in &plugin.skills {
+            entries.push(RemoveEntry {
+                name: skill.name.clone(),
+                origin: "plugin".to_string(),
+                scope: format!("plugin:{}", plugin.name),
+                installed_via: Some(format!("claude plugin install {}", plugin.name)),
+                command: format!("claude plugin uninstall {}", plugin.name),
+                also: None,
+            });
+        }
+    }
+
+    // 3. Project skills
+    if let Ok(config) = load_claude_config() {
+        if let Some(projects) = config.projects {
+            let mut seen: std::collections::HashSet<(String, u64)> =
+                std::collections::HashSet::new();
+            for project_path in projects.keys() {
+                let claude_dir = Path::new(project_path).join(".claude");
+                if claude_dir.join("skills").exists() {
+                    for skill_source in scan_skills_with_paths(&claude_dir) {
+                        let content_hash =
+                            fs::read_to_string(skill_source.skill_dir.join("SKILL.md"))
+                                .map(|c| {
+                                    use std::hash::{Hash, Hasher};
+                                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                                    c.hash(&mut h);
+                                    h.finish()
+                                })
+                                .unwrap_or(0);
+                        let key = (skill_source.info.name.clone(), content_hash);
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        let dir_name = skill_source
+                            .skill_dir
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        let short = shorten_path(project_path);
+                        let origin = detect_skill_origin(&skill_source.skill_dir);
+                        let (installed_via, command, also) = if origin == "marketplace" {
+                            (
+                                Some("npx @anthropic/skills add (symlinked)".to_string()),
+                                format!("rm {}/.claude/skills/{}", project_path, dir_name),
+                                Some(format!("npx @anthropic/skills remove {}", dir_name)),
+                            )
+                        } else {
+                            (None, format!("rm -rf {}/.claude/skills/{}", project_path, dir_name), None)
+                        };
+                        entries.push(RemoveEntry {
+                            name: skill_source.info.name,
+                            origin,
+                            scope: format!("project:{}", short),
+                            installed_via,
+                            command,
+                            also,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply filter
+    if let Some(ref f) = filter {
+        let f_lower = f.to_lowercase();
+        entries.retain(|e| e.name.to_lowercase().contains(&f_lower));
+    }
+
+    if entries.is_empty() {
+        println!("{}", "No skills found.".dimmed());
+        return;
+    }
+
+    println!(
+        "{} skills found\n",
+        entries.len().to_string().cyan()
+    );
+
+    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(10).min(30);
+
+    for entry in &entries {
+        let origin_colored = match entry.origin.as_str() {
+            "personal" => format!("({})", entry.origin).green(),
+            "marketplace" => format!("({})", entry.origin).bright_blue(),
+            "installed" => format!("({})", entry.origin).cyan(),
+            "plugin" => format!("({})", entry.origin).magenta(),
+            "no author" => format!("({})", entry.origin).dimmed(),
+            _ => format!("({})", entry.origin).yellow(),
+        };
+        println!(
+            "  {:<width$} {} {}",
+            entry.name.bright_cyan(),
+            origin_colored,
+            format!("[{}]", entry.scope).dimmed(),
+            width = max_name,
+        );
+        if let Some(ref via) = entry.installed_via {
+            println!("    {} {}", "installed via:".dimmed(), via);
+        }
+        let remove_label = if entry.also.is_some() {
+            "remove symlink:"
+        } else {
+            "remove:"
+        };
+        println!(
+            "    {} {}",
+            remove_label.dimmed(),
+            entry.command.bold(),
+        );
+        if let Some(ref also) = entry.also {
+            println!(
+                "    {} {}",
+                "full uninstall:".dimmed(),
+                also.bold(),
+            );
+        }
+        println!();
     }
 }
 
@@ -4879,6 +5074,9 @@ pub fn run() {
                 dry_run,
             } => {
                 skill_promote_command(filter, name, force, dry_run);
+            }
+            SkillCommands::HowToRemove { filter } => {
+                skill_how_to_remove_command(filter);
             }
             SkillCommands::Validate { spec, verbose } => {
                 skill_validate_command(spec.as_deref(), verbose);
