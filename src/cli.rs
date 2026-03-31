@@ -97,6 +97,18 @@ enum Commands {
     /// Check cckit configuration health
     Doctor,
 
+    /// Analyze skills, MCP servers, and plugins for cleanup opportunities
+    TidyUp {
+        #[arg(long, help = "Run only skill-related checks")]
+        skills_only: bool,
+
+        #[arg(long, help = "Run only MCP-related checks")]
+        mcp_only: bool,
+
+        #[arg(long, help = "Show context budget summary only")]
+        budget_only: bool,
+    },
+
     /// List permissions (allow/deny) from settings files
     Permissions {
         #[arg(short, long, help = "Filter entries by pattern (substring match)")]
@@ -4454,6 +4466,480 @@ fn warn_if_hooks_missing() -> bool {
     true
 }
 
+fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
+    let home = dirs::home_dir().expect("Could not find home directory");
+    let global_claude = home.join(".claude");
+
+    let run_skills = !mcp_only && !budget_only;
+    let run_mcp = !skills_only && !budget_only;
+    let run_budget = !skills_only && !mcp_only || budget_only;
+
+    let mut warning_count = 0;
+    let mut info_count = 0;
+
+    println!("{}", "cckit tidy-up".bold());
+    println!();
+
+    // --- Skills checks ---
+    if run_skills {
+        println!("{}", "Skills".bold().underline());
+        println!();
+
+        // Check 1: Duplicate skills across projects
+        {
+            let mut by_name: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+
+            // Global skills
+            if let Ok(dirs) = fs::read_dir(global_claude.join("skills")) {
+                for entry in dirs.flatten() {
+                    let path = entry.path();
+                    let is_dir = if path.is_symlink() {
+                        fs::metadata(&path).is_ok_and(|m| m.is_dir())
+                    } else {
+                        path.is_dir()
+                    };
+                    if is_dir && path.join("SKILL.md").exists() {
+                        let name = if let Ok(content) = fs::read_to_string(path.join("SKILL.md"))
+                        {
+                            parse_frontmatter(&content)
+                                .0
+                                .unwrap_or_else(|| {
+                                    path.file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string()
+                                })
+                        } else {
+                            path.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string()
+                        };
+                        by_name.entry(name).or_default().push("global".to_string());
+                    }
+                }
+            }
+
+            // Project skills
+            if let Ok(config) = load_claude_config() {
+                if let Some(projects) = config.projects {
+                    for project_path in projects.keys() {
+                        let claude_dir = Path::new(project_path).join(".claude");
+                        if claude_dir.join("skills").exists() {
+                            for skill_source in scan_skills_with_paths(&claude_dir) {
+                                by_name
+                                    .entry(skill_source.info.name)
+                                    .or_default()
+                                    .push(shorten_path(project_path));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let dupes: Vec<_> = by_name
+                .iter()
+                .filter(|(_, locs)| locs.len() > 1)
+                .collect();
+            if dupes.is_empty() {
+                println!("  {} No duplicate skills", "✓".green());
+            } else {
+                for (name, locations) in &dupes {
+                    let has_global = locations.iter().any(|l| l == "global");
+                    println!(
+                        "  {} Skill {} found in {} locations",
+                        "!".yellow(),
+                        name.bright_cyan(),
+                        locations.len()
+                    );
+                    for loc in locations.iter() {
+                        println!("    {} {}", "↳".dimmed(), loc.dimmed());
+                    }
+                    if has_global {
+                        println!(
+                            "    {} Remove project copies (already in global)",
+                            "→".dimmed()
+                        );
+                    } else {
+                        println!(
+                            "    {} {}",
+                            "→".dimmed(),
+                            format!("cckit skill promote --name {}", name).cyan()
+                        );
+                    }
+                    warning_count += 1;
+                }
+            }
+            println!();
+        }
+
+        // Check 2: Non-existent project paths
+        {
+            let mut stale_projects = Vec::new();
+            if let Ok(config) = load_claude_config() {
+                if let Some(projects) = config.projects {
+                    for project_path in projects.keys() {
+                        if !Path::new(project_path).exists() {
+                            stale_projects.push(shorten_path(project_path));
+                        }
+                    }
+                }
+            }
+            if stale_projects.is_empty() {
+                println!("  {} No stale project paths", "✓".green());
+            } else {
+                println!(
+                    "  {} {} non-existent project paths in ~/.claude.json",
+                    "!".yellow(),
+                    stale_projects.len()
+                );
+                for p in stale_projects.iter().take(5) {
+                    println!("    {} {}", "↳".dimmed(), p.dimmed());
+                }
+                if stale_projects.len() > 5 {
+                    println!("    {} ... and {} more", "↳".dimmed(), stale_projects.len() - 5);
+                }
+                println!(
+                    "    {} {}",
+                    "→".dimmed(),
+                    "cckit prune --execute".cyan()
+                );
+                warning_count += 1;
+            }
+            println!();
+        }
+
+        // Check 3: Global skills count & token estimate
+        {
+            let mut total_tokens = 0usize;
+            let mut skill_tokens: Vec<(String, usize)> = Vec::new();
+            if let Ok(dirs) = fs::read_dir(global_claude.join("skills")) {
+                for entry in dirs.flatten() {
+                    let path = entry.path();
+                    let is_dir = if path.is_symlink() {
+                        fs::metadata(&path).is_ok_and(|m| m.is_dir())
+                    } else {
+                        path.is_dir()
+                    };
+                    if !is_dir {
+                        continue;
+                    }
+                    let skill_file = path.join("SKILL.md");
+                    if let Ok(content) = fs::read_to_string(&skill_file) {
+                        let tokens = content.len() / 4;
+                        let name = parse_frontmatter(&content).0.unwrap_or_else(|| {
+                            path.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string()
+                        });
+                        total_tokens += tokens;
+                        skill_tokens.push((name, tokens));
+                    }
+                }
+            }
+            skill_tokens.sort_by(|a, b| b.1.cmp(&a.1));
+            let count = skill_tokens.len();
+            if count > 15 || total_tokens > 5000 {
+                println!(
+                    "  {} {} global skills (~{} tokens estimated)",
+                    "!".yellow(),
+                    count,
+                    format_token_count(total_tokens),
+                );
+                println!("    Largest:");
+                for (name, tokens) in skill_tokens.iter().take(5) {
+                    println!(
+                        "      {} (~{})",
+                        name.dimmed(),
+                        format_token_count(*tokens)
+                    );
+                }
+                println!(
+                    "    {} Consider removing unused skills to save context budget",
+                    "→".dimmed()
+                );
+                warning_count += 1;
+            } else {
+                println!(
+                    "  {} {} global skills (~{} tokens)",
+                    "✓".green(),
+                    count,
+                    format_token_count(total_tokens)
+                );
+            }
+            println!();
+        }
+
+        // Check 4: Unused plugins (plugins with 0 skills and 0 agents)
+        {
+            let plugins = scan_plugins(&global_claude);
+            let empty_plugins: Vec<_> = plugins
+                .iter()
+                .filter(|p| p.skills.is_empty() && p.agents.is_empty())
+                .collect();
+            if empty_plugins.is_empty() {
+                println!(
+                    "  {} All {} plugins provide skills or agents",
+                    "✓".green(),
+                    plugins.len()
+                );
+            } else {
+                for plugin in &empty_plugins {
+                    println!(
+                        "  {} Plugin {} has no skills or agents",
+                        "ℹ".blue(),
+                        plugin.name.bright_cyan(),
+                    );
+                    println!(
+                        "    {} {}",
+                        "→".dimmed(),
+                        format!("claude plugin uninstall {}", plugin.name).cyan()
+                    );
+                    info_count += 1;
+                }
+            }
+            println!();
+        }
+    }
+
+    // --- MCP checks ---
+    if run_mcp {
+        println!("{}", "MCP Servers".bold().underline());
+        println!();
+
+        // Check 5: Duplicate MCP servers across projects
+        {
+            let mut by_name: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            if let Ok(config) = load_claude_config() {
+                if let Some(projects) = config.projects {
+                    for project_path in projects.keys() {
+                        let project_dir = Path::new(project_path);
+                        if !project_dir.exists() {
+                            continue;
+                        }
+                        for server in scan_mcp_servers(project_dir) {
+                            by_name
+                                .entry(server.name)
+                                .or_default()
+                                .push(shorten_path(project_path));
+                        }
+                    }
+                }
+            }
+
+            let dupes: Vec<_> = by_name
+                .iter()
+                .filter(|(_, locs)| locs.len() >= 3)
+                .collect();
+            if dupes.is_empty() {
+                println!("  {} No widely duplicated MCP servers", "✓".green());
+            } else {
+                for (name, locations) in &dupes {
+                    println!(
+                        "  {} MCP server {} configured in {} projects",
+                        "!".yellow(),
+                        name.bright_cyan(),
+                        locations.len()
+                    );
+                    for loc in locations.iter().take(5) {
+                        println!("    {} {}", "↳".dimmed(), loc.dimmed());
+                    }
+                    if locations.len() > 5 {
+                        println!(
+                            "    {} ... and {} more",
+                            "↳".dimmed(),
+                            locations.len() - 5
+                        );
+                    }
+                    println!(
+                        "    {} Consider moving to ~/.claude/.mcp.json for global access",
+                        "→".dimmed()
+                    );
+                    warning_count += 1;
+                }
+            }
+            println!();
+        }
+
+        // Check 6: MCP servers with missing binaries
+        {
+            let mut missing = Vec::new();
+            if let Ok(config) = load_claude_config() {
+                if let Some(projects) = config.projects {
+                    for project_path in projects.keys() {
+                        let project_dir = Path::new(project_path);
+                        if !project_dir.exists() {
+                            continue;
+                        }
+                        for server in scan_mcp_servers(project_dir) {
+                            if server.server_type != "stdio" {
+                                continue;
+                            }
+                            if let Some(ref cmd) = server.command {
+                                let bin = cmd.split_whitespace().next().unwrap_or(cmd);
+                                // Skip dynamic resolvers
+                                if bin == "npx" || bin == "uvx" || bin == "bunx" {
+                                    continue;
+                                }
+                                let found = if bin.starts_with('/') || bin.starts_with('.') {
+                                    Path::new(bin).exists()
+                                } else {
+                                    std::process::Command::new("which")
+                                        .arg(bin)
+                                        .output()
+                                        .map_or(false, |o| o.status.success())
+                                };
+                                if !found {
+                                    missing.push((
+                                        server.name.clone(),
+                                        bin.to_string(),
+                                        shorten_path(project_path),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if missing.is_empty() {
+                println!("  {} All MCP server binaries found", "✓".green());
+            } else {
+                for (name, bin, project) in &missing {
+                    println!(
+                        "  {} MCP server {} binary not found: {}",
+                        "!".yellow(),
+                        name.bright_cyan(),
+                        bin.red()
+                    );
+                    println!("    {} in {}", "↳".dimmed(), project.dimmed());
+                    warning_count += 1;
+                }
+            }
+            println!();
+        }
+    }
+
+    // --- Context budget ---
+    if run_budget {
+        println!("{}", "Context Budget".bold().underline());
+        println!();
+
+        let mut global_skill_tokens = 0usize;
+        let mut global_skill_count = 0usize;
+        if let Ok(dirs) = fs::read_dir(global_claude.join("skills")) {
+            for entry in dirs.flatten() {
+                let path = entry.path();
+                let is_dir = if path.is_symlink() {
+                    fs::metadata(&path).is_ok_and(|m| m.is_dir())
+                } else {
+                    path.is_dir()
+                };
+                if is_dir {
+                    if let Ok(content) = fs::read_to_string(path.join("SKILL.md")) {
+                        global_skill_tokens += content.len() / 4;
+                        global_skill_count += 1;
+                    }
+                }
+            }
+        }
+
+        // Plugin skills count (token estimation requires install_path, use rough estimate)
+        let plugins = scan_plugins(&global_claude);
+        let plugin_skill_count: usize = plugins.iter().map(|p| p.skills.len()).sum();
+        // Rough estimate: ~200 tokens per plugin skill on average
+        let plugin_tokens = plugin_skill_count * 200;
+
+        // CLAUDE.md tokens
+        let mut claude_md_tokens = 0usize;
+        if let Ok(content) = fs::read_to_string(global_claude.join("CLAUDE.md")) {
+            claude_md_tokens += content.len() / 4;
+        }
+        if let Ok(content) = fs::read_to_string("CLAUDE.md") {
+            claude_md_tokens += content.len() / 4;
+        }
+
+        // Global agents tokens
+        let mut agent_tokens = 0usize;
+        let mut agent_count = 0usize;
+        let agents_dir = global_claude.join("agents");
+        if let Ok(dirs) = fs::read_dir(&agents_dir) {
+            for entry in dirs.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "md") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        agent_tokens += content.len() / 4;
+                        agent_count += 1;
+                    }
+                }
+            }
+        }
+
+        let total = global_skill_tokens + plugin_tokens + claude_md_tokens + agent_tokens;
+
+        println!(
+            "  Global skills:    ~{:>6} tokens ({} skills)",
+            format_token_count(global_skill_tokens),
+            global_skill_count,
+        );
+        println!(
+            "  Plugin skills:    ~{:>6} tokens ({} skills from {} plugins)",
+            format_token_count(plugin_tokens),
+            plugin_skill_count,
+            plugins.len(),
+        );
+        println!(
+            "  Agents:           ~{:>6} tokens ({} agents)",
+            format_token_count(agent_tokens),
+            agent_count,
+        );
+        println!(
+            "  CLAUDE.md files:  ~{:>6} tokens",
+            format_token_count(claude_md_tokens),
+        );
+        println!("  {}", "─".repeat(40).dimmed());
+        println!(
+            "  Total:            ~{:>6} tokens",
+            format_token_count(total),
+        );
+        println!();
+
+        if total > 20000 {
+            println!(
+                "  {} High context usage. Consider removing unused skills/plugins.",
+                "!".yellow()
+            );
+            warning_count += 1;
+        } else {
+            println!("  {} Context usage looks reasonable", "✓".green());
+            info_count += 1;
+        }
+        println!();
+    }
+
+    // Summary
+    println!(
+        "{}: {} warnings, {} info",
+        "Summary".bold(),
+        if warning_count > 0 {
+            warning_count.to_string().yellow().to_string()
+        } else {
+            "0".green().to_string()
+        },
+        info_count
+    );
+}
+
+fn format_token_count(tokens: usize) -> String {
+    if tokens >= 1000 {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        format!("{}", tokens)
+    }
+}
+
 fn doctor_command() {
     let home = match dirs::home_dir() {
         Some(h) => h,
@@ -5097,6 +5583,13 @@ pub fn run() {
         }
         Some(Commands::Doctor) => {
             doctor_command();
+        }
+        Some(Commands::TidyUp {
+            skills_only,
+            mcp_only,
+            budget_only,
+        }) => {
+            tidy_up_command(skills_only, mcp_only, budget_only);
         }
         Some(Commands::Permissions {
             filter,
