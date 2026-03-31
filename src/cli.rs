@@ -341,6 +341,12 @@ Examples:
 
 #[derive(Subcommand)]
 enum McpCommands {
+    /// Show how to remove/uninstall each MCP server
+    HowToRemove {
+        #[arg(short, long, help = "Filter MCP servers by name pattern")]
+        filter: Option<String>,
+    },
+
     /// Copy an MCP server config from another project
     Copy {
         #[arg(short, long, help = "Filter MCP servers by name pattern")]
@@ -1139,6 +1145,119 @@ fn skill_how_to_remove_command(filter: Option<String>) {
                 also.bold(),
             );
         }
+        println!();
+    }
+}
+
+fn mcp_how_to_remove_command(filter: Option<String>) {
+    let home = dirs::home_dir().expect("Could not find home directory");
+
+    struct McpRemoveEntry {
+        name: String,
+        server_type: String,
+        scope: String,
+        installed_via: Option<String>,
+        command: String,
+    }
+
+    let mut entries: Vec<McpRemoveEntry> = Vec::new();
+
+    // 1. Global MCP servers (~/.claude/.mcp.json)
+    let global_mcp = home.join(".claude/.mcp.json");
+    if global_mcp.exists() {
+        for server in parse_mcp_json(&global_mcp) {
+            entries.push(McpRemoveEntry {
+                name: server.name.clone(),
+                server_type: server.server_type,
+                scope: "global".to_string(),
+                installed_via: None,
+                command: format!(
+                    "Edit ~/.claude/.mcp.json and remove \"{}\" from mcpServers",
+                    server.name
+                ),
+            });
+        }
+    }
+
+    // 2. Plugin MCP servers
+    let plugin_mcps = load_plugin_mcp_definitions();
+    for (name, server) in &plugin_mcps {
+        // Extract plugin name from source path (marketplaces/.../external_plugins/{plugin}/.mcp.json)
+        let plugin_name = Path::new(&server.source)
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        entries.push(McpRemoveEntry {
+            name: name.clone(),
+            server_type: server.server_type.clone(),
+            scope: format!("plugin:{}", plugin_name),
+            installed_via: Some(format!("plugin ({})", plugin_name)),
+            command: format!("claude plugin uninstall {}", plugin_name),
+        });
+    }
+
+    // 3. Project MCP servers
+    if let Ok(config) = load_claude_config() {
+        if let Some(projects) = config.projects {
+            for project_path in projects.keys() {
+                let project_dir = Path::new(project_path);
+                if !project_dir.exists() {
+                    continue;
+                }
+                let mcp_file = project_dir.join(".mcp.json");
+                if !mcp_file.exists() {
+                    continue;
+                }
+                for server in parse_mcp_json(&mcp_file) {
+                    let short = shorten_path(project_path);
+                    entries.push(McpRemoveEntry {
+                        name: server.name.clone(),
+                        server_type: server.server_type,
+                        scope: format!("project:{}", short),
+                        installed_via: None,
+                        command: format!(
+                            "Edit {}/.mcp.json and remove \"{}\" from mcpServers",
+                            project_path, server.name
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    // Apply filter
+    if let Some(ref f) = filter {
+        let f_lower = f.to_lowercase();
+        entries.retain(|e| e.name.to_lowercase().contains(&f_lower));
+    }
+
+    if entries.is_empty() {
+        println!("{}", "No MCP servers found.".dimmed());
+        return;
+    }
+
+    println!("{} MCP servers found\n", entries.len().to_string().cyan());
+
+    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(10).min(30);
+
+    for entry in &entries {
+        let type_colored = match entry.server_type.as_str() {
+            "stdio" => format!("({})", entry.server_type).green(),
+            "http" | "sse" => format!("({})", entry.server_type).cyan(),
+            _ => format!("({})", entry.server_type).dimmed(),
+        };
+        println!(
+            "  {:<width$} {} {}",
+            entry.name.bright_cyan(),
+            type_colored,
+            format!("[{}]", entry.scope).dimmed(),
+            width = max_name,
+        );
+        if let Some(ref via) = entry.installed_via {
+            println!("    {} {}", "installed via:".dimmed(), via);
+        }
+        println!("    {} {}", "remove:".dimmed(), entry.command.bold());
         println!();
     }
 }
@@ -2846,10 +2965,11 @@ fn parse_mcp_json(mcp_file: &Path) -> Vec<McpServerInfo> {
 
     if let Some(mcp_servers) = mcp_obj {
         for (name, config) in mcp_servers {
+            let has_command = config.get("command").is_some();
             let server_type = config
                 .get("type")
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
+                .unwrap_or(if has_command { "stdio" } else { "http" })
                 .to_string();
             let command = config.get("command").and_then(|v| v.as_str()).map(|s| {
                 let args = config
@@ -3026,10 +3146,11 @@ fn scan_mcp_sources(project_dir: &Path) -> Vec<McpSource> {
 
     if let Some(mcp_servers) = json.get("mcpServers").and_then(|v| v.as_object()) {
         for (name, config) in mcp_servers {
+            let has_command = config.get("command").is_some();
             let server_type = config
                 .get("type")
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
+                .unwrap_or(if has_command { "stdio" } else { "http" })
                 .to_string();
             let command = config.get("command").and_then(|v| v.as_str()).map(|s| {
                 let args = config
@@ -5569,6 +5690,9 @@ pub fn run() {
             }
         },
         Some(Commands::Mcp { command }) => match command {
+            McpCommands::HowToRemove { filter } => {
+                mcp_how_to_remove_command(filter);
+            }
             McpCommands::Copy {
                 filter,
                 from,
