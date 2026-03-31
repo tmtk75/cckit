@@ -341,6 +341,18 @@ Examples:
 
 #[derive(Subcommand)]
 enum McpCommands {
+    /// List all MCP servers with their origin
+    Ls {
+        #[arg(short, long, help = "Filter MCP servers by name pattern")]
+        filter: Option<String>,
+
+        #[arg(long, help = "Show only a specific scope (global, plugin, project)")]
+        scope: Option<String>,
+
+        #[arg(long, help = "Show only servers that exist in multiple projects")]
+        dupes: bool,
+    },
+
     /// Show how to remove/uninstall each MCP server
     HowToRemove {
         #[arg(short, long, help = "Filter MCP servers by name pattern")]
@@ -1146,6 +1158,146 @@ fn skill_how_to_remove_command(filter: Option<String>) {
             );
         }
         println!();
+    }
+}
+
+fn mcp_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) {
+    let home = dirs::home_dir().expect("Could not find home directory");
+    let global_claude = home.join(".claude");
+
+    struct McpEntry {
+        name: String,
+        server_type: String,
+        command: Option<String>,
+        scope: String,
+    }
+
+    let mut entries: Vec<McpEntry> = Vec::new();
+
+    // 1. Global MCP servers (~/.claude/.mcp.json)
+    let global_mcp = global_claude.join(".mcp.json");
+    if global_mcp.exists() {
+        for server in parse_mcp_json(&global_mcp) {
+            entries.push(McpEntry {
+                name: server.name,
+                server_type: server.server_type,
+                command: server.command,
+                scope: "global".to_string(),
+            });
+        }
+    }
+
+    // 2. Plugin MCP servers
+    let plugin_mcps = load_plugin_mcp_definitions();
+    for (name, server) in &plugin_mcps {
+        let plugin_name = Path::new(&server.source)
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        entries.push(McpEntry {
+            name: name.clone(),
+            server_type: server.server_type.clone(),
+            command: server.command.clone(),
+            scope: format!("plugin:{}", plugin_name),
+        });
+    }
+
+    // 3. Project MCP servers
+    if let Ok(config) = load_claude_config() {
+        if let Some(projects) = config.projects {
+            for project_path in projects.keys() {
+                let project_dir = Path::new(project_path);
+                if !project_dir.exists() {
+                    continue;
+                }
+                for server in scan_mcp_servers(project_dir) {
+                    entries.push(McpEntry {
+                        name: server.name,
+                        server_type: server.server_type,
+                        command: server.command,
+                        scope: format!("project:{}", shorten_path(project_path)),
+                    });
+                }
+            }
+        }
+    }
+
+    // Apply filters
+    if let Some(ref f) = filter {
+        let f_lower = f.to_lowercase();
+        entries.retain(|e| e.name.to_lowercase().contains(&f_lower));
+    }
+    if let Some(ref s) = scope {
+        entries.retain(|e| e.scope.starts_with(s.as_str()));
+    }
+
+    if entries.is_empty() {
+        println!("{}", "No MCP servers found.".dimmed());
+        return;
+    }
+
+    // Group by name
+    let mut by_name: std::collections::BTreeMap<String, Vec<&McpEntry>> =
+        std::collections::BTreeMap::new();
+    for entry in &entries {
+        by_name.entry(entry.name.clone()).or_default().push(entry);
+    }
+
+    if dupes {
+        by_name.retain(|_, locs| locs.len() > 1);
+        if by_name.is_empty() {
+            println!("{}", "No duplicate MCP servers found.".dimmed());
+            return;
+        }
+        println!(
+            "{} MCP servers in multiple locations\n",
+            by_name.len().to_string().cyan()
+        );
+    } else {
+        println!(
+            "{} unique MCP servers ({} total across projects)\n",
+            by_name.len().to_string().cyan(),
+            entries.len().to_string().dimmed()
+        );
+    }
+
+    let max_name = by_name.keys().map(|n| n.len()).max().unwrap_or(10).min(30);
+
+    for (name, locations) in &by_name {
+        let first = locations[0];
+        let type_colored = match first.server_type.as_str() {
+            "stdio" => format!("({})", first.server_type).green(),
+            "http" | "sse" => format!("({})", first.server_type).cyan(),
+            _ => format!("({})", first.server_type).dimmed(),
+        };
+        let cmd_display = first
+            .command
+            .as_deref()
+            .map(|c| truncate_str(c, 50))
+            .unwrap_or_default();
+
+        if locations.len() == 1 {
+            println!(
+                "  {:<width$} {} {} {}",
+                name.bright_cyan(),
+                type_colored,
+                cmd_display.dimmed(),
+                format!("[{}]", first.scope).dimmed(),
+                width = max_name,
+            );
+        } else {
+            println!(
+                "  {:<width$} {} {}",
+                name.bright_cyan(),
+                type_colored,
+                cmd_display.dimmed(),
+                width = max_name,
+            );
+            for loc in locations {
+                println!("    {} {}", "↳".dimmed(), loc.scope.dimmed());
+            }
+        }
     }
 }
 
@@ -5690,6 +5842,13 @@ pub fn run() {
             }
         },
         Some(Commands::Mcp { command }) => match command {
+            McpCommands::Ls {
+                filter,
+                scope,
+                dupes,
+            } => {
+                mcp_ls_command(filter, scope, dupes);
+            }
             McpCommands::HowToRemove { filter } => {
                 mcp_how_to_remove_command(filter);
             }
