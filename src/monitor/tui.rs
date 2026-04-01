@@ -4,6 +4,7 @@ use super::focus;
 use super::menubar;
 use super::session::{Session, SessionStatus, TuiState};
 use super::storage::Storage;
+use crate::monitor::theme::{self, StatusColor, anim, palette};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -14,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 use std::io;
 use std::time::{Duration, Instant};
@@ -24,6 +25,7 @@ struct App {
     selected_index: usize,
     should_quit: bool,
     message: Option<String>,
+    anim_start: Instant,
 }
 
 impl App {
@@ -33,6 +35,7 @@ impl App {
             selected_index: 0,
             should_quit: false,
             message: None,
+            anim_start: Instant::now(),
         }
     }
 
@@ -90,7 +93,7 @@ impl Default for TuiConfig {
             check_interval_ms: 2000,
             poll_interval_ms: 500,
             menu_update_interval_ms: 2000,
-            event_timeout_ms: 500,
+            event_timeout_ms: anim::TUI_TICK_MS,
         }
     }
 }
@@ -371,7 +374,27 @@ fn get_current_tty() -> Option<String> {
     None
 }
 
+/// Apply brightness multiplier to an RGB tuple
+fn apply_brightness(rgb: (u8, u8, u8), brightness: f64) -> (u8, u8, u8) {
+    let r = (rgb.0 as f64 * brightness).round().min(255.0) as u8;
+    let g = (rgb.1 as f64 * brightness).round().min(255.0) as u8;
+    let b = (rgb.2 as f64 * brightness).round().min(255.0) as u8;
+    (r, g, b)
+}
+
 fn draw(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    // Outer frame with double border
+    let (gr, gg, gb) = palette::GRID;
+    let (br, bg_r, bb) = palette::BG;
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Rgb(gr, gg, gb)))
+        .style(Style::default().bg(Color::Rgb(br, bg_r, bb)));
+    frame.render_widget(outer_block, area);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -380,10 +403,10 @@ fn draw(frame: &mut Frame, app: &App) {
             Constraint::Min(5),
             Constraint::Length(2),
         ])
-        .split(frame.area());
+        .split(area);
 
     draw_header(frame, chunks[0], app);
-    draw_sessions_table(frame, chunks[1], app);
+    draw_sessions(frame, chunks[1], app);
     draw_footer(frame, chunks[2], app);
 }
 
@@ -391,119 +414,156 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let active_count = app
         .sessions
         .iter()
-        .filter(|s| s.status == SessionStatus::Running)
+        .filter(|s| s.status != SessionStatus::Stopped)
         .count();
+    let total_count = app.sessions.len();
+
+    let (tr, tg, tb) = palette::TEXT;
+    let right_text = format!("{} active / {} total", active_count, total_count);
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            "cckit",
+            "  \u{25C9} CCKIT \u{2500}\u{2500}\u{2500} MISSION CONTROL \u{2500}\u{2500}\u{2500} ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" - "),
-        Span::styled(
-            format!("{} sessions", app.sessions.len()),
-            Style::default().fg(Color::Green),
-        ),
-        Span::raw(" ("),
-        Span::styled(
-            format!("{} active", active_count),
-            Style::default().fg(Color::Yellow),
-        ),
-        Span::raw(")"),
+        Span::styled(right_text, Style::default().fg(Color::Rgb(tr, tg, tb))),
     ]));
 
     frame.render_widget(header, area);
 }
 
-fn draw_sessions_table(frame: &mut Frame, area: Rect, app: &App) {
-    let header_cells = ["", "Status", "Path", "Tool", "PID", "Created", "Updated"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow)));
-    let header = Row::new(header_cells).height(1);
+fn draw_sessions(frame: &mut Frame, area: Rect, app: &App) {
+    if app.sessions.is_empty() {
+        let (dr, dg, db) = palette::TEXT_DIM;
+        let empty = Paragraph::new(Line::from(Span::styled(
+            "  No sessions",
+            Style::default().fg(Color::Rgb(dr, dg, db)),
+        )));
+        frame.render_widget(empty, area);
+        return;
+    }
 
-    let rows: Vec<Row> = app
-        .sessions
-        .iter()
-        .enumerate()
-        .map(|(idx, session)| {
-            let status_style = match session.status {
-                SessionStatus::Running => Style::default().fg(Color::Green),
-                SessionStatus::AwaitingApproval => Style::default().fg(Color::Rgb(255, 165, 0)),
-                SessionStatus::WaitingInput => Style::default().fg(Color::Yellow),
-                SessionStatus::Stopped => Style::default().fg(Color::DarkGray),
-            };
+    let elapsed_secs = app.anim_start.elapsed().as_secs_f64();
+    let mut lines: Vec<Line> = Vec::new();
 
-            let status_text = match session.status {
-                SessionStatus::Running => "● run",
-                SessionStatus::AwaitingApproval => "◐ tool",
-                SessionStatus::WaitingInput => "○ wait",
-                SessionStatus::Stopped => "× done",
-            };
+    for (idx, session) in app.sessions.iter().enumerate() {
+        let is_selected = idx == app.selected_index;
+        let is_stopped = session.status == SessionStatus::Stopped;
 
-            let tool_display = match (&session.last_tool, &session.last_tool_input) {
-                (Some(tool), Some(input)) => format!("{}: {}", tool, input),
-                (Some(tool), None) => tool.clone(),
-                _ => "-".to_string(),
-            };
-            let pid_display = session
-                .pid
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let created = display::format_relative_time(session.created_at);
-            let updated = display::format_relative_time(session.updated_at);
-
-            Row::new(vec![
-                Cell::from(format!("{}", idx + 1)).style(Style::default().fg(Color::Gray)),
-                Cell::from(status_text).style(status_style),
-                Cell::from(if session.is_subagent() {
-                    format!(
-                        "↳{}",
-                        session
-                            .subagent_name
-                            .as_deref()
-                            .unwrap_or(&session.short_cwd())
-                    )
-                } else {
-                    session.short_cwd()
-                }),
-                Cell::from(tool_display).style(Style::default().fg(Color::Cyan)),
-                Cell::from(pid_display).style(Style::default().fg(Color::Gray)),
-                Cell::from(created).style(Style::default().fg(Color::Gray)),
-                Cell::from(updated).style(Style::default().fg(Color::Gray)),
-            ])
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Length(2),
-        Constraint::Length(8),
-        Constraint::Percentage(25),
-        Constraint::Percentage(35),
-        Constraint::Length(7),
-        Constraint::Length(10),
-        Constraint::Length(10),
-    ];
-
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .title(" Sessions ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .row_highlight_style(
+        // Compute highlight background for selected row
+        let bg_style = if is_selected {
+            let (ar, ag, ab) = session.agent_type().accent_rgb();
+            // Scale by /10 for subtle tint
+            let (hr, hg, hb) = (ar / 10, ag / 10, ab / 10);
+            Style::default().bg(Color::Rgb(hr, hg, hb))
+        } else {
             Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        );
+        };
 
-    let mut state = TableState::default();
-    state.select(Some(app.selected_index));
+        // Status dot with animation
+        let (dot_char, status_color) = match session.status {
+            SessionStatus::Running => ("\u{25CF}", StatusColor::Running),
+            SessionStatus::AwaitingApproval => ("\u{25C6}", StatusColor::AwaitingApproval),
+            SessionStatus::WaitingInput => ("\u{25C7}", StatusColor::WaitingInput),
+            SessionStatus::Stopped => ("\u{25CB}", StatusColor::Stopped),
+        };
 
-    frame.render_stateful_widget(table, area, &mut state);
+        let brightness = match session.status {
+            SessionStatus::Running => theme::breathing_pulse(elapsed_secs),
+            SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs),
+            SessionStatus::WaitingInput => theme::slow_fade(elapsed_secs),
+            SessionStatus::Stopped => 1.0,
+        };
+
+        let dot_rgb = apply_brightness(status_color.rgb(), brightness);
+        let dot_color = Color::Rgb(dot_rgb.0, dot_rgb.1, dot_rgb.2);
+
+        let (tr, tg, tb) = palette::TEXT;
+        let (dr, dg, db) = palette::TEXT_DIM;
+        let text_color = Color::Rgb(tr, tg, tb);
+        let dim_color = Color::Rgb(dr, dg, db);
+
+        // Session display values
+        let display_name = session.display_name();
+        let project_name = session.project_name();
+        let tool = session.last_tool.as_deref().unwrap_or("-");
+        let elapsed = display::format_elapsed_short(session.updated_at);
+
+        // Context ratio
+        let context_ratio = match (session.context_used_tokens, session.context_max_tokens) {
+            (Some(used), Some(max)) if max > 0 => used as f64 / max as f64,
+            _ => 0.0,
+        };
+        let context_pct = format!("{}%", (context_ratio * 100.0).round() as u32);
+
+        // Row 1: status dot + display_name + separators + tool + elapsed + context%
+        let row1_style = if is_stopped {
+            Style::default().fg(dim_color)
+        } else {
+            Style::default().fg(text_color)
+        };
+
+        let mut row1_spans = vec![
+            Span::styled(format!("  {} ", dot_char), bg_style.fg(dot_color)),
+            Span::styled(
+                display_name.clone(),
+                bg_style.patch(row1_style).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" \u{2502} ", bg_style.fg(dim_color)),
+            Span::styled(project_name.to_string(), bg_style.patch(row1_style)),
+            Span::styled(" \u{2502} ", bg_style.fg(dim_color)),
+            Span::styled(tool.to_string(), bg_style.fg(Color::Cyan)),
+            Span::styled(" \u{2502} ", bg_style.fg(dim_color)),
+            Span::styled(elapsed.clone(), bg_style.fg(dim_color)),
+        ];
+
+        if !is_stopped {
+            row1_spans.push(Span::styled(" \u{2502} ", bg_style.fg(dim_color)));
+            row1_spans.push(Span::styled(
+                context_pct.clone(),
+                bg_style.patch(row1_style),
+            ));
+        }
+
+        lines.push(Line::from(row1_spans));
+
+        // Row 2: context bar + stats (only for non-stopped sessions)
+        if !is_stopped {
+            let bar_width = 20;
+            let filled = (context_ratio * bar_width as f64).round() as usize;
+            let empty = bar_width - filled;
+
+            let gauge_rgb = theme::context_gauge_rgb(context_ratio);
+            let gauge_color = Color::Rgb(gauge_rgb.0, gauge_rgb.1, gauge_rgb.2);
+
+            let filled_str: String = "\u{2588}".repeat(filled);
+            let empty_str: String = "\u{2591}".repeat(empty);
+
+            let stats = display::session_count_parts(session).join(" ");
+
+            let row2_spans = vec![
+                Span::styled("    ", bg_style),
+                Span::styled(filled_str, bg_style.fg(gauge_color)),
+                Span::styled(empty_str, bg_style.fg(dim_color)),
+                Span::styled(format!(" {}", stats), bg_style.fg(dim_color)),
+            ];
+
+            lines.push(Line::from(row2_spans));
+        }
+
+        // Separator between sessions (not after the last one)
+        if idx < app.sessions.len() - 1 {
+            lines.push(Line::from(Span::styled(
+                "  \u{2500} \u{2500} \u{2500} \u{2500}",
+                Style::default().fg(dim_color),
+            )));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
@@ -514,7 +574,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         )])
     } else {
         Line::from(vec![
-            Span::styled("↑↓/jk", Style::default().fg(Color::Cyan)),
+            Span::styled("\u{2191}\u{2193}/jk", Style::default().fg(Color::Cyan)),
             Span::raw(" Select  "),
             Span::styled("Enter/f", Style::default().fg(Color::Cyan)),
             Span::raw(" Focus  "),
@@ -631,5 +691,12 @@ mod tests {
         app.sessions = vec![create_test_session("test")];
         assert!(app.selected_session().is_some());
         assert_eq!(app.selected_session().unwrap().session_id, "test");
+    }
+
+    #[test]
+    fn test_apply_brightness() {
+        assert_eq!(apply_brightness((100, 200, 50), 1.0), (100, 200, 50));
+        assert_eq!(apply_brightness((100, 200, 50), 0.5), (50, 100, 25));
+        assert_eq!(apply_brightness((255, 255, 255), 0.0), (0, 0, 0));
     }
 }

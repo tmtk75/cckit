@@ -110,6 +110,10 @@ impl Session {
         }
     }
 
+    pub fn agent_type(&self) -> crate::monitor::theme::AgentType {
+        crate::monitor::theme::AgentType::from_model(self.model.as_deref())
+    }
+
     pub fn short_cwd(&self) -> String {
         if let Some(home) = dirs::home_dir() {
             let home_str = home.to_string_lossy();

@@ -1,0 +1,471 @@
+//! Centralized Mission Control theme: colors, agent types, animation parameters, and layout constants.
+
+// ---------------------------------------------------------------------------
+// AgentType
+// ---------------------------------------------------------------------------
+
+/// The AI agent/model type detected from a session's model string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentType {
+    Claude,
+    Codex,
+    Gemini,
+    Unknown,
+}
+
+impl AgentType {
+    /// Detect the agent type from a model name string.
+    pub fn from_model(model: Option<&str>) -> Self {
+        match model {
+            Some(m) if m.contains("claude") => Self::Claude,
+            Some(m)
+                if m.contains("gpt")
+                    || m.contains("o1")
+                    || m.contains("o3")
+                    || m.contains("codex") =>
+            {
+                Self::Codex
+            }
+            Some(m) if m.contains("gemini") => Self::Gemini,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Accent color as `(r, g, b)` u8 tuple.
+    pub fn accent_rgb(self) -> (u8, u8, u8) {
+        match self {
+            Self::Claude => (0xd9, 0x77, 0x57),  // #d97757 terracotta
+            Self::Codex => (0x22, 0xc5, 0x5e),   // #22c55e green
+            Self::Gemini => (0x3b, 0x82, 0xf6),  // #3b82f6 blue
+            Self::Unknown => (0xa8, 0x55, 0xf7), // #a855f7 purple
+        }
+    }
+
+    /// Accent color as a CSS hex string.
+    pub fn accent_hex(self) -> &'static str {
+        match self {
+            Self::Claude => "#d97757",
+            Self::Codex => "#22c55e",
+            Self::Gemini => "#3b82f6",
+            Self::Unknown => "#a855f7",
+        }
+    }
+
+    /// Accent color as `(r, g, b)` f64 values in `[0.0, 1.0]`.
+    pub fn accent_f64(self) -> (f64, f64, f64) {
+        let (r, g, b) = self.accent_rgb();
+        (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StatusColor
+// ---------------------------------------------------------------------------
+
+/// Semantic color for each session status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusColor {
+    Running,
+    AwaitingApproval,
+    WaitingInput,
+    Stopped,
+}
+
+impl StatusColor {
+    /// Color as `(r, g, b)` u8 tuple.
+    pub fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            Self::Running => (0x22, 0xc5, 0x5e),          // green #22c55e
+            Self::AwaitingApproval => (0xef, 0x44, 0x44), // red #ef4444
+            Self::WaitingInput => (0xf5, 0x9e, 0x0b),     // amber #f59e0b
+            Self::Stopped => (0x47, 0x55, 0x69),          // slate #475569
+        }
+    }
+
+    /// Color as a CSS hex string.
+    pub fn hex(self) -> &'static str {
+        match self {
+            Self::Running => "#22c55e",
+            Self::AwaitingApproval => "#ef4444",
+            Self::WaitingInput => "#f59e0b",
+            Self::Stopped => "#475569",
+        }
+    }
+
+    /// Color as `(r, g, b)` f64 values in `[0.0, 1.0]`.
+    pub fn f64(self) -> (f64, f64, f64) {
+        let (r, g, b) = self.rgb();
+        (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Palette
+// ---------------------------------------------------------------------------
+
+/// Base palette constants shared across all UI surfaces.
+pub mod palette {
+    /// Background — deepest dark.
+    pub const BG: (u8, u8, u8) = (0x0a, 0x0a, 0x0f);
+    /// Surface — card / panel background.
+    pub const SURFACE: (u8, u8, u8) = (0x12, 0x12, 0x1a);
+    /// Grid dot color.
+    pub const GRID: (u8, u8, u8) = (0x1a, 0x1a, 0x2e);
+    /// Primary text.
+    pub const TEXT: (u8, u8, u8) = (0xe2, 0xe8, 0xf0);
+    /// Dimmed / secondary text.
+    pub const TEXT_DIM: (u8, u8, u8) = (0x64, 0x74, 0x8b);
+    /// Border alpha (applied on top of surface).
+    pub const BORDER_ALPHA: f64 = 0.08;
+}
+
+// ---------------------------------------------------------------------------
+// Context gauge gradient
+// ---------------------------------------------------------------------------
+
+/// Return an RGB color for a context-usage gauge, interpolating
+/// green (#22c55e) → yellow (#eab308) → red (#ef4444) as `ratio` goes from 0.0 to 1.0.
+pub fn context_gauge_rgb(ratio: f64) -> (u8, u8, u8) {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let green: (u8, u8, u8) = (0x22, 0xc5, 0x5e);
+    let yellow: (u8, u8, u8) = (0xea, 0xb3, 0x08);
+    let red: (u8, u8, u8) = (0xef, 0x44, 0x44);
+
+    let (from, to, t) = if ratio <= 0.5 {
+        (green, yellow, ratio / 0.5)
+    } else {
+        (yellow, red, (ratio - 0.5) / 0.5)
+    };
+
+    let lerp =
+        |a: u8, b: u8, t: f64| -> u8 { (a as f64 + (b as f64 - a as f64) * t).round() as u8 };
+    (
+        lerp(from.0, to.0, t),
+        lerp(from.1, to.1, t),
+        lerp(from.2, to.2, t),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Animation timing constants and helpers
+// ---------------------------------------------------------------------------
+
+/// Animation timing parameters (all in seconds unless noted).
+pub mod anim {
+    /// Period for the breathing / pulse animation.
+    pub const BREATHING_PERIOD: f64 = 1.5;
+    /// Period for fast-blink indicators (e.g. AwaitingApproval dot).
+    pub const FAST_BLINK_PERIOD: f64 = 0.5;
+    /// Period for slow opacity fade.
+    pub const SLOW_FADE_PERIOD: f64 = 3.0;
+    /// Period for glow ring animation.
+    pub const GLOW_PERIOD: f64 = 2.0;
+    /// Period for context-bar pulse.
+    pub const CONTEXT_PULSE_PERIOD: f64 = 1.0;
+    /// Ripple decay half-life.
+    pub const RIPPLE_DECAY: f64 = 0.3;
+    /// Card appear animation duration.
+    pub const CARD_APPEAR: f64 = 0.2;
+    /// Card disappear animation duration.
+    pub const CARD_DISAPPEAR: f64 = 0.15;
+    /// Delay between each character in typewriter animations.
+    pub const TYPEWRITER_DELAY: f64 = 0.02;
+    /// Status-bar blink period.
+    pub const STATUSBAR_BLINK_PERIOD: f64 = 1.0;
+    /// TUI tick interval in milliseconds.
+    pub const TUI_TICK_MS: u64 = 200;
+}
+
+/// Breathing pulse: returns a value in `[0.4, 1.0]` that oscillates
+/// sinusoidally with period `BREATHING_PERIOD`.
+pub fn breathing_pulse(elapsed: f64) -> f64 {
+    let phase = (elapsed / anim::BREATHING_PERIOD) * std::f64::consts::TAU;
+    0.7 + 0.3 * phase.sin() // range: 0.4 to 1.0
+}
+
+/// Fast blink: returns `1.0` or `0.2` alternating each half `FAST_BLINK_PERIOD`.
+pub fn fast_blink(elapsed: f64) -> f64 {
+    let phase = elapsed % anim::FAST_BLINK_PERIOD;
+    if phase < anim::FAST_BLINK_PERIOD * 0.5 {
+        1.0
+    } else {
+        0.2
+    }
+}
+
+/// Slow fade: returns a value in `[0.6, 1.0]` with period `SLOW_FADE_PERIOD`.
+pub fn slow_fade(elapsed: f64) -> f64 {
+    let phase = (elapsed / anim::SLOW_FADE_PERIOD) * std::f64::consts::TAU;
+    0.8 + 0.2 * phase.sin() // range: 0.6 to 1.0
+}
+
+// ---------------------------------------------------------------------------
+// Window layout constants
+// ---------------------------------------------------------------------------
+
+/// Layout constants for the macOS session monitor window.
+pub mod window_layout {
+    /// Default window width in points.
+    pub const WIDTH: f64 = 680.0;
+    /// Minimum window height in points.
+    pub const MIN_HEIGHT: f64 = 140.0;
+    /// Height of each session card.
+    pub const CARD_HEIGHT: f64 = 64.0;
+    /// Vertical spacing between cards.
+    pub const CARD_SPACING: f64 = 4.0;
+    /// Corner radius of each card.
+    pub const CARD_CORNER_RADIUS: f64 = 8.0;
+    /// Width of the accent color bar on the left edge of a card.
+    pub const CARD_ACCENT_BAR_WIDTH: f64 = 3.0;
+    /// Height of the window header.
+    pub const HEADER_HEIGHT: f64 = 28.0;
+    /// Height of the window footer.
+    pub const FOOTER_HEIGHT: f64 = 28.0;
+    /// Primary font size in points.
+    pub const FONT_SIZE: f64 = 11.5;
+    /// Small / secondary font size in points.
+    pub const FONT_SIZE_SMALL: f64 = 10.0;
+    /// Diameter of status indicator dots.
+    pub const DOT_SIZE: f64 = 8.0;
+    /// Grid dot spacing.
+    pub const GRID_SPACING: f64 = 20.0;
+    /// Radius of each grid dot.
+    pub const GRID_DOT_RADIUS: f64 = 1.0;
+}
+
+// ---------------------------------------------------------------------------
+// Notification layout constants
+// ---------------------------------------------------------------------------
+
+/// Layout constants for the macOS notification overlay window.
+pub mod notif_layout {
+    /// Notification window width in points.
+    pub const WIDTH: f64 = 340.0;
+    /// Minimum height in points.
+    pub const MIN_HEIGHT: f64 = 68.0;
+    /// Maximum height in points (for multi-line messages).
+    pub const MAX_HEIGHT: f64 = 320.0;
+    /// Corner radius in points.
+    pub const CORNER_RADIUS: f64 = 12.0;
+    /// Internal padding.
+    pub const PADDING: f64 = 14.0;
+    /// Width of the accent bar.
+    pub const ACCENT_BAR_WIDTH: f64 = 3.0;
+    /// Default window opacity.
+    pub const DEFAULT_OPACITY: f64 = 0.92;
+    /// Background color as CSS hex.
+    pub const BG_HEX: &str = "#1a1a2e";
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- AgentType ---
+
+    #[test]
+    fn test_agent_type_from_model_claude() {
+        assert_eq!(
+            AgentType::from_model(Some("claude-3-5-sonnet-20241022")),
+            AgentType::Claude
+        );
+    }
+
+    #[test]
+    fn test_agent_type_from_model_codex() {
+        assert_eq!(
+            AgentType::from_model(Some("codex-mini-latest")),
+            AgentType::Codex
+        );
+    }
+
+    #[test]
+    fn test_agent_type_from_model_gpt() {
+        assert_eq!(AgentType::from_model(Some("gpt-4o")), AgentType::Codex);
+    }
+
+    #[test]
+    fn test_agent_type_from_model_gemini() {
+        assert_eq!(
+            AgentType::from_model(Some("gemini-2.0-flash")),
+            AgentType::Gemini
+        );
+    }
+
+    #[test]
+    fn test_agent_type_from_model_none() {
+        assert_eq!(AgentType::from_model(None), AgentType::Unknown);
+    }
+
+    #[test]
+    fn test_agent_type_from_model_unknown_string() {
+        assert_eq!(
+            AgentType::from_model(Some("some-future-model")),
+            AgentType::Unknown
+        );
+    }
+
+    #[test]
+    fn test_agent_type_accent_rgb_claude() {
+        let (r, g, b) = AgentType::Claude.accent_rgb();
+        assert_eq!((r, g, b), (0xd9, 0x77, 0x57));
+    }
+
+    #[test]
+    fn test_agent_type_accent_hex() {
+        assert_eq!(AgentType::Claude.accent_hex(), "#d97757");
+        assert_eq!(AgentType::Codex.accent_hex(), "#22c55e");
+        assert_eq!(AgentType::Gemini.accent_hex(), "#3b82f6");
+        assert_eq!(AgentType::Unknown.accent_hex(), "#a855f7");
+    }
+
+    #[test]
+    fn test_agent_type_accent_f64_range() {
+        for agent in [
+            AgentType::Claude,
+            AgentType::Codex,
+            AgentType::Gemini,
+            AgentType::Unknown,
+        ] {
+            let (r, g, b) = agent.accent_f64();
+            assert!((0.0..=1.0).contains(&r));
+            assert!((0.0..=1.0).contains(&g));
+            assert!((0.0..=1.0).contains(&b));
+        }
+    }
+
+    #[test]
+    fn test_agent_type_accent_f64_consistency() {
+        // f64 values should be consistent with rgb() / 255
+        let agent = AgentType::Claude;
+        let (r8, g8, b8) = agent.accent_rgb();
+        let (rf, gf, bf) = agent.accent_f64();
+        assert!((rf - r8 as f64 / 255.0).abs() < 1e-10);
+        assert!((gf - g8 as f64 / 255.0).abs() < 1e-10);
+        assert!((bf - b8 as f64 / 255.0).abs() < 1e-10);
+    }
+
+    // --- StatusColor ---
+
+    #[test]
+    fn test_status_color_rgb() {
+        assert_eq!(StatusColor::Running.rgb(), (0x22, 0xc5, 0x5e));
+        assert_eq!(StatusColor::AwaitingApproval.rgb(), (0xef, 0x44, 0x44));
+    }
+
+    #[test]
+    fn test_status_color_hex() {
+        assert_eq!(StatusColor::Running.hex(), "#22c55e");
+        assert_eq!(StatusColor::AwaitingApproval.hex(), "#ef4444");
+        assert_eq!(StatusColor::WaitingInput.hex(), "#f59e0b");
+        assert_eq!(StatusColor::Stopped.hex(), "#475569");
+    }
+
+    #[test]
+    fn test_status_color_f64_range() {
+        for sc in [
+            StatusColor::Running,
+            StatusColor::AwaitingApproval,
+            StatusColor::WaitingInput,
+            StatusColor::Stopped,
+        ] {
+            let (r, g, b) = sc.f64();
+            assert!((0.0..=1.0).contains(&r));
+            assert!((0.0..=1.0).contains(&g));
+            assert!((0.0..=1.0).contains(&b));
+        }
+    }
+
+    // --- context_gauge_rgb ---
+
+    #[test]
+    fn test_context_gauge_rgb_zero() {
+        let (r, g, b) = context_gauge_rgb(0.0);
+        assert_eq!((r, g, b), (0x22, 0xc5, 0x5e)); // green
+    }
+
+    #[test]
+    fn test_context_gauge_rgb_half() {
+        let (r, g, b) = context_gauge_rgb(0.5);
+        assert_eq!((r, g, b), (0xea, 0xb3, 0x08)); // yellow
+    }
+
+    #[test]
+    fn test_context_gauge_rgb_full() {
+        let (r, g, b) = context_gauge_rgb(1.0);
+        assert_eq!((r, g, b), (0xef, 0x44, 0x44)); // red
+    }
+
+    #[test]
+    fn test_context_gauge_rgb_clamp() {
+        // Values outside [0,1] should clamp without panic
+        let _ = context_gauge_rgb(-0.5);
+        let _ = context_gauge_rgb(1.5);
+    }
+
+    // --- Animation functions ---
+
+    #[test]
+    fn test_breathing_pulse_range() {
+        for i in 0..100 {
+            let t = i as f64 * 0.05;
+            let v = breathing_pulse(t);
+            assert!(v >= 0.39 && v <= 1.01, "breathing_pulse({t}) = {v}");
+        }
+    }
+
+    #[test]
+    fn test_breathing_pulse_midpoint() {
+        let v = breathing_pulse(0.0);
+        assert!((v - 0.7).abs() < 0.01); // midpoint at t=0
+    }
+
+    #[test]
+    fn test_fast_blink_values() {
+        assert!((fast_blink(0.0) - 1.0).abs() < 0.01);
+        assert!((fast_blink(0.5) - 1.0).abs() < 0.01); // next period start
+        let past = anim::FAST_BLINK_PERIOD * 0.5 + 0.001;
+        assert!((fast_blink(past) - 0.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_slow_fade_range() {
+        for i in 0..100 {
+            let t = i as f64 * 0.1;
+            let v = slow_fade(t);
+            assert!(v >= 0.59 && v <= 1.01, "slow_fade({t}) = {v}");
+        }
+    }
+
+    // --- window_layout ---
+
+    #[test]
+    fn test_window_layout_positive() {
+        assert!(window_layout::WIDTH > 0.0);
+        assert!(window_layout::CARD_HEIGHT > 0.0);
+        assert!(window_layout::HEADER_HEIGHT > 0.0);
+        assert!(window_layout::FOOTER_HEIGHT > 0.0);
+    }
+
+    // --- notif_layout ---
+
+    #[test]
+    fn test_notif_layout_bounds() {
+        assert!(notif_layout::MIN_HEIGHT < notif_layout::MAX_HEIGHT);
+        assert!(notif_layout::DEFAULT_OPACITY > 0.0);
+        assert!(notif_layout::DEFAULT_OPACITY <= 1.0);
+        assert_eq!(notif_layout::BG_HEX, "#1a1a2e");
+    }
+
+    // --- palette ---
+
+    #[test]
+    fn test_palette_border_alpha() {
+        assert!(palette::BORDER_ALPHA > 0.0);
+        assert!(palette::BORDER_ALPHA < 1.0);
+    }
+}

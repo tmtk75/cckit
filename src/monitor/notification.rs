@@ -1,13 +1,17 @@
 // macOS custom notification window implementation
 
 use super::paths;
+use super::session::SessionStatus;
+use super::theme::{StatusColor, anim, notif_layout};
 use objc2::rc::Retained;
 use objc2::{MainThreadOnly, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSFont, NSScreen,
     NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
-use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString, NSTimer,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
@@ -104,6 +108,8 @@ pub struct NotifyOptions {
     pub margin: Option<f64>,
     pub opacity: Option<f64>,
     pub bgcolor: Option<String>,
+    /// Optional session status for dynamic accent bar coloring.
+    pub status: Option<SessionStatus>,
 }
 
 pub fn parse_hex_color(s: &str) -> Result<(f64, f64, f64), String> {
@@ -144,18 +150,12 @@ impl Default for NotifyOptions {
             margin: None,
             opacity: None,
             bgcolor: None,
+            status: None,
         }
     }
 }
 
-const DEFAULT_WIDTH: CGFloat = 340.0;
-const MIN_HEIGHT: CGFloat = 68.0;
-const MAX_HEIGHT: CGFloat = 320.0;
 const DEFAULT_MARGIN: CGFloat = 10.0;
-const DEFAULT_OPACITY: CGFloat = 0.92;
-const DEFAULT_BGCOLOR: &str = "#1a1a2e";
-const CORNER_RADIUS: CGFloat = 8.0;
-const PADDING: CGFloat = 14.0;
 
 const TITLE_HEIGHT: CGFloat = 18.0;
 const SUBTITLE_HEIGHT: CGFloat = 15.0;
@@ -163,20 +163,32 @@ const TITLE_FONT_SIZE: CGFloat = 11.5;
 const SUBTITLE_FONT_SIZE: CGFloat = 10.0;
 const MESSAGE_FONT_SIZE: CGFloat = 10.5;
 
+/// Return `(r, g, b)` f64 accent color for the notification bar based on session status.
+fn accent_color_for_status(status: Option<&SessionStatus>) -> (f64, f64, f64) {
+    match status {
+        Some(SessionStatus::Running) => StatusColor::Running.f64(),
+        Some(SessionStatus::AwaitingApproval) => StatusColor::AwaitingApproval.f64(),
+        Some(SessionStatus::WaitingInput) => StatusColor::WaitingInput.f64(),
+        // Default: keep the original purple (#6C5CE7)
+        _ => (0.424, 0.361, 0.906),
+    }
+}
+
 pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>> {
     let mtm = MainThreadMarker::new().ok_or("Must run on main thread")?;
 
-    let window_width = opts.width.unwrap_or(DEFAULT_WIDTH);
+    let padding = notif_layout::PADDING;
+    let window_width = opts.width.unwrap_or(notif_layout::WIDTH);
     let margin = opts.margin.unwrap_or(DEFAULT_MARGIN);
-    let opacity = opts.opacity.unwrap_or(DEFAULT_OPACITY);
-    let bgcolor_str = opts.bgcolor.as_deref().unwrap_or(DEFAULT_BGCOLOR);
+    let opacity = opts.opacity.unwrap_or(notif_layout::DEFAULT_OPACITY);
+    let bgcolor_str = opts.bgcolor.as_deref().unwrap_or(notif_layout::BG_HEX);
     let (bg_r, bg_g, bg_b) = parse_hex_color(bgcolor_str)?;
 
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     // Calculate content width for text measurement
-    let content_width = window_width - PADDING * 2.0;
+    let content_width = window_width - padding * 2.0;
 
     // Calculate message height based on text content
     let msg_height = calculate_text_height(mtm, &opts.message, content_width, MESSAGE_FONT_SIZE);
@@ -184,16 +196,16 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
     // Calculate total window height
     let has_subtitle = opts.subtitle.as_ref().is_some_and(|s| !s.is_empty());
     let header_height = if has_subtitle {
-        TITLE_HEIGHT + SUBTITLE_HEIGHT + PADDING
+        TITLE_HEIGHT + SUBTITLE_HEIGHT + padding
     } else {
-        TITLE_HEIGHT + PADDING
+        TITLE_HEIGHT + padding
     };
 
     let window_height = if let Some(h) = opts.height {
         h // Use explicit height if provided
     } else {
-        let calculated = header_height + msg_height + PADDING * 2.0;
-        calculated.clamp(MIN_HEIGHT, MAX_HEIGHT)
+        let calculated = header_height + msg_height + padding * 2.0;
+        calculated.clamp(notif_layout::MIN_HEIGHT, notif_layout::MAX_HEIGHT)
     };
 
     // Get screen size
@@ -241,7 +253,7 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
 
     // Set corner radius and background color
     if let Some(layer) = content_view.layer() {
-        layer.setCornerRadius(CORNER_RADIUS);
+        layer.setCornerRadius(notif_layout::CORNER_RADIUS);
         layer.setMasksToBounds(true);
         // Set background color
         let bg_color = NSColor::colorWithRed_green_blue_alpha(bg_r, bg_g, bg_b, 1.0);
@@ -250,23 +262,27 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
     }
 
     // Calculate vertical positions
-    let title_y = window_height - TITLE_HEIGHT - PADDING;
+    let title_y = window_height - TITLE_HEIGHT - padding;
 
-    // Accent bar (left edge)
+    // Accent bar (left edge) — color depends on session status
     let accent_bar = NSView::initWithFrame(
         NSView::alloc(mtm),
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(3.0, window_height)),
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(notif_layout::ACCENT_BAR_WIDTH, window_height),
+        ),
     );
     accent_bar.setWantsLayer(true);
     if let Some(layer) = accent_bar.layer() {
-        let accent_color = NSColor::colorWithRed_green_blue_alpha(0.424, 0.361, 0.906, 1.0); // #6C5CE7
+        let (ar, ag, ab) = accent_color_for_status(opts.status.as_ref());
+        let accent_color = NSColor::colorWithRed_green_blue_alpha(ar, ag, ab, 1.0);
         layer.setBackgroundColor(Some(&accent_color.CGColor()));
     }
     content_view.addSubview(&accent_bar);
 
     // Title label with accent color
     let title_rect = NSRect::new(
-        NSPoint::new(PADDING, title_y),
+        NSPoint::new(padding, title_y),
         NSSize::new(content_width, TITLE_HEIGHT),
     );
     let title_label = create_label(mtm, &opts.title, title_rect, TITLE_FONT_SIZE, true);
@@ -282,7 +298,7 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
         && !subtitle.is_empty()
     {
         let subtitle_rect = NSRect::new(
-            NSPoint::new(PADDING, subtitle_y),
+            NSPoint::new(padding, subtitle_y),
             NSSize::new(content_width, SUBTITLE_HEIGHT),
         );
         let subtitle_label = create_label(mtm, subtitle, subtitle_rect, SUBTITLE_FONT_SIZE, false);
@@ -300,7 +316,7 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
     let sep_view = NSView::initWithFrame(
         NSView::alloc(mtm),
         NSRect::new(
-            NSPoint::new(PADDING, sep_y),
+            NSPoint::new(padding, sep_y),
             NSSize::new(content_width, 1.0),
         ),
     );
@@ -313,14 +329,14 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
 
     // Message label (monospace) - fill remaining space
     let msg_top = sep_y - 6.0;
-    let msg_y = PADDING;
+    let msg_y = padding;
     let actual_msg_height = (msg_top - msg_y).max(TITLE_HEIGHT);
     let msg_rect = NSRect::new(
-        NSPoint::new(PADDING, msg_y),
+        NSPoint::new(padding, msg_y),
         NSSize::new(content_width, actual_msg_height),
     );
-    let msg_label =
-        create_label_with_wrap(mtm, &opts.message, msg_rect, MESSAGE_FONT_SIZE, false, true);
+    // Start with empty text for typewriter effect
+    let msg_label = create_label_with_wrap(mtm, "", msg_rect, MESSAGE_FONT_SIZE, false, true);
     // Use monospace font for message
     let mono_font = NSFont::monospacedSystemFontOfSize_weight(MESSAGE_FONT_SIZE, 0.0);
     msg_label.setFont(Some(&mono_font));
@@ -342,6 +358,36 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
     // Animate fade-in
     animate_alpha(&window, opacity, 0.3);
 
+    // Typewriter effect: reveal message one character at a time
+    let full_message: Vec<char> = opts.message.chars().collect();
+    let total_chars = full_message.len();
+    let char_index = std::cell::Cell::new(0usize);
+    let typewriter_timer = if total_chars > 0 {
+        let block = block2::RcBlock::new(move |timer: std::ptr::NonNull<NSTimer>| {
+            let idx = char_index.get();
+            if idx >= total_chars {
+                // All characters revealed — stop the timer
+                unsafe { timer.as_ref().invalidate() };
+                return;
+            }
+            let next = idx + 1;
+            char_index.set(next);
+            let partial: String = full_message[..next].iter().collect();
+            let ns_str = NSString::from_str(&partial);
+            msg_label.setStringValue(&ns_str);
+        });
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                anim::TYPEWRITER_DELAY,
+                true,
+                &block,
+            )
+        };
+        Some(timer)
+    } else {
+        None
+    };
+
     // Run loop for display duration
     let start = std::time::Instant::now();
     let duration = Duration::from_millis(opts.duration_ms);
@@ -354,6 +400,11 @@ pub fn send_notify(opts: NotifyOptions) -> Result<(), Box<dyn std::error::Error>
             let run_loop = objc2_foundation::NSRunLoop::currentRunLoop();
             run_loop.runMode_beforeDate(NSDefaultRunLoopMode, &date);
         }
+    }
+
+    // Invalidate typewriter timer if still running
+    if let Some(ref timer) = typewriter_timer {
+        timer.invalidate();
     }
 
     // Start fade-out animation

@@ -9,6 +9,7 @@ pub mod paths;
 pub mod session;
 pub mod setup;
 pub mod storage;
+pub mod theme;
 pub mod tui;
 #[cfg(target_os = "macos")]
 pub mod window;

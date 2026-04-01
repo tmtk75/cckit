@@ -6360,6 +6360,7 @@ pub fn run() {
                 margin,
                 opacity,
                 bgcolor: Some(bgcolor),
+                status: None,
             };
             if let Err(e) = monitor::notification::send_notify(opts) {
                 eprintln!("{}: {}", "Error sending notification".red(), e);

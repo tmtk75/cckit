@@ -5,6 +5,7 @@ use super::focus;
 use super::notification::{MenubarPosition, save_menubar_position};
 use super::session::{Session, SessionStatus};
 use super::storage::Storage;
+use super::theme::anim::STATUSBAR_BLINK_PERIOD;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
 use objc2::{ClassType, MainThreadOnly, msg_send, sel};
@@ -19,6 +20,7 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
+use std::time::Instant;
 
 // Global storage for session info indexed by menu item tag
 static SESSION_TTYS: Mutex<Option<HashMap<isize, String>>> = Mutex::new(None);
@@ -166,15 +168,22 @@ static MENU_UPDATE_INTERVAL_MS: Mutex<u64> = Mutex::new(2000); // Default: 2000m
 // Menubar display style
 #[derive(Clone, Copy, PartialEq)]
 pub enum MenubarStyle {
-    Emoji,    // ▶️ 2/1/5   |  ▶️ project [Bash] ~/path
-    Terminal, // CC 2R 1T 5  |  ● project    Bash  3m
-    Htop,     // [2/1/5]     |  [RUN] project  Bash  3m
-    Compact,  // ● 2·1·5     |  ● project:Bash 3m
+    Emoji,          // ▶️ 2/1/5   |  ▶️ project [Bash] ~/path
+    Terminal,       // CC 2R 1T 5  |  ● project    Bash  3m
+    Htop,           // [2/1/5]     |  [RUN] project  Bash  3m
+    Compact,        // ● 2·1·5     |  ● project:Bash 3m
+    MissionControl, // ◉ 2↑ 1⚠ 5  |  ● project      Bash  3m ▓▓░░ 52%
 }
 
 impl MenubarStyle {
     fn all() -> &'static [MenubarStyle] {
-        &[Self::Emoji, Self::Terminal, Self::Htop, Self::Compact]
+        &[
+            Self::Emoji,
+            Self::Terminal,
+            Self::Htop,
+            Self::Compact,
+            Self::MissionControl,
+        ]
     }
 
     fn label(&self) -> &'static str {
@@ -183,6 +192,7 @@ impl MenubarStyle {
             Self::Terminal => "Terminal",
             Self::Htop => "htop",
             Self::Compact => "Compact",
+            Self::MissionControl => "Mission Control",
         }
     }
 
@@ -227,6 +237,15 @@ impl MenubarStyle {
                 };
                 format!("{} {}·{}·{}", dot, running, tooling, total)
             }
+            Self::MissionControl => {
+                let awaiting = tooling;
+                let approval_str = if awaiting > 0 {
+                    format!(" {awaiting}⚠")
+                } else {
+                    String::new()
+                };
+                format!("◉ {running}↑{approval_str} {total}")
+            }
         }
     }
 
@@ -236,6 +255,7 @@ impl MenubarStyle {
             Self::Terminal => "R=run  T=approval  total",
             Self::Htop => "run / approval / total",
             Self::Compact => "run · approval · total",
+            Self::MissionControl => "● run  ◆ tool  ◇ wait  ○ done  ↑ active  ⚠ approval",
         }
     }
 
@@ -295,6 +315,19 @@ impl MenubarStyle {
                 };
                 format!("{} {}:{} {}{}", dot, project, tool, elapsed, stats)
             }
+            Self::MissionControl => {
+                let indicator = match session.status {
+                    SessionStatus::Running => "●",
+                    SessionStatus::AwaitingApproval => "◆",
+                    SessionStatus::WaitingInput => "◇",
+                    SessionStatus::Stopped => "○",
+                };
+                let context_bar = format_context_mini_bar(session);
+                format!(
+                    "{} {:<12} {:<5} {:>3}{}",
+                    indicator, project, tool, elapsed, context_bar
+                )
+            }
         }
     }
 }
@@ -308,9 +341,27 @@ impl std::str::FromStr for MenubarStyle {
             "terminal" | "term" => Ok(Self::Terminal),
             "htop" => Ok(Self::Htop),
             "compact" => Ok(Self::Compact),
+            "missioncontrol" | "mission_control" | "mission-control" | "mc" => {
+                Ok(Self::MissionControl)
+            }
             _ => Err(()),
         }
     }
+}
+
+/// Format a context-usage mini bar: "▓▓▓░ 72%" (4 blocks + percentage).
+/// Returns empty string if context info is unavailable.
+fn format_context_mini_bar(session: &Session) -> String {
+    let (used, max) = match (session.context_used_tokens, session.context_max_tokens) {
+        (Some(u), Some(m)) if m > 0 => (u, m),
+        _ => return String::new(),
+    };
+    let ratio = (used as f64 / max as f64).clamp(0.0, 1.0);
+    let pct = (ratio * 100.0) as u32;
+    let filled = ((ratio * 4.0).round() as usize).min(4);
+    let empty = 4 - filled;
+    let bar: String = "▓".repeat(filled) + &"░".repeat(empty);
+    format!(" {} {}%", bar, pct)
 }
 
 static MENUBAR_STYLE: Mutex<MenubarStyle> = Mutex::new(MenubarStyle::Terminal);
@@ -530,6 +581,8 @@ pub struct MenubarApp {
     handler: Retained<NSObject>,
     mtm: MainThreadMarker,
     last_update: std::time::Instant,
+    /// Epoch for status bar blink animation (MissionControl style)
+    blink_start: Instant,
 }
 
 impl MenubarApp {
@@ -546,6 +599,7 @@ impl MenubarApp {
             handler,
             mtm,
             last_update: std::time::Instant::now(),
+            blink_start: Instant::now(),
         };
 
         app.update_menu();
@@ -574,7 +628,22 @@ impl MenubarApp {
             .filter(|s| s.status == SessionStatus::WaitingInput)
             .count();
 
-        current_style().status_title(running, tooling, waiting, total)
+        let style = current_style();
+        let mut title = style.status_title(running, tooling, waiting, total);
+
+        // MissionControl: blink the leading icon between ◉ and ⚠ when there are awaiting sessions
+        if style == MenubarStyle::MissionControl && tooling > 0 {
+            let elapsed = self.blink_start.elapsed().as_secs_f64();
+            let phase = elapsed % (STATUSBAR_BLINK_PERIOD * 2.0);
+            if phase >= STATUSBAR_BLINK_PERIOD {
+                // Swap leading ◉ with ⚠
+                if let Some(rest) = title.strip_prefix('◉') {
+                    title = format!("⚠{rest}");
+                }
+            }
+        }
+
+        title
     }
 
     pub fn update_menu(&self) {
@@ -641,7 +710,11 @@ impl MenubarApp {
             for (idx, session) in sessions.iter().enumerate() {
                 let label = style.session_label(session);
 
-                let item = create_menu_item(self.mtm, &label, None);
+                let item = if style == MenubarStyle::MissionControl {
+                    create_mission_control_menu_item(self.mtm, &label, session)
+                } else {
+                    create_menu_item(self.mtm, &label, None)
+                };
                 let tag = idx as isize;
                 item.setTag(tag);
                 tty_map.insert(tag, session.tty.clone());
@@ -805,6 +878,91 @@ fn set_menu_item_mono_font(item: &NSMenuItem, text: &str, size: f64) {
 fn set_button_mono_font(button: &objc2_app_kit::NSStatusBarButton) {
     let font = NSFont::monospacedSystemFontOfSize_weight(STATUS_FONT_SIZE, 0.0);
     button.setFont(Some(&font));
+}
+
+/// Create a MissionControl-style menu item with agent-colored indicator using NSAttributedString.
+fn create_mission_control_menu_item(
+    mtm: MainThreadMarker,
+    label: &str,
+    session: &Session,
+) -> Retained<NSMenuItem> {
+    let title_ns = NSString::from_str(label);
+    let key_ns = NSString::from_str("");
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &title_ns,
+            None,
+            &key_ns,
+        )
+    };
+
+    // Build an NSAttributedString with the indicator character colored by agent accent
+    let (ar, ag, ab) = session.agent_type().accent_f64();
+    let mono_font = NSFont::monospacedSystemFontOfSize_weight(MENU_FONT_SIZE, 0.0);
+
+    // Find the indicator character (first character, then space)
+    // The label format is: "{indicator} {rest...}"
+    let indicator_len = label.chars().next().map_or(0, |c| c.len_utf8());
+    let indicator_str = &label[..indicator_len];
+    let rest_str = &label[indicator_len..];
+
+    unsafe {
+        // NSColor for agent accent
+        let ns_color_cls = AnyClass::get(c"NSColor").unwrap();
+        let color: *mut AnyObject = msg_send![
+            ns_color_cls,
+            colorWithRed: ar,
+            green: ag,
+            blue: ab,
+            alpha: 1.0f64
+        ];
+
+        // NSColor for default text
+        let default_color: *mut AnyObject = msg_send![ns_color_cls, labelColor];
+
+        let font_key = NSString::from_str("NSFont");
+        let color_key = NSString::from_str("NSColor");
+        let dict_cls = AnyClass::get(c"NSDictionary").unwrap();
+
+        // Attributes for the indicator: agent color + mono font
+        let keys_indicator: [*const AnyObject; 2] =
+            [&*font_key as *const _ as _, &*color_key as *const _ as _];
+        let vals_indicator: [*const AnyObject; 2] =
+            [&*mono_font as *const _ as _, color as *const _];
+        let indicator_attrs: *mut AnyObject = msg_send![
+            dict_cls,
+            dictionaryWithObjects: keys_indicator.as_ptr(),
+            forKeys: vals_indicator.as_ptr(),
+            count: 2usize
+        ];
+
+        // Attributes for the rest: default color + mono font
+        let rest_attrs: *mut AnyObject = msg_send![
+            dict_cls,
+            dictionaryWithObjects: [&*mono_font as *const _ as *const AnyObject, default_color as *const AnyObject].as_ptr(),
+            forKeys: [&*font_key as *const _ as *const AnyObject, &*color_key as *const _ as *const AnyObject].as_ptr(),
+            count: 2usize
+        ];
+
+        // Build NSMutableAttributedString
+        let mas_cls = AnyClass::get(c"NSMutableAttributedString").unwrap();
+        let mas: *mut AnyObject = msg_send![mas_cls, alloc];
+        let indicator_ns = NSString::from_str(indicator_str);
+        let mas: *mut AnyObject =
+            msg_send![mas, initWithString: &*indicator_ns, attributes: indicator_attrs];
+
+        let rest_ns = NSString::from_str(rest_str);
+        let attr_cls = AnyClass::get(c"NSAttributedString").unwrap();
+        let rest_attr: *mut AnyObject = msg_send![attr_cls, alloc];
+        let rest_attr: *mut AnyObject =
+            msg_send![rest_attr, initWithString: &*rest_ns, attributes: rest_attrs];
+        let _: () = msg_send![mas, appendAttributedString: rest_attr];
+
+        let _: () = msg_send![&*item, setAttributedTitle: mas];
+    }
+
+    item
 }
 
 /// Initialize menubar without blocking. Returns MenubarApp that must be kept alive.
