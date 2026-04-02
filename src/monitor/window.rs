@@ -30,6 +30,7 @@ enum WindowThemeId {
     Classic,
     #[default]
     MissionControl,
+    Notch,
 }
 
 static CURRENT_THEME: Mutex<WindowThemeId> = Mutex::new(WindowThemeId::MissionControl);
@@ -120,6 +121,7 @@ fn update_theme_label() {
         let text = match theme {
             WindowThemeId::Classic => "classic",
             WindowThemeId::MissionControl => "mission control",
+            WindowThemeId::Notch => "notch",
         };
         let label = ptr as *mut AnyObject;
         unsafe {
@@ -357,7 +359,15 @@ fn calculate_fit_window_width() -> CGFloat {
         .clamp(FIT_PATH_BASE_CHARS, FIT_PATH_MAX_CHARS);
     let extra_chars = longest_path_chars.saturating_sub(FIT_PATH_BASE_CHARS) as CGFloat;
 
-    (FIT_MIN_WIDTH + extra_chars * FIT_PATH_CHAR_WIDTH).clamp(FIT_MIN_WIDTH, FIT_MAX_WIDTH)
+    let theme = *CURRENT_THEME.lock().unwrap();
+    match theme {
+        WindowThemeId::Notch => {
+            // Width scales with session count: ~80px per session chip, min 300
+            let count = sessions.len().max(1) as CGFloat;
+            (count * 80.0 + 40.0).clamp(300.0, FIT_MAX_WIDTH)
+        }
+        _ => (FIT_MIN_WIDTH + extra_chars * FIT_PATH_CHAR_WIDTH).clamp(FIT_MIN_WIDTH, FIT_MAX_WIDTH),
+    }
 }
 
 #[allow(dead_code)]
@@ -640,6 +650,143 @@ fn rebuild_view(view: &NSView) {
     match theme {
         WindowThemeId::Classic => rebuild_view_classic(view),
         WindowThemeId::MissionControl => rebuild_view_mission_control(view),
+        WindowThemeId::Notch => rebuild_view_notch(view),
+    }
+}
+
+// --- Notch theme (Dynamic Island style) ---
+
+fn rebuild_view_notch(view: &NSView) {
+    const NOTCH_HEIGHT: CGFloat = 44.0;
+    const NOTCH_RADIUS: CGFloat = 20.0;
+    const NOTCH_PAD: CGFloat = 8.0;
+    const CHIP_HEIGHT: CGFloat = 28.0;
+    const CHIP_RADIUS: CGFloat = 14.0;
+    const CHIP_PAD: CGFloat = 4.0;
+    const CHIP_DOT: CGFloat = 6.0;
+    const CHIP_FONT: CGFloat = 10.5;
+
+    let mtm = MainThreadMarker::new().unwrap();
+    let sessions = SESSION_LIST.lock().unwrap();
+    let selected = *SELECTED_INDEX.lock().unwrap();
+
+    let subviews = view.subviews();
+    for subview in subviews.iter() {
+        subview.removeFromSuperview();
+    }
+
+    let view_width = unsafe { view.superview() }
+        .map(|sv| sv.bounds().size.width)
+        .unwrap_or(500.0);
+
+    view.setFrameSize(NSSize::new(view_width, NOTCH_HEIGHT));
+
+    // Notch pill background
+    let notch_bg = create_colored_view(
+        mtm,
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(view_width, NOTCH_HEIGHT),
+        ),
+        &NSColor::colorWithRed_green_blue_alpha(0.05, 0.05, 0.08, 0.9),
+        NOTCH_RADIUS,
+    );
+    view.addSubview(&notch_bg);
+
+    if sessions.is_empty() {
+        let label = create_mono_label(
+            mtm,
+            "no sessions",
+            NSRect::new(
+                NSPoint::new(NOTCH_PAD + 8.0, (NOTCH_HEIGHT - 16.0) / 2.0),
+                NSSize::new(view_width - NOTCH_PAD * 2.0, 16.0),
+            ),
+            &NSColor::colorWithRed_green_blue_alpha(0.4, 0.45, 0.55, 1.0),
+            CHIP_FONT,
+        );
+        notch_bg.addSubview(&label);
+        return;
+    }
+
+    // Calculate chip width to fit all sessions in one line
+    let count = sessions.len() as CGFloat;
+    let available = view_width - NOTCH_PAD * 2.0;
+    let chip_w = ((available - (count - 1.0) * CHIP_PAD) / count).max(40.0);
+    let chip_y = (NOTCH_HEIGHT - CHIP_HEIGHT) / 2.0;
+
+    for (i, session) in sessions.iter().enumerate() {
+        let chip_x = NOTCH_PAD + (i as CGFloat) * (chip_w + CHIP_PAD);
+        let is_selected = Some(i) == selected;
+
+        // Chip background
+        let chip_bg_color = if is_selected {
+            NSColor::colorWithRed_green_blue_alpha(0.2, 0.3, 0.5, 0.5)
+        } else {
+            NSColor::colorWithRed_green_blue_alpha(0.12, 0.12, 0.18, 0.7)
+        };
+        let chip_view = create_colored_view(
+            mtm,
+            NSRect::new(
+                NSPoint::new(chip_x, chip_y),
+                NSSize::new(chip_w, CHIP_HEIGHT),
+            ),
+            &chip_bg_color,
+            CHIP_RADIUS,
+        );
+
+        // Status dot
+        let dot_x = 8.0;
+        let dot_y_inner = (CHIP_HEIGHT - CHIP_DOT) / 2.0;
+        let dot_color = match session.status {
+            SessionStatus::Running => {
+                NSColor::colorWithRed_green_blue_alpha(0.133, 0.773, 0.369, 1.0)
+            }
+            SessionStatus::AwaitingApproval => {
+                NSColor::colorWithRed_green_blue_alpha(0.937, 0.267, 0.267, 1.0)
+            }
+            SessionStatus::WaitingInput => {
+                NSColor::colorWithRed_green_blue_alpha(0.961, 0.620, 0.043, 1.0)
+            }
+            SessionStatus::Stopped => {
+                NSColor::colorWithRed_green_blue_alpha(0.35, 0.39, 0.45, 1.0)
+            }
+        };
+        let dot_alpha: f64 = match session.status {
+            SessionStatus::Running => theme::breathing_pulse(elapsed_secs()),
+            SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs()),
+            SessionStatus::WaitingInput => theme::slow_fade(elapsed_secs()),
+            SessionStatus::Stopped => 0.6,
+        };
+        let dot_view = create_colored_view(
+            mtm,
+            NSRect::new(
+                NSPoint::new(dot_x, dot_y_inner),
+                NSSize::new(CHIP_DOT, CHIP_DOT),
+            ),
+            &dot_color,
+            CHIP_DOT / 2.0,
+        );
+        let _: () = unsafe { msg_send![&*dot_view, setAlphaValue: dot_alpha] };
+        chip_view.addSubview(&dot_view);
+
+        // Project name (truncated to fit)
+        let label_x = dot_x + CHIP_DOT + 4.0;
+        let label_w = chip_w - label_x - 6.0;
+        let project = session.project_name();
+        let text_color = if session.status == SessionStatus::Stopped {
+            NSColor::colorWithRed_green_blue_alpha(0.4, 0.45, 0.5, 1.0)
+        } else {
+            NSColor::colorWithRed_green_blue_alpha(0.9, 0.92, 0.95, 1.0)
+        };
+        let label_rect = NSRect::new(
+            NSPoint::new(label_x, (CHIP_HEIGHT - 14.0) / 2.0),
+            NSSize::new(label_w.max(0.0), 14.0),
+        );
+        let label = create_mono_label(mtm, project, label_rect, &text_color, CHIP_FONT);
+        let _: () = unsafe { msg_send![&*label, setLineBreakMode: 4_isize] }; // truncate tail
+        chip_view.addSubview(&label);
+
+        notch_bg.addSubview(&chip_view);
     }
 }
 
@@ -1438,6 +1585,7 @@ fn calculate_layout_height() -> CGFloat {
         WindowThemeId::MissionControl => {
             HEADER_HEIGHT + session_count * (CARD_HEIGHT + CARD_SPACING) + FOOTER_HEIGHT
         }
+        WindowThemeId::Notch => 44.0, // single pill bar, fixed height
     }
 }
 
@@ -1779,6 +1927,7 @@ fn setup_window(
     let theme_text = match theme {
         WindowThemeId::Classic => "classic",
         WindowThemeId::MissionControl => "mission control",
+        WindowThemeId::Notch => "notch",
     };
     let footer_right_rect = NSRect::new(
         NSPoint::new(content_w - 140.0 - LEFT_PAD, 3.0),
