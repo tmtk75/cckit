@@ -49,6 +49,9 @@ objc2-app-kit = { version = "0.3", features = [
 objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
 block2 = "0.6"
 
+[dev-dependencies]
+tempfile = "3"
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
