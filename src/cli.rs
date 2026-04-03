@@ -97,6 +97,12 @@ enum Commands {
         command: AgentCommands,
     },
 
+    /// Inspect and validate a custom plugin marketplace
+    Marketplace {
+        #[command(subcommand)]
+        command: MarketplaceCommands,
+    },
+
     /// Show cckit status and file paths
     Status,
 
@@ -402,6 +408,21 @@ enum AgentCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum MarketplaceCommands {
+    /// Show all plugins, skills, hooks, and MCP servers in a marketplace
+    Summary {
+        /// Path to the marketplace root directory
+        path: String,
+    },
+
+    /// Validate marketplace plugin structure and consistency
+    Doctor {
+        /// Path to the marketplace root directory
+        path: String,
+    },
+}
+
 #[derive(Deserialize)]
 struct ClaudeConfig {
     projects: Option<HashMap<String, serde_json::Value>>,
@@ -470,7 +491,7 @@ struct PluginInfo {
     agents: Vec<AgentInfo>,
 }
 
-fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>) {
+pub(crate) fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>) {
     let content = content.trim();
     if !content.starts_with("---") {
         return (None, None);
@@ -482,19 +503,17 @@ fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>) {
     }
 
     let frontmatter = parts[1].trim();
-    let mut name = None;
-    let mut description = None;
 
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(value) = line.strip_prefix("name:") {
-            name = Some(value.trim().to_string());
-        } else if let Some(value) = line.strip_prefix("description:") {
-            description = Some(value.trim().to_string());
-        }
+    #[derive(serde::Deserialize)]
+    struct Fm {
+        name: Option<String>,
+        description: Option<String>,
     }
 
-    (name, description)
+    match serde_yaml::from_str::<Fm>(frontmatter) {
+        Ok(fm) => (fm.name, fm.description),
+        Err(_) => (None, None),
+    }
 }
 
 fn scan_skills(dir: &Path) -> Vec<SkillInfo> {
@@ -6074,6 +6093,14 @@ pub fn run() {
             }
             AgentCommands::HowToRemove { filter } => {
                 agent_how_to_remove_command(filter);
+            }
+        },
+        Some(Commands::Marketplace { command }) => match command {
+            MarketplaceCommands::Summary { path } => {
+                crate::marketplace::summary_command(Path::new(&path));
+            }
+            MarketplaceCommands::Doctor { path } => {
+                crate::marketplace::doctor_command(Path::new(&path));
             }
         },
         Some(Commands::Status) => {

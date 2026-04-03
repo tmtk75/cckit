@@ -15,6 +15,7 @@ colored = "3.0"
 glob = "0.3"
 ureq = { version = "3.0", features = ["json"] }
 regex-lite = "0.1"
+serde_yaml = "0.9"
 
 # monitor feature
 ratatui = "0.29"
@@ -37,14 +38,16 @@ core-foundation = "0.10"
 
 # macOS menubar & notification (objc2 bindings)
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSThread", "NSRunLoop", "NSDate", "NSTimer", "block2"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSThread", "NSRunLoop", "NSDate", "NSTimer", "NSDictionary", "NSObject", "block2"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication", "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusBarButton", "NSStatusItem",
     "NSRunningApplication", "NSImage", "NSButton", "NSControl", "NSView", "NSResponder",
     # For custom notification window
     "NSWindow", "NSPanel", "NSScreen", "NSTextField", "NSColor", "NSFont",
     "NSVisualEffectView", "NSAnimationContext", "NSGraphics", "NSLayoutConstraint",
-    "NSStackView", "NSScrollView", "NSClipView", "NSEvent"
+    "NSStackView", "NSScrollView", "NSClipView", "NSEvent",
+    # For CG direct drawing (mission control theme)
+    "NSBezierPath", "NSGraphicsContext"
 ] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
 block2 = "0.6"

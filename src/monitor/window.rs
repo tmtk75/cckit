@@ -11,8 +11,8 @@ use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{ClassType, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
-    NSColor, NSEvent, NSFont, NSImage, NSMenu, NSMenuItem, NSScreen, NSTextField, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSBezierPath, NSColor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSMenu, NSMenuItem,
+    NSScreen, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
@@ -790,11 +790,86 @@ fn rebuild_view_notch(view: &NSView) {
     }
 }
 
+// --- CG direct-drawing helpers (used by mission control theme) ---
+// These draw into the current NSGraphicsContext without creating any NSView objects.
+
+#[allow(dead_code)]
+fn cg_fill_rect(rect: NSRect, color: &NSColor) {
+    color.setFill();
+    NSBezierPath::fillRect(rect);
+}
+
+fn cg_fill_rounded_rect(rect: NSRect, color: &NSColor, radius: CGFloat) {
+    color.setFill();
+    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius);
+    path.fill();
+}
+
+fn cg_fill_circle(center_x: CGFloat, center_y: CGFloat, radius: CGFloat, color: &NSColor) {
+    color.setFill();
+    let rect = NSRect::new(
+        NSPoint::new(center_x - radius, center_y - radius),
+        NSSize::new(radius * 2.0, radius * 2.0),
+    );
+    let path = NSBezierPath::bezierPathWithOvalInRect(rect);
+    path.fill();
+}
+
+/// Build a text attributes NSDictionary with font and color.
+fn cg_text_attrs(font: &NSFont, color: &NSColor) -> *mut AnyObject {
+    unsafe {
+        let font_key = NSString::from_str("NSFont");
+        let color_key = NSString::from_str("NSColor");
+        msg_send![
+            objc2::runtime::AnyClass::get(c"NSDictionary").unwrap(),
+            dictionaryWithObjects: [font as *const NSFont as *const AnyObject, color as *const NSColor as *const AnyObject].as_ptr(),
+            forKeys: [&*font_key as *const NSString as *const AnyObject, &*color_key as *const NSString as *const AnyObject].as_ptr(),
+            count: 2_usize
+        ]
+    }
+}
+
+fn cg_draw_text(text: &str, point: NSPoint, color: &NSColor, font: &NSFont) {
+    unsafe {
+        let ns_str = NSString::from_str(text);
+        let dict = cg_text_attrs(font, color);
+        let _: () = msg_send![&*ns_str, drawAtPoint: point, withAttributes: dict];
+    }
+}
+
+fn cg_draw_text_right(text: &str, rect: NSRect, color: &NSColor, font: &NSFont) {
+    // Measure text width, then draw at right-aligned position within rect
+    unsafe {
+        let ns_str = NSString::from_str(text);
+        let dict = cg_text_attrs(font, color);
+        let size: NSSize = msg_send![&*ns_str, sizeWithAttributes: dict];
+        let x = rect.origin.x + rect.size.width - size.width;
+        let point = NSPoint::new(x, rect.origin.y);
+        let _: () = msg_send![&*ns_str, drawAtPoint: point, withAttributes: dict];
+    }
+}
+
+fn cg_draw_text_truncated(text: &str, rect: NSRect, color: &NSColor, font: &NSFont) {
+    // Draw text truncated to fit within rect (clip to rect)
+    NSGraphicsContext::saveGraphicsState_class();
+    NSBezierPath::clipRect(rect);
+    cg_draw_text(text, rect.origin, color, font);
+    NSGraphicsContext::restoreGraphicsState_class();
+}
+
+// Draw a rounded-rect border (stroke only, no fill)
+fn cg_stroke_rounded_rect(rect: NSRect, color: &NSColor, radius: CGFloat, width: CGFloat) {
+    color.setStroke();
+    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius);
+    path.setLineWidth(width);
+    path.stroke();
+}
+
 fn rebuild_view_mission_control(view: &NSView) {
-    let mtm = MainThreadMarker::new().unwrap();
     let sessions = SESSION_LIST.lock().unwrap();
     let selected = *SELECTED_INDEX.lock().unwrap();
 
+    // Remove all subviews (there should be none in CG mode, but clear any stragglers)
     let subviews = view.subviews();
     for subview in subviews.iter() {
         subview.removeFromSuperview();
@@ -804,7 +879,7 @@ fn rebuild_view_mission_control(view: &NSView) {
         .map(|sv| sv.bounds().size.width)
         .unwrap_or(WINDOW_WIDTH);
 
-    // --- Background dot grid ---
+    // --- Background dot grid (drawn directly) ---
     {
         let (gr, gg, gb) = rgb_to_f64(palette::GRID);
         let grid_color = NSColor::colorWithRed_green_blue_alpha(gr, gg, gb, 0.10);
@@ -813,16 +888,7 @@ fn rebuild_view_mission_control(view: &NSView) {
         while gx < view_width {
             let mut gy = GRID_SPACING;
             while gy < view_h {
-                let dot_view = create_colored_view(
-                    mtm,
-                    NSRect::new(
-                        NSPoint::new(gx - GRID_DOT_RADIUS, gy - GRID_DOT_RADIUS),
-                        NSSize::new(GRID_DOT_RADIUS * 2.0, GRID_DOT_RADIUS * 2.0),
-                    ),
-                    &grid_color,
-                    GRID_DOT_RADIUS,
-                );
-                view.addSubview(&dot_view);
+                cg_fill_circle(gx, gy, GRID_DOT_RADIUS, &grid_color);
                 gy += GRID_SPACING;
             }
             gx += GRID_SPACING;
@@ -841,54 +907,38 @@ fn rebuild_view_mission_control(view: &NSView) {
 
     // --- Header ---
     // Left: "◉ cckit mission control"
-    let hdr_left_rect = NSRect::new(
-        NSPoint::new(LEFT_PAD, 4.0),
-        NSSize::new(250.0, HEADER_HEIGHT - 4.0),
-    );
-    let hdr_left_label = create_mono_label(
-        mtm,
-        "\u{25C9} cckit mission control",
-        hdr_left_rect,
-        &color_text(),
-        FONT_SIZE,
-    );
-    // Bold
     let bold_font = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE, 0.7);
-    hdr_left_label.setFont(Some(&bold_font));
-    view.addSubview(&hdr_left_label);
+    cg_draw_text(
+        "\u{25C9} cckit mission control",
+        NSPoint::new(LEFT_PAD, 4.0),
+        &color_text(),
+        &bold_font,
+    );
 
     // Right: "{active} active / {total} total"
     let hdr_right_text = format!("{} active / {} total", active_count, total_count);
+    let small_font = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE_SMALL, 0.0);
     let hdr_right_rect = NSRect::new(
         NSPoint::new(view_width - 200.0 - LEFT_PAD, 4.0),
         NSSize::new(200.0, HEADER_HEIGHT - 4.0),
     );
-    let hdr_right_label = create_mono_label(
-        mtm,
-        &hdr_right_text,
-        hdr_right_rect,
-        &color_dim(),
-        FONT_SIZE_SMALL,
-    );
-    let _: () = unsafe { msg_send![&*hdr_right_label, setAlignment: 2_isize] }; // right-align
-    view.addSubview(&hdr_right_label);
+    cg_draw_text_right(&hdr_right_text, hdr_right_rect, &color_dim(), &small_font);
 
     let y_start = HEADER_HEIGHT;
 
     if sessions.is_empty() {
-        let rect = NSRect::new(
-            NSPoint::new(LEFT_PAD + CARD_CONTENT_LEFT, y_start + 20.0),
-            NSSize::new(view_width - LEFT_PAD * 2.0, 20.0),
-        );
-        view.addSubview(&create_mono_label(
-            mtm,
+        let normal_font = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE, 0.0);
+        cg_draw_text(
             "no active sessions",
-            rect,
+            NSPoint::new(LEFT_PAD + CARD_CONTENT_LEFT, y_start + 20.0),
             &color_dim(),
-            FONT_SIZE,
-        ));
+            &normal_font,
+        );
         return;
     }
+
+    let _normal_font = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE, 0.0);
+    let bold_font_row1 = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE, 0.5);
 
     for (i, session) in sessions.iter().enumerate() {
         let card_y = y_start + (i as CGFloat) * (CARD_HEIGHT + CARD_SPACING);
@@ -896,6 +946,9 @@ fn rebuild_view_mission_control(view: &NSView) {
         let agent = session.agent_type();
         let is_stopped = session.status == SessionStatus::Stopped;
         let card_alpha: CGFloat = if is_stopped { 0.5 } else { 1.0 };
+
+        // Save graphics state for per-card alpha
+        NSGraphicsContext::saveGraphicsState_class();
 
         // --- Card background ---
         let card_rect = NSRect::new(
@@ -907,62 +960,83 @@ fn rebuild_view_mission_control(view: &NSView) {
         } else {
             color_surface()
         };
-        let card_view = create_colored_view(mtm, card_rect, &card_bg, CARD_CORNER_RADIUS);
-        // Reduced opacity for stopped cards
+
+        // For stopped cards, use color with reduced alpha
         if is_stopped {
-            let _: () = unsafe { msg_send![&*card_view, setAlphaValue: card_alpha] };
+            let bg_with_alpha = unsafe {
+                let r: CGFloat = msg_send![&*card_bg, redComponent];
+                let g: CGFloat = msg_send![&*card_bg, greenComponent];
+                let b: CGFloat = msg_send![&*card_bg, blueComponent];
+                let a: CGFloat = msg_send![&*card_bg, alphaComponent];
+                NSColor::colorWithRed_green_blue_alpha(r, g, b, a * card_alpha)
+            };
+            cg_fill_rounded_rect(card_rect, &bg_with_alpha, CARD_CORNER_RADIUS);
+        } else {
+            cg_fill_rounded_rect(card_rect, &card_bg, CARD_CORNER_RADIUS);
         }
 
         // Card border glow animation
-        if let Some(layer) = card_view.layer() {
-            let glow_alpha = match session.status {
-                SessionStatus::Running => {
-                    let phase = (elapsed_secs() / anim::GLOW_PERIOD) * std::f64::consts::TAU;
-                    // sin wave range [-1,1] mapped to [0.0, 0.3]
-                    ((phase.sin() + 1.0) / 2.0) * 0.3
-                }
-                SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs()) * 0.3,
-                _ => 0.0,
-            };
-            if glow_alpha > 0.0 {
-                let border_color = agent_accent_color_alpha(agent, glow_alpha);
-                layer.setBorderColor(Some(&border_color.CGColor()));
-                let _: () = unsafe { msg_send![&*layer, setBorderWidth: 1.0_f64] };
+        let glow_alpha = match session.status {
+            SessionStatus::Running => {
+                let phase = (elapsed_secs() / anim::GLOW_PERIOD) * std::f64::consts::TAU;
+                ((phase.sin() + 1.0) / 2.0) * 0.3
             }
+            SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs()) * 0.3,
+            _ => 0.0,
+        };
+        if glow_alpha > 0.0 {
+            let border_color = agent_accent_color_alpha(agent, glow_alpha);
+            cg_stroke_rounded_rect(card_rect, &border_color, CARD_CORNER_RADIUS, 1.0);
         }
 
+        // All card content is drawn at absolute positions (card_y offset)
+        let content_x = LEFT_PAD + CARD_CONTENT_LEFT;
+
         // --- Row 1: status dot + agent + project + context bar + elapsed ---
-        let row1_y: CGFloat = 4.0;
+        let row1_y: CGFloat = card_y + 4.0;
         let row1_h: CGFloat = 16.0;
-        let content_x = CARD_CONTENT_LEFT;
 
         // Status dot with pulse animation
         let dot = DOT_SIZE;
-        let dot_y = row1_y + (row1_h - dot) / 2.0;
+        let dot_cy = row1_y + row1_h / 2.0;
         let dot_color = if session.tty == "unknown" {
             color_dim()
         } else {
             status_color(&session.status)
         };
-        let dot_view = create_colored_view(
-            mtm,
-            NSRect::new(NSPoint::new(content_x, dot_y), NSSize::new(dot, dot)),
-            &dot_color,
-            dot / 2.0,
-        );
         let dot_alpha: f64 = match session.status {
             SessionStatus::Running => theme::breathing_pulse(elapsed_secs()),
             SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs()),
             SessionStatus::WaitingInput => theme::slow_fade(elapsed_secs()),
             SessionStatus::Stopped => 1.0,
         };
-        let _: () = unsafe { msg_send![&*dot_view, setAlphaValue: dot_alpha] };
-        card_view.addSubview(&dot_view);
+        // Apply dot alpha by adjusting color
+        let dot_color_alpha = {
+            let (r, g, b) = if session.tty == "unknown" {
+                rgb_to_f64(palette::TEXT_DIM)
+            } else {
+                let sc = match session.status {
+                    SessionStatus::Running => StatusColor::Running,
+                    SessionStatus::AwaitingApproval => StatusColor::AwaitingApproval,
+                    SessionStatus::WaitingInput => StatusColor::WaitingInput,
+                    SessionStatus::Stopped => StatusColor::Stopped,
+                };
+                sc.f64()
+            };
+            let effective_alpha = dot_alpha * if is_stopped { card_alpha } else { 1.0 };
+            NSColor::colorWithRed_green_blue_alpha(r, g, b, effective_alpha)
+        };
+        cg_fill_circle(content_x + dot / 2.0, dot_cy, dot / 2.0, &dot_color_alpha);
+        // Suppress unused variable warning
+        let _ = dot_color;
 
         let project = session.display_name();
         let elapsed = format_elapsed(session.updated_at);
         let unfocusable = session.tty == "unknown";
-        let text_color = if unfocusable || is_stopped {
+        let text_color_effective = if is_stopped {
+            let (r, g, b) = rgb_to_f64(palette::TEXT_DIM);
+            NSColor::colorWithRed_green_blue_alpha(r, g, b, card_alpha)
+        } else if unfocusable {
             color_dim()
         } else {
             color_text()
@@ -979,13 +1053,9 @@ fn rebuild_view_mission_control(view: &NSView) {
         let label_x = content_x + dot + 4.0;
         let row1_rect = NSRect::new(
             NSPoint::new(label_x, row1_y),
-            NSSize::new(card_w - label_x - 120.0, row1_h),
+            NSSize::new(card_w - (label_x - LEFT_PAD) - 120.0, row1_h),
         );
-        let row1_label = create_mono_label(mtm, &row1_text, row1_rect, &text_color, FONT_SIZE);
-        let bold_font_row1 = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE, 0.5);
-        row1_label.setFont(Some(&bold_font_row1));
-        let _: () = unsafe { msg_send![&*row1_label, setLineBreakMode: 5_isize] };
-        card_view.addSubview(&row1_label);
+        cg_draw_text_truncated(&row1_text, row1_rect, &text_color_effective, &bold_font_row1);
 
         // Elapsed + context % (right side of row 1)
         let ctx_info = context_bar_info(session);
@@ -994,22 +1064,20 @@ fn rebuild_view_mission_control(view: &NSView) {
             .map(|c| format!("  {}", c.label))
             .unwrap_or_default();
         let row1_right_text = format!("{}{}", elapsed, mini_ctx);
+        let dim_color = if is_stopped {
+            let (r, g, b) = rgb_to_f64(palette::TEXT_DIM);
+            NSColor::colorWithRed_green_blue_alpha(r, g, b, card_alpha)
+        } else {
+            color_dim()
+        };
         let row1_right_rect = NSRect::new(
-            NSPoint::new(card_w - 110.0, row1_y),
+            NSPoint::new(LEFT_PAD + card_w - 110.0, row1_y),
             NSSize::new(100.0, row1_h),
         );
-        let row1_right = create_mono_label(
-            mtm,
-            &row1_right_text,
-            row1_right_rect,
-            &color_dim(),
-            FONT_SIZE_SMALL,
-        );
-        let _: () = unsafe { msg_send![&*row1_right, setAlignment: 2_isize] };
-        card_view.addSubview(&row1_right);
+        cg_draw_text_right(&row1_right_text, row1_right_rect, &dim_color, &small_font);
 
         // --- Row 2: tool + stats + path + context bar + AF ---
-        let row2_y: CGFloat = 20.0;
+        let row2_y: CGFloat = card_y + 20.0;
         let row2_h: CGFloat = 14.0;
 
         let tool = session.last_tool.as_deref().unwrap_or("-");
@@ -1021,7 +1089,7 @@ fn rebuild_view_mission_control(view: &NSView) {
         // Context bar inline (small, right-aligned before AF)
         let bar_w: CGFloat = 60.0;
         let bar_h: CGFloat = 3.0;
-        let bar_x = card_w - 80.0;
+        let bar_x = LEFT_PAD + card_w - 80.0;
         let bar_y = row2_y + (row2_h - bar_h) / 2.0;
 
         let row2_text = format!(
@@ -1030,32 +1098,23 @@ fn rebuild_view_mission_control(view: &NSView) {
         );
         let row2_rect = NSRect::new(
             NSPoint::new(content_x, row2_y),
-            NSSize::new(card_w - content_x - 90.0, row2_h),
+            NSSize::new(card_w - CARD_CONTENT_LEFT - 90.0, row2_h),
         );
-        let row2_label =
-            create_mono_label(mtm, &row2_text, row2_rect, &color_dim(), FONT_SIZE_SMALL);
-        let _: () = unsafe { msg_send![&*row2_label, setLineBreakMode: 5_isize] };
-        card_view.addSubview(&row2_label);
+        cg_draw_text_truncated(&row2_text, row2_rect, &dim_color, &small_font);
 
         // Inline context gauge bar
         if let Some(ref info) = ctx_info {
             // Track
             let track_rect = NSRect::new(NSPoint::new(bar_x, bar_y), NSSize::new(bar_w, bar_h));
-            card_view.addSubview(&create_colored_view(
-                mtm,
+            cg_fill_rounded_rect(
                 track_rect,
                 &NSColor::colorWithRed_green_blue_alpha(1.0, 1.0, 1.0, 0.08),
                 1.5,
-            ));
+            );
             // Fill
             let fill_w = (bar_w * info.ratio).max(1.0);
             let fill_rect = NSRect::new(NSPoint::new(bar_x, bar_y), NSSize::new(fill_w, bar_h));
-            card_view.addSubview(&create_colored_view(
-                mtm,
-                fill_rect,
-                &context_bar_color(info.ratio),
-                1.5,
-            ));
+            cg_fill_rounded_rect(fill_rect, &context_bar_color(info.ratio), 1.5);
             // Leading-edge pulse
             if fill_w > 4.0 && !is_stopped {
                 let pulse_w = 4.0_f64.min(fill_w);
@@ -1067,16 +1126,15 @@ fn rebuild_view_mission_control(view: &NSView) {
                     NSPoint::new(bar_x + fill_w - pulse_w, bar_y),
                     NSSize::new(pulse_w, bar_h),
                 );
-                card_view.addSubview(&create_colored_view(
-                    mtm,
+                cg_fill_rounded_rect(
                     pulse_rect,
                     &NSColor::colorWithRed_green_blue_alpha(1.0, 1.0, 1.0, pulse_alpha * 0.5),
                     1.5,
-                ));
+                );
             }
         }
 
-        view.addSubview(&card_view);
+        NSGraphicsContext::restoreGraphicsState_class();
     }
 }
 
@@ -1298,7 +1356,9 @@ fn rebuild_view_classic(view: &NSView) {
 
 extern "C" fn draw_rect(this: *mut AnyObject, _sel: Sel, _dirty_rect: NSRect) {
     let view: &NSView = unsafe { &*(this as *const NSView) };
-    rebuild_view(view);
+    objc2::rc::autoreleasepool(|_| {
+        rebuild_view(view);
+    });
 }
 
 extern "C" fn is_flipped(_this: *mut AnyObject, _sel: Sel) -> Bool {
@@ -2015,12 +2075,22 @@ fn setup_window(
     let _data_timer =
         unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &data_block) };
 
-    // Animation timer (20fps = 50ms interval) — only triggers redraw, no data reload
+    // Animation timer (5fps = 200ms interval) — only redraws when active sessions exist
     let anim_block = block2::RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
-        request_redraw();
+        let has_active = SESSION_LIST
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .iter()
+                    .any(|s| s.status != SessionStatus::Stopped)
+            })
+            .unwrap_or(false);
+        if has_active {
+            request_redraw();
+        }
     });
     let _anim_timer =
-        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, true, &anim_block) };
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.2, true, &anim_block) };
 
     // Store window pointer for bring-to-front on state transitions
     *WINDOW_PTR.lock().unwrap() = Some(&*window as *const NSWindow as usize);
