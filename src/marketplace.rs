@@ -77,7 +77,7 @@ fn scan_plugin_skills(plugin_path: &Path) -> Vec<PluginSkill> {
 
         let content = std::fs::read_to_string(&skill_md).unwrap_or_default();
         let (fm_name, description) = crate::cli::parse_frontmatter(&content);
-        let has_frontmatter = fm_name.is_some();
+        let has_frontmatter = fm_name.is_some() || description.is_some();
         let name = fm_name.unwrap_or_else(|| dir_name.clone());
 
         skills.push(PluginSkill {
@@ -99,9 +99,9 @@ fn read_hooks(plugin_path: &Path) -> Option<HooksInfo> {
     match serde_json::from_str::<serde_json::Value>(&content) {
         Ok(v) => {
             let hook_count = v
-                .as_object()
+                .get("hooks")
+                .and_then(|h| h.as_object())
                 .map(|o| o.len())
-                .or_else(|| v.as_array().map(|a| a.len()))
                 .unwrap_or(0);
             Some(HooksInfo {
                 valid_json: true,
@@ -132,7 +132,10 @@ fn read_mcp_servers(plugin_path: &Path) -> (Vec<McpServer>, Option<bool>) {
     };
 
     let mut servers = Vec::new();
-    if let Some(obj) = value.as_object() {
+    let obj = value
+        .get("mcpServers")
+        .and_then(|v| v.as_object());
+    if let Some(obj) = obj {
         for (key, val) in obj {
             let server_type = val
                 .get("type")
@@ -207,7 +210,7 @@ pub fn summary_command(path: &Path) {
     let plugin_count = marketplace.plugins.len();
     println!(
         "{} ({} plugins)",
-        marketplace.name,
+        marketplace.name.bold(),
         plugin_count
     );
 
@@ -232,7 +235,10 @@ pub fn summary_command(path: &Path) {
             println!("    Skills:");
             for skill in &plugin.skills {
                 match &skill.description {
-                    Some(desc) => println!("      {} — {:?}", skill.name.green(), desc),
+                    Some(desc) => {
+                        let first_line = desc.lines().next().unwrap_or(desc);
+                        println!("      {} — {}", skill.name.green(), first_line.dimmed());
+                    }
                     None => println!("      {}", skill.name.green()),
                 }
             }
@@ -365,6 +371,18 @@ pub fn validate_marketplace(marketplace: &Marketplace) -> ValidationResult {
 pub fn doctor_command(path: &Path) {
     let marketplace = scan_marketplace(path);
     let result = validate_marketplace(&marketplace);
+
+    println!(
+        "{}: {}",
+        "cckit Marketplace Doctor".bold(),
+        path.display()
+    );
+    println!();
+
+    if marketplace.plugins.is_empty() {
+        println!("  {}", "No plugins found in plugins/ directory".yellow());
+        return;
+    }
 
     for plugin in &marketplace.plugins {
         let dir = &plugin.dir_name;
@@ -542,8 +560,8 @@ mod tests {
             "my-plugin",
             Some("my-plugin"),
             &[("sample", Some("sample"), Some("A sample skill"))],
-            Some(r#"{"PreToolUse": []}"#),
-            Some(r#"{"my-server": {"type": "http"}}"#),
+            Some(r#"{"hooks": {"PreToolUse": []}}"#),
+            Some(r#"{"mcpServers": {"my-server": {"type": "http"}}}"#),
         );
 
         let m = scan_marketplace(tmp.path());
@@ -559,7 +577,9 @@ mod tests {
         );
         assert!(p.skills[0].has_frontmatter);
         assert!(p.hooks.is_some());
-        assert!(p.hooks.as_ref().unwrap().valid_json);
+        let hooks = p.hooks.as_ref().unwrap();
+        assert!(hooks.valid_json);
+        assert_eq!(hooks.hook_count, 1);
         assert_eq!(p.mcp_servers.len(), 1);
         assert_eq!(p.mcp_servers[0].name, "my-server");
         assert_eq!(p.mcp_valid_json, Some(true));
@@ -630,8 +650,8 @@ mod tests {
             "ok-plugin",
             Some("ok-plugin"),
             &[("skill-a", Some("skill-a"), Some("does something"))],
-            Some(r#"{"PreToolUse": []}"#),
-            Some(r#"{"srv": {"type": "stdio"}}"#),
+            Some(r#"{"hooks": {}}"#),
+            Some(r#"{"mcpServers": {"srv": {"type": "stdio"}}}"#),
         );
 
         let m = scan_marketplace(tmp.path());
