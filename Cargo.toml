@@ -30,6 +30,12 @@ notify = "7.0"
 ctrlc = "3.4"
 libc = "0.2.180"
 
+# Directory walker for session history search
+walkdir = "2"
+
+# Fuzzy matching for interactive session search
+fuzzy-matcher = "0.3"
+
 # macOS accessibility (for Ghostty tab focus)
 [target.'cfg(target_os = "macos")'.dependencies]
 accessibility = "0.2"

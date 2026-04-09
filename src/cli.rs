@@ -235,6 +235,26 @@ enum SessionCommands {
         event_timeout: u64,
     },
 
+    /// Search past Claude Code sessions by user-message text (AND terms).
+    /// Required unless --interactive is used (in which case it seeds the TUI query).
+    Search {
+        /// Search terms (AND-matched in non-interactive mode; joined as fuzzy query in -i)
+        #[arg(num_args = 0..)]
+        terms: Vec<String>,
+
+        /// Launch an interactive ratatui browser instead of plain text output
+        #[arg(short, long)]
+        interactive: bool,
+
+        /// Maximum number of results to display
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Emit results as JSON (cannot be combined with --interactive)
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Handle hook events from Claude Code (internal use)
     Hook,
 
@@ -6186,6 +6206,26 @@ pub fn run() {
                         };
                         if let Err(e) = result {
                             eprintln!("{}: {}", "Error running TUI".red(), e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Some(SessionCommands::Search {
+                    terms,
+                    interactive,
+                    limit,
+                    json,
+                }) => {
+                    let opts = crate::history::SearchOpts {
+                        terms,
+                        interactive,
+                        limit,
+                        json,
+                    };
+                    match crate::history::run_search(opts) {
+                        Ok(code) => std::process::exit(code),
+                        Err(e) => {
+                            eprintln!("{}: {}", "Error running session search".red(), e);
                             std::process::exit(1);
                         }
                     }

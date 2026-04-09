@@ -1,0 +1,3 @@
+{"type":"user","cwd":"/tmp/proj","sessionId":"s1","gitBranch":"main","timestamp":"2026-03-12T06:12:48.000Z","message":{"role":"user","content":"osrm jni please test"}}
+{"type":"assistant","cwd":"/tmp/proj","sessionId":"s1","gitBranch":"main","timestamp":"2026-03-12T06:12:50.000Z","message":{"role":"assistant","content":[{"type":"text","text":"sure"}]}}
+{"type":"user","cwd":"/tmp/proj","sessionId":"s1","gitBranch":"main","timestamp":"2026-03-12T06:13:00.000Z","message":{"role":"user","content":"thanks"}}

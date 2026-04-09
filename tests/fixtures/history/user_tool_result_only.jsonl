@@ -1,0 +1,2 @@
+{"type":"user","cwd":"/tmp/proj","sessionId":"s3","timestamp":"2026-03-12T06:12:48.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ignored output"}]}}
+{"type":"user","cwd":"/tmp/proj","sessionId":"s3","timestamp":"2026-03-12T06:12:50.000Z","message":{"role":"user","content":"real user text"}}

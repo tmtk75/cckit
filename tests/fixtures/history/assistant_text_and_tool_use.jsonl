@@ -1,0 +1,2 @@
+{"type":"user","cwd":"/tmp/proj","sessionId":"s4","timestamp":"2026-03-12T06:12:48.000Z","message":{"role":"user","content":"hello"}}
+{"type":"assistant","cwd":"/tmp/proj","sessionId":"s4","timestamp":"2026-03-12T06:12:50.000Z","message":{"role":"assistant","content":[{"type":"text","text":"let me run a tool"},{"type":"tool_use","id":"t1","name":"bash","input":{"cmd":"ls"}},{"type":"text","text":"done"}]}}
