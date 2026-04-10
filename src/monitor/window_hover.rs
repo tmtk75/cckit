@@ -76,6 +76,56 @@ pub fn hit_test_mission_control(
     })
 }
 
+/// Layout constants for the Classic theme. Defaults match the constants
+/// currently used inside `rebuild_view_classic` in `src/monitor/window.rs`
+/// (`CL_HEADER_HEIGHT + 1.0` separator and `CL_ROW_HEIGHT`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClassicLayout {
+    pub header_height: f64,
+    pub row_height: f64,
+    pub left_pad: f64,
+}
+
+impl ClassicLayout {
+    pub const fn default() -> Self {
+        Self {
+            header_height: 21.0, // CL_HEADER_HEIGHT (20.0) + 1.0 separator
+            row_height: 22.0,
+            left_pad: 4.0,
+        }
+    }
+}
+
+/// Returns the row hit by `(point_x, point_y)` for the Classic theme.
+pub fn hit_test_classic(
+    point_x: f64,
+    point_y: f64,
+    view_width: f64,
+    session_count: usize,
+    layout: ClassicLayout,
+) -> Option<HoverHit> {
+    if session_count == 0 || point_y < layout.header_height {
+        return None;
+    }
+    let rel_y = point_y - layout.header_height;
+    let idx = (rel_y / layout.row_height).floor() as usize;
+    if idx >= session_count {
+        return None;
+    }
+    let row_x = layout.left_pad;
+    let row_w = view_width - layout.left_pad * 2.0;
+    if point_x < row_x || point_x > row_x + row_w {
+        return None;
+    }
+    Some(HoverHit {
+        idx,
+        row_x,
+        row_y: layout.header_height + (idx as f64) * layout.row_height,
+        row_w,
+        row_h: layout.row_height,
+    })
+}
+
 /// Returns up to `max_lines` lines from the most recent assistant turn in
 /// `record`. If the response has more than `max_lines` lines, the result is
 /// truncated and a " …" suffix is appended to the last kept line. Returns
@@ -229,5 +279,45 @@ mod tests {
     fn mc_hit_test_empty_session_list_returns_none() {
         let layout = MissionControlLayout::default();
         assert!(hit_test_mission_control(50.0, 100.0, 680.0, 0, layout).is_none());
+    }
+
+    // ---- Classic hit-test ----
+
+    #[test]
+    fn classic_hit_test_header_returns_none() {
+        let layout = ClassicLayout::default();
+        assert!(hit_test_classic(50.0, 10.0, 640.0, 3, layout).is_none());
+    }
+
+    #[test]
+    fn classic_hit_test_first_row() {
+        let layout = ClassicLayout::default();
+        // header_height = 21, row_height = 22 → first row: y in [21, 43)
+        let hit = hit_test_classic(50.0, 30.0, 640.0, 3, layout).unwrap();
+        assert_eq!(hit.idx, 0);
+        assert_eq!(hit.row_y, 21.0);
+        assert_eq!(hit.row_h, 22.0);
+    }
+
+    #[test]
+    fn classic_hit_test_third_row() {
+        let layout = ClassicLayout::default();
+        // third row: y in [65, 87)
+        let hit = hit_test_classic(50.0, 70.0, 640.0, 3, layout).unwrap();
+        assert_eq!(hit.idx, 2);
+        assert_eq!(hit.row_y, 65.0);
+    }
+
+    #[test]
+    fn classic_hit_test_below_last_row_returns_none() {
+        let layout = ClassicLayout::default();
+        // 3 rows, last ends at y=87; y=200 is past it
+        assert!(hit_test_classic(50.0, 200.0, 640.0, 3, layout).is_none());
+    }
+
+    #[test]
+    fn classic_hit_test_empty_session_list_returns_none() {
+        let layout = ClassicLayout::default();
+        assert!(hit_test_classic(50.0, 30.0, 640.0, 0, layout).is_none());
     }
 }
