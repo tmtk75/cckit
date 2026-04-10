@@ -13,6 +13,8 @@ pub mod theme;
 pub mod tui;
 #[cfg(target_os = "macos")]
 pub mod window;
+#[cfg(target_os = "macos")]
+pub mod window_hover;
 
 use colored::Colorize;
 use session::{Session, SessionStatus};
