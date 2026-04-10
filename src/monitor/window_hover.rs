@@ -4,6 +4,7 @@
 //! lives in `window.rs`.
 
 use crate::history::{Role, SessionRecord};
+use std::time::Instant;
 
 /// Layout constants for the Mission Control theme. Defaults match the
 /// constants currently in use in `src/monitor/window.rs`. The values are
@@ -154,6 +155,91 @@ pub fn extract_last_assistant_truncated(
         out.push_str(" …");
     }
     Some(out)
+}
+
+/// State machine that converts a stream of mouse positions (already mapped to
+/// `Option<HoverHit>`) into hover lifecycle events. The session_key bound to
+/// each entered row guards against the session list being reordered while a
+/// hover is in progress.
+#[derive(Debug, Default)]
+pub struct HoverTracker {
+    current: Option<HoverState>,
+    next_version: u64,
+}
+
+#[derive(Debug, Clone)]
+struct HoverState {
+    session_idx: usize,
+    session_key: String,
+    #[allow(dead_code)]
+    started_at: Instant,
+    version: u64,
+    hit: HoverHit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HoverEvent {
+    Entered { idx: usize, version: u64 },
+    Unchanged,
+    Cleared,
+}
+
+impl HoverTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn on_mouse(
+        &mut self,
+        hit: Option<(HoverHit, String)>,
+        now: Instant,
+    ) -> HoverEvent {
+        match (hit, self.current.as_ref()) {
+            (None, None) => HoverEvent::Unchanged,
+            (None, Some(_)) => {
+                self.current = None;
+                HoverEvent::Cleared
+            }
+            (Some((h, key)), Some(state))
+                if state.session_idx == h.idx && state.session_key == key =>
+            {
+                HoverEvent::Unchanged
+            }
+            (Some((h, key)), _) => {
+                self.next_version += 1;
+                let version = self.next_version;
+                self.current = Some(HoverState {
+                    session_idx: h.idx,
+                    session_key: key,
+                    started_at: now,
+                    version,
+                    hit: h,
+                });
+                HoverEvent::Entered { idx: h.idx, version }
+            }
+        }
+    }
+
+    pub fn current_version(&self) -> Option<u64> {
+        self.current.as_ref().map(|s| s.version)
+    }
+
+    pub fn current_idx(&self) -> Option<usize> {
+        self.current.as_ref().map(|s| s.session_idx)
+    }
+
+    #[allow(dead_code)]
+    pub fn current_session_key(&self) -> Option<&str> {
+        self.current.as_ref().map(|s| s.session_key.as_str())
+    }
+
+    pub fn current_hit(&self) -> Option<HoverHit> {
+        self.current.as_ref().map(|s| s.hit)
+    }
+
+    pub fn clear(&mut self) {
+        self.current = None;
+    }
 }
 
 #[cfg(test)]
@@ -319,5 +405,73 @@ mod tests {
     fn classic_hit_test_empty_session_list_returns_none() {
         let layout = ClassicLayout::default();
         assert!(hit_test_classic(50.0, 30.0, 640.0, 0, layout).is_none());
+    }
+
+    // ---- HoverTracker ----
+
+    fn dummy_hit(idx: usize) -> HoverHit {
+        HoverHit {
+            idx,
+            row_x: 0.0,
+            row_y: 28.0 + (idx as f64) * 40.0,
+            row_w: 600.0,
+            row_h: 38.0,
+        }
+    }
+
+    #[test]
+    fn tracker_none_to_none_is_unchanged() {
+        let mut t = HoverTracker::new();
+        let now = std::time::Instant::now();
+        assert_eq!(t.on_mouse(None, now), HoverEvent::Unchanged);
+    }
+
+    #[test]
+    fn tracker_none_to_some_emits_entered_with_version() {
+        let mut t = HoverTracker::new();
+        let now = std::time::Instant::now();
+        let ev = t.on_mouse(Some((dummy_hit(1), "k1".into())), now);
+        assert_eq!(ev, HoverEvent::Entered { idx: 1, version: 1 });
+        assert_eq!(t.current_version(), Some(1));
+        assert_eq!(t.current_idx(), Some(1));
+    }
+
+    #[test]
+    fn tracker_same_row_continued_is_unchanged() {
+        let mut t = HoverTracker::new();
+        let now = std::time::Instant::now();
+        t.on_mouse(Some((dummy_hit(1), "k1".into())), now);
+        let ev = t.on_mouse(Some((dummy_hit(1), "k1".into())), now);
+        assert_eq!(ev, HoverEvent::Unchanged);
+        assert_eq!(t.current_version(), Some(1));
+    }
+
+    #[test]
+    fn tracker_different_row_emits_entered_with_new_version() {
+        let mut t = HoverTracker::new();
+        let now = std::time::Instant::now();
+        t.on_mouse(Some((dummy_hit(1), "k1".into())), now);
+        let ev = t.on_mouse(Some((dummy_hit(2), "k2".into())), now);
+        assert_eq!(ev, HoverEvent::Entered { idx: 2, version: 2 });
+    }
+
+    #[test]
+    fn tracker_some_to_none_emits_cleared() {
+        let mut t = HoverTracker::new();
+        let now = std::time::Instant::now();
+        t.on_mouse(Some((dummy_hit(1), "k1".into())), now);
+        let ev = t.on_mouse(None, now);
+        assert_eq!(ev, HoverEvent::Cleared);
+        assert_eq!(t.current_version(), None);
+    }
+
+    #[test]
+    fn tracker_session_key_change_at_same_idx_re_enters() {
+        // Session list reordered: row at idx=1 is now a different session.
+        let mut t = HoverTracker::new();
+        let now = std::time::Instant::now();
+        t.on_mouse(Some((dummy_hit(1), "k1".into())), now);
+        let ev = t.on_mouse(Some((dummy_hit(1), "k2".into())), now);
+        assert_eq!(ev, HoverEvent::Entered { idx: 1, version: 2 });
     }
 }
