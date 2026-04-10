@@ -8,6 +8,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
+use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
+use objc2::{MainThreadOnly, msg_send};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSBackingStoreType, NSColor, NSFont, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
+
 /// Layout constants for the Mission Control theme. Defaults match the
 /// constants currently in use in `src/monitor/window.rs`. The values are
 /// passed in explicitly so the hit-test logic can be unit tested without
@@ -292,6 +305,215 @@ impl TranscriptCache {
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
+}
+
+// =================================================================
+// HoverPopover (macOS GUI layer) — no automated tests, manual smoke
+// test only.
+// =================================================================
+
+#[cfg(target_os = "macos")]
+const POPOVER_WIDTH: f64 = 480.0;
+#[cfg(target_os = "macos")]
+const POPOVER_PADDING: f64 = 10.0;
+#[cfg(target_os = "macos")]
+const POPOVER_GAP: f64 = 8.0;
+#[cfg(target_os = "macos")]
+const POPOVER_FONT_SIZE: f64 = 11.5;
+#[cfg(target_os = "macos")]
+const POPOVER_MAX_HEIGHT: f64 = 600.0;
+
+/// Borderless floating window that shows the truncated last-assistant text
+/// next to the hovered row. Created lazily on first show.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub struct HoverPopover {
+    window: Option<Retained<NSWindow>>,
+    text_field: Option<Retained<NSTextField>>,
+}
+
+#[cfg(target_os = "macos")]
+impl HoverPopover {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Show the popover next to `parent_view`'s row at `anchor` (view-local,
+    /// flipped coordinates). The text wraps to `POPOVER_WIDTH` and the height
+    /// is computed from the wrapped layout.
+    pub fn show(&mut self, parent_view: &NSView, anchor: HoverHit, text: &str) {
+        let mtm = match MainThreadMarker::new() {
+            Some(m) => m,
+            None => return,
+        };
+        self.ensure_window(mtm);
+
+        let window = match self.window.as_ref() {
+            Some(w) => w.clone(),
+            None => return,
+        };
+        let text_field = match self.text_field.as_ref() {
+            Some(f) => f.clone(),
+            None => return,
+        };
+
+        // 1. Compute fitted height for the text using a wrap-aware heuristic.
+        let inner_w = POPOVER_WIDTH - POPOVER_PADDING * 2.0;
+        let text_h = estimate_wrapped_text_height(text, inner_w, POPOVER_FONT_SIZE);
+        let panel_h = (text_h + POPOVER_PADDING * 2.0).clamp(40.0, POPOVER_MAX_HEIGHT);
+
+        // 2. Map the view-local row rect to screen coordinates via the parent
+        //    window. NSView::convertRect_toView with toView=None converts to
+        //    window coordinates; NSWindow::convertRectToScreen finishes the job.
+        let parent_window = match parent_view.window() {
+            Some(w) => w,
+            None => return,
+        };
+        let row_rect_view = NSRect::new(
+            NSPoint::new(anchor.row_x, anchor.row_y),
+            NSSize::new(anchor.row_w, anchor.row_h),
+        );
+        let row_rect_window = parent_view.convertRect_toView(row_rect_view, None);
+        let row_rect_screen = parent_window.convertRectToScreen(row_rect_window);
+
+        // 3. Decide left/right placement and clamp to the visible screen frame.
+        let screen_frame = parent_window
+            .screen()
+            .map(|s| s.visibleFrame())
+            .unwrap_or_else(|| NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1920.0, 1080.0)));
+        let right_x = row_rect_screen.origin.x + row_rect_screen.size.width + POPOVER_GAP;
+        let mut origin_x =
+            if right_x + POPOVER_WIDTH <= screen_frame.origin.x + screen_frame.size.width {
+                right_x
+            } else {
+                row_rect_screen.origin.x - POPOVER_GAP - POPOVER_WIDTH
+            };
+        if origin_x < screen_frame.origin.x {
+            origin_x = screen_frame.origin.x;
+        }
+        // The popover's top edge aligns with the row's top edge in screen
+        // coordinates. NSScreen has bottom-origin coordinates, so the row's
+        // top in screen coords is `origin.y + size.height`.
+        let row_top_screen = row_rect_screen.origin.y + row_rect_screen.size.height;
+        let mut origin_y = row_top_screen - panel_h;
+        if origin_y < screen_frame.origin.y {
+            origin_y = screen_frame.origin.y;
+        }
+
+        let frame = NSRect::new(
+            NSPoint::new(origin_x, origin_y),
+            NSSize::new(POPOVER_WIDTH, panel_h),
+        );
+        let text_frame = NSRect::new(
+            NSPoint::new(POPOVER_PADDING, POPOVER_PADDING),
+            NSSize::new(inner_w, panel_h - POPOVER_PADDING * 2.0),
+        );
+
+        unsafe {
+            let ns_text = NSString::from_str(text);
+            text_field.setStringValue(&ns_text);
+            text_field.setFrame(text_frame);
+            let _: () = msg_send![&*window, setFrame: frame, display: true];
+            let _: () = msg_send![&*window, orderFrontRegardless];
+        }
+    }
+
+    pub fn hide(&mut self) {
+        if let Some(window) = &self.window {
+            unsafe {
+                let _: () = msg_send![&**window, orderOut: std::ptr::null_mut::<AnyObject>()];
+            }
+        }
+    }
+
+    fn ensure_window(&mut self, mtm: MainThreadMarker) {
+        if self.window.is_some() {
+            return;
+        }
+        let initial_rect = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(POPOVER_WIDTH, 100.0),
+        );
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                initial_rect,
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType(2), // NSBackingStoreBuffered
+                false,
+            )
+        };
+        window.setLevel(25); // NSStatusWindowLevel — floating above app windows
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setHasShadow(true);
+        unsafe {
+            let _: () = msg_send![&*window, setIgnoresMouseEvents: true];
+        }
+
+        // Build content view: a layer-backed NSView with rounded background.
+        let content_view = NSView::initWithFrame(NSView::alloc(mtm), initial_rect);
+        content_view.setWantsLayer(true);
+        if let Some(layer) = content_view.layer() {
+            layer.setCornerRadius(8.0);
+            layer.setMasksToBounds(true);
+            let bg = NSColor::colorWithRed_green_blue_alpha(0.10, 0.11, 0.13, 0.97);
+            layer.setBackgroundColor(Some(&bg.CGColor()));
+        }
+
+        // Build the wrapped multi-line text field.
+        let text_rect = NSRect::new(
+            NSPoint::new(POPOVER_PADDING, POPOVER_PADDING),
+            NSSize::new(
+                POPOVER_WIDTH - POPOVER_PADDING * 2.0,
+                100.0 - POPOVER_PADDING * 2.0,
+            ),
+        );
+        let text_field = NSTextField::initWithFrame(NSTextField::alloc(mtm), text_rect);
+        text_field.setBezeled(false);
+        text_field.setDrawsBackground(false);
+        text_field.setEditable(false);
+        text_field.setSelectable(false);
+        let font = NSFont::monospacedSystemFontOfSize_weight(POPOVER_FONT_SIZE, 0.0);
+        text_field.setFont(Some(&font));
+        let fg = NSColor::colorWithRed_green_blue_alpha(0.92, 0.94, 0.96, 1.0);
+        text_field.setTextColor(Some(&fg));
+        unsafe {
+            if let Some(cell) = text_field.cell() {
+                let _: () = msg_send![&cell, setWraps: true];
+            }
+        }
+        text_field.setMaximumNumberOfLines(0);
+
+        content_view.addSubview(&text_field);
+        window.setContentView(Some(&content_view));
+
+        self.window = Some(window);
+        self.text_field = Some(text_field);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn estimate_wrapped_text_height(text: &str, width: f64, font_size: f64) -> f64 {
+    let line_height = font_size * 1.4;
+    let avg_char_width = font_size * 0.55;
+    let chars_per_line = (width / avg_char_width).floor() as usize;
+    if chars_per_line == 0 {
+        return line_height;
+    }
+    let mut total_lines = 0usize;
+    for line in text.lines() {
+        let line_chars = line.chars().count();
+        if line_chars == 0 {
+            total_lines += 1;
+        } else {
+            total_lines += line_chars.div_ceil(chars_per_line);
+        }
+    }
+    if total_lines == 0 {
+        total_lines = 1;
+    }
+    (total_lines as f64) * line_height
 }
 
 #[cfg(test)]
