@@ -8,7 +8,7 @@
 
 - Mission Control / Classic テーマで、行への hover 停止 500ms 後に「最後の assistant 応答の末尾（最大 10 行）」をフロート popover 表示する。
 - hover 行が変わったら即座に差し替え、hover が外れたら即座に消す。
-- トランスクリプト I/O はバックグラウンドで行い、UI の描画スレッドを止めない。
+- トランスクリプト読み込みはセッションごとにメモリキャッシュし、ファイルサイズが変わったときだけ再読み込みする（典型的な transcript なら最初の読み込みも数十 ms 程度なので、500ms の hover 遅延の中で同期処理する）。
 - テスト可能なロジック（hit-test / 抽出処理）を `window.rs` 本体から切り出す。
 
 ## Non-Goals (YAGNI)
@@ -175,31 +175,27 @@ HoverTracker::on_mouse(hit) -> HoverEvent
          - popover hide
          - tracker clear
 
-[500ms timer fire]
+[500ms timer fire (main thread)]
    │
    ▼
 tracker の current.version が timer 起動時の version と一致していたら:
    │
    ├ session_key から session を引き、transcript_path を取得
+   ├ TranscriptCache.get_or_load(transcript_path) を呼ぶ
+   │     - キャッシュキー: (path, file_size)
+   │     - キャッシュヒット: 即返却
+   │     - キャッシュミス: parse_session_file() → extract_last_assistant_truncated(record, 10)
+   │       → 結果を cache に保存して返却
    │
-   └ std::thread::spawn で background 読み込み
-         │
-         ├ parse_session_file() → SessionRecord
-         ├ extract_last_assistant_truncated(record, 10)
-         │
-         └ 結果を `dispatch_async(dispatch_get_main_queue(), ...)` で main thread に post
-
-[main thread]
-   │
-   ▼
- - tracker.current_version() == 読み込み開始時の version の場合のみ popover.show()
- - 一致しない場合は破棄
+   └ Some(text) なら popover.show(text, anchor_rect, screen)
+     None なら何もしない
 ```
 
-### 同時実行制御
+### 状態管理
 
-- `HoverTracker` / `HoverPopover` は `Mutex<HoverRuntime>` でグローバル static として保持（他の window 状態と同様）。
-- バックグラウンド読み込みは `version` による stale チェックで競合を捨てる（ロックは main thread 通過時のみ）。
+- `HoverTracker` / `HoverPopover` / `TranscriptCache` は `Mutex<HoverRuntime>` でグローバル static として保持（他の window 状態と同様）。
+- 全ての処理は main thread から呼ばれる（NSTimer fire 経由含む）。
+- `version` は同一行の hover 中に複数回 NSTimer がスケジュールされた場合（NSEvent の連続発火など）の重複発火を捨てるためのものとして使う。
 
 ## エラーハンドリング
 
