@@ -4,6 +4,8 @@
 //! lives in `window.rs`.
 
 use crate::history::{Role, SessionRecord};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Layout constants for the Mission Control theme. Defaults match the
@@ -242,6 +244,56 @@ impl HoverTracker {
     }
 }
 
+/// Memoizes the result of `extract_last_assistant_truncated` keyed by file
+/// path. The cache key includes the file size so the entry is naturally
+/// invalidated when new turns are appended.
+#[derive(Debug, Default)]
+pub struct TranscriptCache {
+    entries: HashMap<PathBuf, CacheEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    file_size: u64,
+    text: Option<String>,
+}
+
+impl TranscriptCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the cached truncated text for `path`, loading and parsing the
+    /// transcript on cache miss. Returns `None` if the file is missing,
+    /// unreadable, or contains no assistant turn.
+    pub fn get_or_load(&mut self, path: &Path, max_lines: usize) -> Option<String> {
+        let metadata = std::fs::metadata(path).ok()?;
+        let file_size = metadata.len();
+
+        if let Some(entry) = self.entries.get(path)
+            && entry.file_size == file_size
+        {
+            return entry.text.clone();
+        }
+
+        let record = crate::history::loader::parse_session_file(path)?;
+        let text = extract_last_assistant_truncated(&record, max_lines);
+        self.entries.insert(
+            path.to_path_buf(),
+            CacheEntry {
+                file_size,
+                text: text.clone(),
+            },
+        );
+        text
+    }
+
+    #[cfg(test)]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,5 +525,41 @@ mod tests {
         t.on_mouse(Some((dummy_hit(1), "k1".into())), now);
         let ev = t.on_mouse(Some((dummy_hit(1), "k2".into())), now);
         assert_eq!(ev, HoverEvent::Entered { idx: 1, version: 2 });
+    }
+
+    // ---- TranscriptCache ----
+
+    #[test]
+    fn cache_returns_some_for_known_fixture() {
+        let mut cache = TranscriptCache::new();
+        let path = std::path::PathBuf::from(
+            "tests/fixtures/history/assistant_text_and_tool_use.jsonl",
+        );
+        let text = cache.get_or_load(&path, 10);
+        assert!(
+            text.is_some(),
+            "expected fixture to yield assistant text, got None"
+        );
+        let text = text.unwrap();
+        assert!(text.contains("let me run a tool"));
+    }
+
+    #[test]
+    fn cache_returns_none_for_missing_file() {
+        let mut cache = TranscriptCache::new();
+        let path = std::path::PathBuf::from("tests/fixtures/history/__does_not_exist__.jsonl");
+        assert!(cache.get_or_load(&path, 10).is_none());
+    }
+
+    #[test]
+    fn cache_serves_subsequent_calls_without_re_parse() {
+        let mut cache = TranscriptCache::new();
+        let path = std::path::PathBuf::from(
+            "tests/fixtures/history/assistant_text_and_tool_use.jsonl",
+        );
+        let first = cache.get_or_load(&path, 10);
+        let second = cache.get_or_load(&path, 10);
+        assert_eq!(first, second);
+        assert_eq!(cache.entry_count(), 1);
     }
 }
