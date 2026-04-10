@@ -8,16 +8,23 @@ use crate::monitor::theme::{self, AgentType, StatusColor, anim, palette, window_
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
-use objc2::{ClassType, MainThreadOnly, msg_send, sel};
+use objc2::{AnyThread, ClassType, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
     NSBezierPath, NSColor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSMenu, NSMenuItem,
-    NSScreen, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSScreen, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
+use crate::monitor::window_hover::{
+    ClassicLayout, HoverEvent, HoverPopover, HoverTracker, MissionControlLayout, TranscriptCache,
+    hit_test_classic, hit_test_mission_control,
+};
+
 type CGFloat = f64;
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::{Mutex, Once, OnceLock};
 use std::time::Instant;
@@ -230,6 +237,34 @@ static SELECTED_INDEX: Mutex<Option<usize>> = Mutex::new(None);
 static CONTENT_VIEW_PTR: Mutex<Option<usize>> = Mutex::new(None);
 static WINDOW_PTR: Mutex<Option<usize>> = Mutex::new(None);
 static AF_LABEL_PTR: Mutex<Option<usize>> = Mutex::new(None);
+
+// --- Hover popover runtime (main-thread-only, lazy-initialized) ---
+
+struct HoverRuntime {
+    tracker: HoverTracker,
+    cache: TranscriptCache,
+    popover: HoverPopover,
+    pending_timer_version: Option<u64>,
+}
+
+thread_local! {
+    static HOVER_RUNTIME: RefCell<Option<HoverRuntime>> = const { RefCell::new(None) };
+}
+
+fn with_hover_runtime<R>(f: impl FnOnce(&mut HoverRuntime) -> R) -> R {
+    HOVER_RUNTIME.with(|cell| {
+        let mut borrowed = cell.borrow_mut();
+        if borrowed.is_none() {
+            *borrowed = Some(HoverRuntime {
+                tracker: HoverTracker::new(),
+                cache: TranscriptCache::new(),
+                popover: HoverPopover::new(),
+                pending_timer_version: None,
+            });
+        }
+        f(borrowed.as_mut().unwrap())
+    })
+}
 static NOTIFIED_APPROVALS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
@@ -592,6 +627,180 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
     }
 
     request_redraw();
+}
+
+// --- Hover event handlers (wired into VIEW_CLASS) ---
+
+extern "C" fn mouse_moved(this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) {
+    handle_mouse_event(this, event);
+}
+
+extern "C" fn mouse_entered(this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) {
+    handle_mouse_event(this, event);
+}
+
+extern "C" fn mouse_exited(_this: *mut AnyObject, _sel: Sel, _event: *mut AnyObject) {
+    handle_mouse_clear();
+}
+
+extern "C" fn update_tracking_areas(this: *mut AnyObject, _sel: Sel) {
+    let view: &NSView = unsafe { &*(this as *const NSView) };
+    install_tracking_area(view);
+}
+
+extern "C" fn hover_timer_fired(this: *mut AnyObject, _sel: Sel, _timer: *mut AnyObject) {
+    let view: &NSView = unsafe { &*(this as *const NSView) };
+    on_hover_timer_fired(view);
+}
+
+fn install_tracking_area(view: &NSView) {
+    // Remove any existing tracking areas first so the rect always matches the
+    // current view bounds (called whenever the view resizes).
+    let existing = view.trackingAreas();
+    for area in existing.iter() {
+        view.removeTrackingArea(&area);
+    }
+    let bounds = view.bounds();
+    let options = NSTrackingAreaOptions::MouseEnteredAndExited
+        | NSTrackingAreaOptions::MouseMoved
+        | NSTrackingAreaOptions::ActiveAlways
+        | NSTrackingAreaOptions::InVisibleRect;
+    let area: Retained<NSTrackingArea> = unsafe {
+        let alloc = NSTrackingArea::alloc();
+        msg_send![
+            alloc,
+            initWithRect: bounds,
+            options: options,
+            owner: view,
+            userInfo: std::ptr::null_mut::<AnyObject>()
+        ]
+    };
+    view.addTrackingArea(&area);
+}
+
+fn handle_mouse_event(view_ptr: *mut AnyObject, event_ptr: *mut AnyObject) {
+    let view: &NSView = unsafe { &*(view_ptr as *const NSView) };
+    let event: &NSEvent = unsafe { &*(event_ptr as *const NSEvent) };
+
+    let theme = *CURRENT_THEME.lock().unwrap();
+    if matches!(theme, WindowThemeId::Notch) {
+        // Notch theme: hover popover not supported.
+        with_hover_runtime(|rt| {
+            if rt.tracker.current_idx().is_some() {
+                rt.tracker.clear();
+                rt.popover.hide();
+                rt.pending_timer_version = None;
+            }
+        });
+        return;
+    }
+
+    let window_point = event.locationInWindow();
+    let view_point = view.convertPoint_fromView(window_point, None);
+    let view_width = view.bounds().size.width;
+
+    let sessions = SESSION_LIST.lock().unwrap();
+    let session_count = sessions.len();
+    let hit = match theme {
+        WindowThemeId::MissionControl => hit_test_mission_control(
+            view_point.x,
+            view_point.y,
+            view_width,
+            session_count,
+            MissionControlLayout::default(),
+        ),
+        WindowThemeId::Classic => hit_test_classic(
+            view_point.x,
+            view_point.y,
+            view_width,
+            session_count,
+            ClassicLayout::default(),
+        ),
+        WindowThemeId::Notch => None,
+    };
+    let hit_with_key = hit.and_then(|h| sessions.get(h.idx).map(|s| (h, s.key())));
+    drop(sessions);
+
+    let needs_timer = with_hover_runtime(|rt| {
+        let event = rt.tracker.on_mouse(hit_with_key, Instant::now());
+        match event {
+            HoverEvent::Entered { version, .. } => {
+                rt.popover.hide();
+                rt.pending_timer_version = Some(version);
+                true
+            }
+            HoverEvent::Cleared => {
+                rt.popover.hide();
+                rt.pending_timer_version = None;
+                false
+            }
+            HoverEvent::Unchanged => false,
+        }
+    });
+
+    if needs_timer {
+        schedule_hover_timer(view);
+    }
+}
+
+fn handle_mouse_clear() {
+    with_hover_runtime(|rt| {
+        rt.tracker.clear();
+        rt.popover.hide();
+        rt.pending_timer_version = None;
+    });
+}
+
+fn schedule_hover_timer(view: &NSView) {
+    unsafe {
+        let _: Retained<NSTimer> = msg_send![
+            NSTimer::class(),
+            scheduledTimerWithTimeInterval: 0.5_f64,
+            target: view,
+            selector: sel!(cckitHoverTimerFired:),
+            userInfo: std::ptr::null_mut::<AnyObject>(),
+            repeats: false
+        ];
+    }
+}
+
+fn on_hover_timer_fired(view: &NSView) {
+    // Snapshot the bits we need under the hover lock without holding it
+    // across NSWindow/cache work that may also lock.
+    let snapshot = with_hover_runtime(|rt| {
+        let scheduled = rt.pending_timer_version;
+        let current = rt.tracker.current_version();
+        if scheduled.is_none() || scheduled != current {
+            rt.pending_timer_version = None;
+            return None;
+        }
+        rt.pending_timer_version = None;
+        let idx = rt.tracker.current_idx()?;
+        let hit = rt.tracker.current_hit()?;
+        Some((idx, hit))
+    });
+    let Some((idx, hit)) = snapshot else { return };
+
+    let session = {
+        let sessions = SESSION_LIST.lock().unwrap();
+        sessions.get(idx).cloned()
+    };
+    let Some(session) = session else { return };
+    let Some(transcript_path) = session.transcript_path.as_ref() else {
+        return;
+    };
+    let path = std::path::PathBuf::from(transcript_path);
+
+    let text = with_hover_runtime(|rt| rt.cache.get_or_load(&path, 10));
+    let Some(text) = text else { return };
+
+    with_hover_runtime(|rt| {
+        // Re-check that the hover is still on the same row before showing.
+        if rt.tracker.current_idx() != Some(idx) {
+            return;
+        }
+        rt.popover.show(view, hit, &text);
+    });
 }
 
 fn request_redraw() {
@@ -1387,6 +1596,26 @@ fn get_view_class() -> &'static AnyClass {
                 sel!(isFlipped),
                 is_flipped as extern "C" fn(*mut AnyObject, Sel) -> Bool,
             );
+            builder.add_method(
+                sel!(mouseMoved:),
+                mouse_moved as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(mouseEntered:),
+                mouse_entered as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(mouseExited:),
+                mouse_exited as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(updateTrackingAreas),
+                update_tracking_areas as extern "C" fn(*mut AnyObject, Sel),
+            );
+            builder.add_method(
+                sel!(cckitHoverTimerFired:),
+                hover_timer_fired as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
         }
 
         let cls = builder.register();
@@ -2054,6 +2283,12 @@ fn setup_window(
 
     scroll_view.setDocumentView(Some(&doc_view));
     root.addSubview(&scroll_view);
+
+    // Install the initial tracking area for hover popover. AppKit will call
+    // `updateTrackingAreas` automatically on subsequent geometry changes.
+    unsafe {
+        let _: () = msg_send![&*doc_view, updateTrackingAreas];
+    }
 
     // Set up standard application menu (provides Cmd+H hide, Cmd+Q quit, Cmd+M minimize)
     setup_main_menu(mtm, app);
