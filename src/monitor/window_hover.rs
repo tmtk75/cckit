@@ -5,6 +5,77 @@
 
 use crate::history::{Role, SessionRecord};
 
+/// Layout constants for the Mission Control theme. Defaults match the
+/// constants currently in use in `src/monitor/window.rs`. The values are
+/// passed in explicitly so the hit-test logic can be unit tested without
+/// depending on `window.rs`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MissionControlLayout {
+    pub header_height: f64,
+    pub card_height: f64,
+    pub card_spacing: f64,
+    pub left_pad: f64,
+}
+
+impl MissionControlLayout {
+    pub const fn default() -> Self {
+        Self {
+            header_height: 28.0,
+            card_height: 38.0,
+            card_spacing: 2.0,
+            left_pad: 8.0,
+        }
+    }
+}
+
+/// Result of hit-testing a mouse point against the rendered session list.
+/// Coordinates are in the (flipped) view's local coordinate space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HoverHit {
+    pub idx: usize,
+    pub row_x: f64,
+    pub row_y: f64,
+    pub row_w: f64,
+    pub row_h: f64,
+}
+
+/// Returns the row hit by `(point_x, point_y)` for the Mission Control theme,
+/// or `None` if the point is outside any card (header, gap between cards,
+/// padding, etc.).
+pub fn hit_test_mission_control(
+    point_x: f64,
+    point_y: f64,
+    view_width: f64,
+    session_count: usize,
+    layout: MissionControlLayout,
+) -> Option<HoverHit> {
+    if session_count == 0 || point_y < layout.header_height {
+        return None;
+    }
+    let stride = layout.card_height + layout.card_spacing;
+    let rel_y = point_y - layout.header_height;
+    let idx = (rel_y / stride).floor() as usize;
+    if idx >= session_count {
+        return None;
+    }
+    let in_card = rel_y - (idx as f64) * stride;
+    if in_card >= layout.card_height {
+        return None;
+    }
+    let row_x = layout.left_pad;
+    let row_w = view_width - layout.left_pad * 2.0;
+    if point_x < row_x || point_x > row_x + row_w {
+        return None;
+    }
+    Some(HoverHit {
+        idx,
+        row_x,
+        row_y: layout.header_height + (idx as f64) * stride,
+        row_w,
+        row_h: layout.card_height,
+    })
+}
+
 /// Returns up to `max_lines` lines from the most recent assistant turn in
 /// `record`. If the response has more than `max_lines` lines, the result is
 /// truncated and a " …" suffix is appended to the last kept line. Returns
@@ -105,5 +176,58 @@ mod tests {
             extract_last_assistant_truncated(&r, 10),
             Some("a2".to_string())
         );
+    }
+
+    // ---- Mission Control hit-test ----
+
+    #[test]
+    fn mc_hit_test_header_returns_none() {
+        let layout = MissionControlLayout::default();
+        assert!(hit_test_mission_control(50.0, 10.0, 680.0, 3, layout).is_none());
+    }
+
+    #[test]
+    fn mc_hit_test_first_card_center() {
+        let layout = MissionControlLayout::default();
+        // first card occupies y in [28, 66)
+        let hit = hit_test_mission_control(50.0, 40.0, 680.0, 3, layout).unwrap();
+        assert_eq!(hit.idx, 0);
+        assert_eq!(hit.row_y, 28.0);
+        assert_eq!(hit.row_h, 38.0);
+    }
+
+    #[test]
+    fn mc_hit_test_second_card() {
+        let layout = MissionControlLayout::default();
+        // second card occupies y in [68, 106) (28 + 38 + 2)
+        let hit = hit_test_mission_control(50.0, 80.0, 680.0, 3, layout).unwrap();
+        assert_eq!(hit.idx, 1);
+        assert_eq!(hit.row_y, 68.0);
+    }
+
+    #[test]
+    fn mc_hit_test_gap_between_cards_returns_none() {
+        let layout = MissionControlLayout::default();
+        // gap: y in [66, 68)
+        assert!(hit_test_mission_control(50.0, 67.0, 680.0, 3, layout).is_none());
+    }
+
+    #[test]
+    fn mc_hit_test_below_last_card_returns_none() {
+        let layout = MissionControlLayout::default();
+        // 3 cards, last card ends ~y=146; y=200 is past it
+        assert!(hit_test_mission_control(50.0, 200.0, 680.0, 3, layout).is_none());
+    }
+
+    #[test]
+    fn mc_hit_test_left_padding_returns_none() {
+        let layout = MissionControlLayout::default();
+        assert!(hit_test_mission_control(2.0, 40.0, 680.0, 3, layout).is_none());
+    }
+
+    #[test]
+    fn mc_hit_test_empty_session_list_returns_none() {
+        let layout = MissionControlLayout::default();
+        assert!(hit_test_mission_control(50.0, 100.0, 680.0, 0, layout).is_none());
     }
 }
