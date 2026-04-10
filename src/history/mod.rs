@@ -54,6 +54,14 @@ impl SessionRecord {
             .find(|t| t.role == Role::User)
             .map(|t| t.text.as_str())
     }
+
+    pub fn last_assistant_text(&self) -> Option<&str> {
+        self.turns
+            .iter()
+            .rev()
+            .find(|t| t.role == Role::Assistant)
+            .map(|t| t.text.as_str())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -135,5 +143,61 @@ mod tests {
         assert_eq!(rec.turns.len(), 2);
         assert_eq!(rec.first_user_text(), Some("hello"));
         assert_eq!(rec.last_user_text(), Some("hello"));
+    }
+
+    #[test]
+    fn last_assistant_text_returns_most_recent_assistant_turn() {
+        let ts = chrono::Utc.with_ymd_and_hms(2026, 3, 12, 0, 0, 0).unwrap();
+        let turns = vec![
+            Turn {
+                role: Role::User,
+                timestamp: ts,
+                text: "q1".into(),
+            },
+            Turn {
+                role: Role::Assistant,
+                timestamp: ts,
+                text: "a1".into(),
+            },
+            Turn {
+                role: Role::User,
+                timestamp: ts,
+                text: "q2".into(),
+            },
+            Turn {
+                role: Role::Assistant,
+                timestamp: ts,
+                text: "a2".into(),
+            },
+        ];
+        let rec = SessionRecord {
+            session_id: "abc".into(),
+            cwd: "/tmp".into(),
+            git_branch: None,
+            file_path: "/tmp/x.jsonl".into(),
+            started_at: ts,
+            ended_at: ts,
+            turns,
+        };
+        assert_eq!(rec.last_assistant_text(), Some("a2"));
+    }
+
+    #[test]
+    fn last_assistant_text_returns_none_when_no_assistant_turns() {
+        let ts = chrono::Utc.with_ymd_and_hms(2026, 3, 12, 0, 0, 0).unwrap();
+        let rec = SessionRecord {
+            session_id: "abc".into(),
+            cwd: "/tmp".into(),
+            git_branch: None,
+            file_path: "/tmp/x.jsonl".into(),
+            started_at: ts,
+            ended_at: ts,
+            turns: vec![Turn {
+                role: Role::User,
+                timestamp: ts,
+                text: "q".into(),
+            }],
+        };
+        assert_eq!(rec.last_assistant_text(), None);
     }
 }
