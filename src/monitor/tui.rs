@@ -451,6 +451,14 @@ fn draw_sessions(frame: &mut Frame, area: Rect, app: &App) {
     for (idx, session) in app.sessions.iter().enumerate() {
         let is_selected = idx == app.selected_index;
         let is_stopped = session.status == SessionStatus::Stopped;
+        let inactive_factor = match session.status {
+            SessionStatus::Running | SessionStatus::WaitingInput => {
+                theme::inactivity_factor(session.updated_at, chrono::Utc::now())
+            }
+            _ => 0.0,
+        };
+        let is_inactive = inactive_factor > 0.0;
+        let inactive_brightness = theme::inactivity_alpha(inactive_factor);
 
         // Compute highlight background for selected row
         let bg_style = if is_selected {
@@ -470,18 +478,30 @@ fn draw_sessions(frame: &mut Frame, area: Rect, app: &App) {
             SessionStatus::Stopped => ("\u{25CB}", StatusColor::Stopped),
         };
 
-        let brightness = match session.status {
-            SessionStatus::Running => theme::breathing_pulse(elapsed_secs),
-            SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs),
-            SessionStatus::WaitingInput => theme::slow_fade(elapsed_secs),
-            SessionStatus::Stopped => 1.0,
+        let brightness = if is_inactive {
+            inactive_brightness
+        } else {
+            match session.status {
+                SessionStatus::Running => theme::breathing_pulse(elapsed_secs),
+                SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs),
+                SessionStatus::WaitingInput => theme::slow_fade(elapsed_secs),
+                SessionStatus::Stopped => 1.0,
+            }
         };
 
         let dot_rgb = apply_brightness(status_color.rgb(), brightness);
         let dot_color = Color::Rgb(dot_rgb.0, dot_rgb.1, dot_rgb.2);
 
-        let (tr, tg, tb) = palette::TEXT;
-        let (dr, dg, db) = palette::TEXT_DIM;
+        let (tr, tg, tb) = if is_inactive {
+            apply_brightness(palette::TEXT, inactive_brightness)
+        } else {
+            palette::TEXT
+        };
+        let (dr, dg, db) = if is_inactive {
+            apply_brightness(palette::TEXT_DIM, inactive_brightness)
+        } else {
+            palette::TEXT_DIM
+        };
         let text_color = Color::Rgb(tr, tg, tb);
         let dim_color = Color::Rgb(dr, dg, db);
 
@@ -499,6 +519,7 @@ fn draw_sessions(frame: &mut Frame, area: Rect, app: &App) {
         let context_pct = format!("{}%", (context_ratio * 100.0).round() as u32);
 
         // Row 1: status dot + display_name + separators + tool + elapsed + context%
+        // text_color is already brightness-adjusted for inactive sessions
         let row1_style = if is_stopped {
             Style::default().fg(dim_color)
         } else {

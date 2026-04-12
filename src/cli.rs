@@ -1559,6 +1559,19 @@ fn mcp_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) {
         }
     }
 
+    // 1b. User MCP servers (~/.claude.json top-level mcpServers)
+    let user_config = home.join(".claude.json");
+    if user_config.exists() {
+        for server in parse_user_mcp_servers(&user_config) {
+            entries.push(McpEntry {
+                name: server.name,
+                server_type: server.server_type,
+                command: server.command,
+                scope: "user".to_string(),
+            });
+        }
+    }
+
     // 2. Plugin MCP servers
     let plugin_mcps = load_plugin_mcp_definitions();
     for (name, server) in &plugin_mcps {
@@ -1697,6 +1710,23 @@ fn mcp_how_to_remove_command(filter: Option<String>) {
                 installed_via: None,
                 command: format!(
                     "Edit ~/.claude/.mcp.json and remove \"{}\" from mcpServers",
+                    server.name
+                ),
+            });
+        }
+    }
+
+    // 1b. User MCP servers (~/.claude.json top-level mcpServers)
+    let user_config = home.join(".claude.json");
+    if user_config.exists() {
+        for server in parse_user_mcp_servers(&user_config) {
+            entries.push(McpRemoveEntry {
+                name: server.name.clone(),
+                server_type: server.server_type,
+                scope: "user".to_string(),
+                installed_via: None,
+                command: format!(
+                    "Edit ~/.claude.json and remove \"{}\" from mcpServers",
                     server.name
                 ),
             });
@@ -3461,6 +3491,55 @@ fn scan_commands(dir: &Path) -> Vec<CommandInfo> {
 
     scan_dir(&commands_dir, &mut commands);
     commands
+}
+
+/// Parse user-scope MCP servers from ~/.claude.json top-level "mcpServers" key.
+/// Unlike parse_mcp_json, this does NOT fall back to treating all top-level keys as servers.
+fn parse_user_mcp_servers(config_file: &Path) -> Vec<McpServerInfo> {
+    let mut servers = Vec::new();
+    let content = match fs::read_to_string(config_file) {
+        Ok(c) => c,
+        Err(_) => return servers,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return servers,
+    };
+    let source = config_file.to_string_lossy().to_string();
+    if let Some(mcp_servers) = json.get("mcpServers").and_then(|v| v.as_object()) {
+        for (name, config) in mcp_servers {
+            let has_command = config.get("command").is_some();
+            let server_type = config
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or(if has_command { "stdio" } else { "http" })
+                .to_string();
+            let command = config.get("command").and_then(|v| v.as_str()).map(|s| {
+                let args = config
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                if args.is_empty() {
+                    s.to_string()
+                } else {
+                    format!("{} {}", s, args)
+                }
+            });
+            servers.push(McpServerInfo {
+                name: name.clone(),
+                server_type,
+                command,
+                source: source.clone(),
+            });
+        }
+    }
+    servers
 }
 
 fn parse_mcp_json(mcp_file: &Path) -> Vec<McpServerInfo> {

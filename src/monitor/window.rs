@@ -1154,7 +1154,18 @@ fn rebuild_view_mission_control(view: &NSView) {
         let card_w = view_width - LEFT_PAD * 2.0;
         let agent = session.agent_type();
         let is_stopped = session.status == SessionStatus::Stopped;
-        let card_alpha: CGFloat = if is_stopped { 0.5 } else { 1.0 };
+        let inactive_factor = match session.status {
+            SessionStatus::Running | SessionStatus::WaitingInput => {
+                theme::inactivity_factor(session.updated_at, chrono::Utc::now())
+            }
+            _ => 0.0,
+        };
+        let is_inactive = inactive_factor > 0.0;
+        let card_alpha: CGFloat = if is_stopped {
+            0.5
+        } else {
+            theme::inactivity_alpha(inactive_factor)
+        };
 
         // Save graphics state for per-card alpha
         NSGraphicsContext::saveGraphicsState_class();
@@ -1170,8 +1181,8 @@ fn rebuild_view_mission_control(view: &NSView) {
             color_surface()
         };
 
-        // For stopped cards, use color with reduced alpha
-        if is_stopped {
+        // For stopped or inactive cards, use color with reduced alpha
+        if card_alpha < 1.0 {
             let bg_with_alpha = unsafe {
                 let r: CGFloat = msg_send![&*card_bg, redComponent];
                 let g: CGFloat = msg_send![&*card_bg, greenComponent];
@@ -1184,14 +1195,18 @@ fn rebuild_view_mission_control(view: &NSView) {
             cg_fill_rounded_rect(card_rect, &card_bg, CARD_CORNER_RADIUS);
         }
 
-        // Card border glow animation
-        let glow_alpha = match session.status {
-            SessionStatus::Running => {
-                let phase = (elapsed_secs() / anim::GLOW_PERIOD) * std::f64::consts::TAU;
-                ((phase.sin() + 1.0) / 2.0) * 0.3
+        // Card border glow animation (suppressed for inactive sessions)
+        let glow_alpha = if is_inactive {
+            0.0
+        } else {
+            match session.status {
+                SessionStatus::Running => {
+                    let phase = (elapsed_secs() / anim::GLOW_PERIOD) * std::f64::consts::TAU;
+                    ((phase.sin() + 1.0) / 2.0) * 0.3
+                }
+                SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs()) * 0.3,
+                _ => 0.0,
             }
-            SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs()) * 0.3,
-            _ => 0.0,
         };
         if glow_alpha > 0.0 {
             let border_color = agent_accent_color_alpha(agent, glow_alpha);
@@ -1213,11 +1228,15 @@ fn rebuild_view_mission_control(view: &NSView) {
         } else {
             status_color(&session.status)
         };
-        let dot_alpha: f64 = match session.status {
-            SessionStatus::Running => theme::breathing_pulse(elapsed_secs()),
-            SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs()),
-            SessionStatus::WaitingInput => theme::slow_fade(elapsed_secs()),
-            SessionStatus::Stopped => 1.0,
+        let dot_alpha: f64 = if is_inactive {
+            1.0 // no animation, alpha comes from card_alpha
+        } else {
+            match session.status {
+                SessionStatus::Running => theme::breathing_pulse(elapsed_secs()),
+                SessionStatus::AwaitingApproval => theme::fast_blink(elapsed_secs()),
+                SessionStatus::WaitingInput => theme::slow_fade(elapsed_secs()),
+                SessionStatus::Stopped => 1.0,
+            }
         };
         // Apply dot alpha by adjusting color
         let dot_color_alpha = {
@@ -1232,7 +1251,7 @@ fn rebuild_view_mission_control(view: &NSView) {
                 };
                 sc.f64()
             };
-            let effective_alpha = dot_alpha * if is_stopped { card_alpha } else { 1.0 };
+            let effective_alpha = dot_alpha * if is_stopped || is_inactive { card_alpha } else { 1.0 };
             NSColor::colorWithRed_green_blue_alpha(r, g, b, effective_alpha)
         };
         cg_fill_circle(content_x + dot / 2.0, dot_cy, dot / 2.0, &dot_color_alpha);
@@ -1244,6 +1263,9 @@ fn rebuild_view_mission_control(view: &NSView) {
         let unfocusable = session.tty == "unknown";
         let text_color_effective = if is_stopped {
             let (r, g, b) = rgb_to_f64(palette::TEXT_DIM);
+            NSColor::colorWithRed_green_blue_alpha(r, g, b, card_alpha)
+        } else if is_inactive {
+            let (r, g, b) = rgb_to_f64(palette::TEXT);
             NSColor::colorWithRed_green_blue_alpha(r, g, b, card_alpha)
         } else if unfocusable {
             color_dim()
@@ -1273,7 +1295,7 @@ fn rebuild_view_mission_control(view: &NSView) {
             .map(|c| format!("  {}", c.label))
             .unwrap_or_default();
         let row1_right_text = format!("{}{}", elapsed, mini_ctx);
-        let dim_color = if is_stopped {
+        let dim_color = if is_stopped || is_inactive {
             let (r, g, b) = rgb_to_f64(palette::TEXT_DIM);
             NSColor::colorWithRed_green_blue_alpha(r, g, b, card_alpha)
         } else {
@@ -1325,7 +1347,7 @@ fn rebuild_view_mission_control(view: &NSView) {
             let fill_rect = NSRect::new(NSPoint::new(bar_x, bar_y), NSSize::new(fill_w, bar_h));
             cg_fill_rounded_rect(fill_rect, &context_bar_color(info.ratio), 1.5);
             // Leading-edge pulse
-            if fill_w > 4.0 && !is_stopped {
+            if fill_w > 4.0 && !is_stopped && !is_inactive {
                 let pulse_w = 4.0_f64.min(fill_w);
                 let phase = (elapsed_secs() * std::f64::consts::TAU / anim::CONTEXT_PULSE_PERIOD)
                     .sin()
@@ -1481,9 +1503,30 @@ fn rebuild_view_classic(view: &NSView) {
             view.addSubview(&create_colored_view(mtm, row_rect, &tint, 4.0));
         }
 
+        let cl_factor = match session.status {
+            SessionStatus::Running | SessionStatus::WaitingInput => {
+                theme::inactivity_factor(session.updated_at, chrono::Utc::now())
+            }
+            _ => 0.0,
+        };
+        let cl_alpha = theme::inactivity_alpha(cl_factor);
+
         let dot = CL_DOT_SIZE;
         let dot_y = y + (CL_ROW_HEIGHT - dot) / 2.0;
-        let dot_color = if session.tty == "unknown" { cl_color_dim() } else { cl_status_color(&session.status) };
+        let dot_color = if session.tty == "unknown" {
+            cl_color_dim()
+        } else if cl_factor > 0.0 {
+            // Gradual fade: status color with reduced alpha
+            let base = cl_status_color(&session.status);
+            unsafe {
+                let r: CGFloat = msg_send![&*base, redComponent];
+                let g: CGFloat = msg_send![&*base, greenComponent];
+                let b: CGFloat = msg_send![&*base, blueComponent];
+                NSColor::colorWithRed_green_blue_alpha(r, g, b, cl_alpha)
+            }
+        } else {
+            cl_status_color(&session.status)
+        };
         view.addSubview(&create_colored_view(
             mtm,
             NSRect::new(NSPoint::new(CL_LEFT_PAD, dot_y), NSSize::new(dot, dot)),
@@ -1497,7 +1540,14 @@ fn rebuild_view_classic(view: &NSView) {
         let elapsed = format_elapsed(session.updated_at);
         let unfocusable = session.tty == "unknown";
 
-        let text_color = if unfocusable || session.status == SessionStatus::Stopped { cl_color_dim() } else { cl_color_text() };
+        let text_color = if unfocusable || session.status == SessionStatus::Stopped {
+            cl_color_dim()
+        } else if cl_factor > 0.0 {
+            // Gradual fade: text color with reduced alpha
+            NSColor::colorWithRed_green_blue_alpha(0.945, 0.961, 0.976, cl_alpha)
+        } else {
+            cl_color_text()
+        };
 
         let left_text = format!("{:>2}  {:<4}  {}", i + 1, status_label(&session.status), project);
         let left_rect = NSRect::new(NSPoint::new(CL_TEXT_LEFT, y + 2.0), NSSize::new(proj_w, CL_ROW_HEIGHT - 4.0));

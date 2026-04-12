@@ -147,6 +147,32 @@ pub fn context_gauge_rgb(ratio: f64) -> (u8, u8, u8) {
 }
 
 // ---------------------------------------------------------------------------
+// Inactivity fade
+// ---------------------------------------------------------------------------
+
+/// How long (seconds) before inactivity fade begins.
+pub const INACTIVE_START_SECS: f64 = 3600.0; // 1 hour
+/// How long (seconds) until inactivity fade bottoms out.
+pub const INACTIVE_END_SECS: f64 = 86400.0; // 24 hours
+/// Minimum alpha / brightness multiplier at full inactivity.
+pub const INACTIVE_MIN_ALPHA: f64 = 0.55;
+
+/// Returns an "inactivity factor" in `[0.0, 1.0]` based on how long since
+/// `updated_at`.  0.0 = active (≤ 1 h), 1.0 = fully inactive (≥ 24 h),
+/// linearly interpolated in between.
+pub fn inactivity_factor(updated_at: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> f64 {
+    let idle_secs = now.signed_duration_since(updated_at).num_seconds().max(0) as f64;
+    ((idle_secs - INACTIVE_START_SECS) / (INACTIVE_END_SECS - INACTIVE_START_SECS)).clamp(0.0, 1.0)
+}
+
+/// Maps an inactivity factor to an alpha / brightness multiplier.
+/// factor = 0.0 → 1.0  (fully visible)
+/// factor = 1.0 → `INACTIVE_MIN_ALPHA`  (heavily faded)
+pub fn inactivity_alpha(factor: f64) -> f64 {
+    1.0 - factor * (1.0 - INACTIVE_MIN_ALPHA)
+}
+
+// ---------------------------------------------------------------------------
 // Animation timing constants and helpers
 // ---------------------------------------------------------------------------
 
@@ -467,5 +493,68 @@ mod tests {
     fn test_palette_border_alpha() {
         assert!(palette::BORDER_ALPHA > 0.0);
         assert!(palette::BORDER_ALPHA < 1.0);
+    }
+
+    // --- inactivity ---
+
+    #[test]
+    fn test_inactivity_factor_before_start() {
+        let now = chrono::Utc::now();
+        let updated = now - chrono::Duration::minutes(30);
+        assert_eq!(inactivity_factor(updated, now), 0.0);
+    }
+
+    #[test]
+    fn test_inactivity_factor_at_start() {
+        let now = chrono::Utc::now();
+        let updated = now - chrono::Duration::hours(1);
+        assert!((inactivity_factor(updated, now) - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_inactivity_factor_midpoint() {
+        let now = chrono::Utc::now();
+        // midpoint = (1h + 24h) / 2 = 12.5h = 45000s
+        let updated = now - chrono::Duration::seconds(45000);
+        assert!((inactivity_factor(updated, now) - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_inactivity_factor_at_end() {
+        let now = chrono::Utc::now();
+        let updated = now - chrono::Duration::hours(24);
+        assert!((inactivity_factor(updated, now) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_inactivity_factor_beyond_end() {
+        let now = chrono::Utc::now();
+        let updated = now - chrono::Duration::hours(24);
+        assert_eq!(inactivity_factor(updated, now), 1.0);
+    }
+
+    #[test]
+    fn test_inactivity_factor_future_clamps() {
+        let now = chrono::Utc::now();
+        let updated = now + chrono::Duration::minutes(5);
+        assert_eq!(inactivity_factor(updated, now), 0.0);
+    }
+
+    #[test]
+    fn test_inactivity_alpha_active() {
+        assert!((inactivity_alpha(0.0) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_inactivity_alpha_full_inactive() {
+        assert!((inactivity_alpha(1.0) - INACTIVE_MIN_ALPHA).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_inactivity_alpha_midpoint() {
+        let mid = inactivity_alpha(0.5);
+        assert!(mid > INACTIVE_MIN_ALPHA && mid < 1.0);
+        // Should be 1.0 - 0.5 * 0.45 = 0.775
+        assert!((mid - 0.775).abs() < 1e-10);
     }
 }
