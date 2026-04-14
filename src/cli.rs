@@ -303,6 +303,9 @@ Origins:
   \x1b[33m<author>\x1b[0m     author field value from frontmatter
   \x1b[2mno author\x1b[0m    no author field in frontmatter")]
     Ls {
+        /// Focus on a specific project's skills (e.g. `.` for current dir). Excludes global/plugin skills.
+        project_path: Option<String>,
+
         #[arg(short, long, help = "Filter skills by name pattern")]
         filter: Option<String>,
 
@@ -893,9 +896,31 @@ fn detect_skill_origin(skill_dir: &Path) -> String {
     "no author".to_string()
 }
 
-fn skill_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) {
+fn skill_ls_command(
+    project_path: Option<String>,
+    filter: Option<String>,
+    scope: Option<String>,
+    dupes: bool,
+) {
     let home = dirs::home_dir().expect("Could not find home directory");
     let global_claude = home.join(".claude");
+
+    if project_path.is_some() && scope.is_some() {
+        eprintln!("error: [project-path] and --scope cannot be used together");
+        std::process::exit(2);
+    }
+
+    // Resolve user-provided project path to canonical absolute path for matching.
+    let focus_project: Option<std::path::PathBuf> = match project_path.as_deref() {
+        Some(p) => match fs::canonicalize(p) {
+            Ok(abs) => Some(abs),
+            Err(e) => {
+                eprintln!("error: cannot resolve path '{p}': {e}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
 
     struct SkillEntry {
         name: String,
@@ -906,9 +931,10 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) 
 
     let mut entries: Vec<SkillEntry> = Vec::new();
 
-    // 1. Global user skills (~/.claude/skills/)
+    // 1. Global user skills (~/.claude/skills/) — skipped when focusing on a project
     let global_skills_dir = global_claude.join("skills");
-    if global_skills_dir.exists()
+    if focus_project.is_none()
+        && global_skills_dir.exists()
         && let Ok(dirs) = fs::read_dir(&global_skills_dir)
     {
         for entry in dirs.flatten() {
@@ -945,27 +971,40 @@ fn skill_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) 
         }
     }
 
-    // 2. Plugin skills
-    let plugins = scan_plugins(&global_claude);
-    for plugin in &plugins {
-        for skill in &plugin.skills {
-            entries.push(SkillEntry {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                origin: "plugin".to_string(),
-                scope: format!("plugin:{}", plugin.name),
-            });
+    // 2. Plugin skills — skipped when focusing on a project
+    if focus_project.is_none() {
+        let plugins = scan_plugins(&global_claude);
+        for plugin in &plugins {
+            for skill in &plugin.skills {
+                entries.push(SkillEntry {
+                    name: skill.name.clone(),
+                    description: skill.description.clone(),
+                    origin: "plugin".to_string(),
+                    scope: format!("plugin:{}", plugin.name),
+                });
+            }
         }
     }
 
-    // 3. All projects from ~/.claude.json
+    // 3. Project skills
     // Deduplicate by (skill_name, content_hash) to handle submodules with identical content
     let mut seen_content: std::collections::HashSet<(String, u64)> =
         std::collections::HashSet::new();
-    if let Ok(config) = load_claude_config()
-        && let Some(projects) = config.projects
+
+    // When focusing on a specific project, scan only that directory (bypass claude config).
+    // Otherwise, iterate all projects registered in ~/.claude.json.
+    let project_keys: Vec<String> = if let Some(ref focus) = focus_project {
+        vec![focus.to_string_lossy().into_owned()]
+    } else {
+        load_claude_config()
+            .ok()
+            .and_then(|c| c.projects)
+            .map(|p| p.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+
     {
-        for project_path in projects.keys() {
+        for project_path in &project_keys {
             let claude_dir = Path::new(project_path).join(".claude");
             if claude_dir.join("skills").exists() {
                 for skill_source in scan_skills_with_paths(&claude_dir) {
@@ -6133,11 +6172,12 @@ pub fn run() {
         }
         Some(Commands::Skill { command }) => match command {
             SkillCommands::Ls {
+                project_path,
                 filter,
                 scope,
                 dupes,
             } => {
-                skill_ls_command(filter, scope, dupes);
+                skill_ls_command(project_path, filter, scope, dupes);
             }
             SkillCommands::Copy {
                 filter,
