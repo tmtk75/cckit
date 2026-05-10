@@ -496,7 +496,7 @@ fn get_codex_config_path() -> PathBuf {
     get_codex_dir().join("config.toml")
 }
 
-/// Ensure codex_hooks feature flag is enabled in ~/.codex/config.toml
+/// Ensure hooks feature flag is enabled in ~/.codex/config.toml
 fn ensure_codex_feature_flag() -> io::Result<bool> {
     let config_path = get_codex_config_path();
     let codex_dir = get_codex_dir();
@@ -507,30 +507,28 @@ fn ensure_codex_feature_flag() -> io::Result<bool> {
 
     if config_path.exists() {
         let content = fs::read_to_string(&config_path)?;
-        if content.contains("codex_hooks") {
+        // Accept both old "codex_hooks" and new "hooks" key
+        if content.contains("hooks = true") {
             return Ok(false); // already configured
         }
-        // Check if [features] section already exists
         if content.contains("[features]") {
-            // Insert under existing [features] section
             let new_content = content.replace(
                 "[features]",
-                "[features]\ncodex_hooks = true  # Added by cckit (https://github.com/tmtk75/cckit)",
+                "[features]\nhooks = true  # Added by cckit (https://github.com/tmtk75/cckit)",
             );
             fs::write(&config_path, new_content)?;
         } else {
-            // Append new [features] section
             let mut file = fs::OpenOptions::new().append(true).open(&config_path)?;
             file.write_all(
                 b"\n# Added by cckit (https://github.com/tmtk75/cckit)\n\
-                  [features]\ncodex_hooks = true\n",
+                  [features]\nhooks = true\n",
             )?;
         }
     } else {
         fs::write(
             &config_path,
             "# Added by cckit (https://github.com/tmtk75/cckit)\n\
-             [features]\ncodex_hooks = true\n",
+             [features]\nhooks = true\n",
         )?;
     }
 
@@ -544,17 +542,17 @@ pub fn run_install_codex(force: bool) -> io::Result<()> {
     println!("{}", "cckit session install --codex".bold());
     println!();
 
-    // Ensure codex_hooks feature flag is enabled
+    // Ensure hooks feature flag is enabled
     match ensure_codex_feature_flag() {
         Ok(true) => {
             println!(
-                "{} Enabled codex_hooks in {}",
+                "{} Enabled hooks in {}",
                 "✓".green(),
                 get_codex_config_path().display().to_string().dimmed()
             );
         }
         Ok(false) => {
-            println!("{} codex_hooks already enabled in config.toml", "✓".green());
+            println!("{} hooks already enabled in config.toml", "✓".green());
         }
         Err(e) => {
             println!("{} Failed to update config.toml: {}", "⚠".yellow(), e);
