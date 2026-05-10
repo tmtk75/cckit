@@ -496,6 +496,44 @@ fn get_codex_config_path() -> PathBuf {
     get_codex_dir().join("config.toml")
 }
 
+/// Clear [hooks.state] entries from ~/.codex/config.toml so Codex will
+/// re-prompt the user to trust modified hooks.
+fn clear_codex_hooks_state() -> io::Result<bool> {
+    let config_path = get_codex_config_path();
+    if !config_path.exists() {
+        return Ok(false);
+    }
+
+    let content = fs::read_to_string(&config_path)?;
+    if !content.contains("[hooks.state.") {
+        return Ok(false);
+    }
+
+    let mut lines: Vec<&str> = content.lines().collect();
+    let mut in_hooks_state_entry = false;
+    lines.retain(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[hooks.state.\"") {
+            in_hooks_state_entry = true;
+            return false;
+        }
+        if in_hooks_state_entry {
+            if trimmed.starts_with('[') {
+                in_hooks_state_entry = false;
+            } else {
+                return false;
+            }
+        }
+        true
+    });
+
+    let new_content = lines.join("\n");
+    // Avoid trailing blank lines from removed sections
+    let new_content = new_content.trim_end().to_string() + "\n";
+    fs::write(&config_path, new_content)?;
+    Ok(true)
+}
+
 /// Ensure hooks feature flag is enabled in ~/.codex/config.toml
 fn ensure_codex_feature_flag() -> io::Result<bool> {
     let config_path = get_codex_config_path();
@@ -507,9 +545,8 @@ fn ensure_codex_feature_flag() -> io::Result<bool> {
 
     if config_path.exists() {
         let content = fs::read_to_string(&config_path)?;
-        // Accept both old "codex_hooks" and new "hooks" key
-        if content.contains("hooks = true") {
-            return Ok(false); // already configured
+        if content.contains("codex_hooks") || content.contains("hooks = true") {
+            return Ok(false); // already configured (legacy or new key)
         }
         if content.contains("[features]") {
             let new_content = content.replace(
@@ -562,6 +599,8 @@ pub fn run_install_codex(force: bool) -> io::Result<()> {
 
     let result = install_hooks_file(&hooks_path, CODEX_HOOK_EVENTS, &cckit_cmd, force)?;
 
+    let hooks_changed = result.created || !result.added.is_empty();
+
     if result.created {
         println!("{}", "No ~/.codex/hooks.json found.".yellow());
         println!("Creating new hooks.json...");
@@ -570,17 +609,7 @@ pub fn run_install_codex(force: bool) -> io::Result<()> {
             "✓".green(),
             CODEX_HOOK_EVENTS.len()
         );
-        println!();
-        println!("Hooks file: {}", hooks_path.display().to_string().dimmed());
-        println!();
-        println!(
-            "{}",
-            "Restart Codex sessions for hooks to take effect.".yellow()
-        );
-        return Ok(());
-    }
-
-    if !result.already_exists.is_empty() {
+    } else if !result.already_exists.is_empty() {
         println!("{}:", "Already configured".yellow());
         for event in &result.already_exists {
             println!("  {} {}", "✓".green(), event);
@@ -588,28 +617,50 @@ pub fn run_install_codex(force: bool) -> io::Result<()> {
         println!();
     }
 
-    if result.added.is_empty() {
+    if !result.created && result.added.is_empty() {
         println!("{}", "All cckit hooks are already configured.".green());
-        return Ok(());
     }
 
-    println!("{}:", "Adding".cyan());
-    for event in &result.added {
-        println!("  {} {} session hook {}", "+".green(), cckit_cmd, event);
-    }
-    println!();
+    if !result.created && !result.added.is_empty() {
+        println!("{}:", "Adding".cyan());
+        for event in &result.added {
+            println!("  {} {} session hook {}", "+".green(), cckit_cmd, event);
+        }
+        println!();
 
-    println!(
-        "{} Added {} hook(s) to hooks.json",
-        "✓".green(),
-        result.added.len()
-    );
+        println!(
+            "{} Added {} hook(s) to hooks.json",
+            "✓".green(),
+            result.added.len()
+        );
+    }
+
+    // Clear stale trusted_hash entries so Codex will re-prompt for trust
+    if hooks_changed || force {
+        match clear_codex_hooks_state() {
+            Ok(true) => {
+                println!(
+                    "{} Cleared hooks.state in config.toml (Codex will re-prompt for trust)",
+                    "✓".green()
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                println!(
+                    "{} Failed to clear hooks.state: {}",
+                    "⚠".yellow(),
+                    e
+                );
+            }
+        }
+    }
+
     println!();
     println!("Hooks file: {}", hooks_path.display().to_string().dimmed());
     println!();
     println!(
         "{}",
-        "Restart Codex sessions for hooks to take effect.".yellow()
+        "Restart Codex and approve hooks via /hooks for them to take effect.".yellow()
     );
 
     Ok(())

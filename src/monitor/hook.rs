@@ -112,7 +112,13 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
 
-    let hook_input: HookInput = serde_json::from_str(&input)?;
+    let hook_input: HookInput = match serde_json::from_str(&input) {
+        Ok(v) => v,
+        Err(e) => {
+            log_error("hook", &format!("{} input={}", e, input));
+            return Err(e.into());
+        }
+    };
     let event = hook_input.hook_event_name.as_str();
 
     let storage = Storage::new();
