@@ -12,10 +12,13 @@ Claude Code Kit - A toolkit for managing Claude Code and OpenAI Codex environmen
 cckit helps you manage and monitor your AI coding tool sessions:
 
 - **Session Monitoring** (`session`) - Track active Claude Code and Codex sessions in real-time with an interactive TUI
+- **Session Search** (`session search`) - Search past Claude Code sessions by message text with an interactive TUI browser
 - **Multi-tool Support** - Works with both Claude Code and OpenAI Codex via hooks
 - **Project Inspection** (`ls`) - View all Claude Code projects with their skills, agents, commands, plugins, and MCP servers at a glance
+- **Skill/MCP/Agent Management** (`skill`, `mcp`, `agent`) - List, copy, promote, validate, and remove skills, MCP servers, and agents across projects
 - **Permissions Audit** (`permissions`) - List, audit, and clean risky allow/deny rules across all projects
-- **Cleanup Tools** (`prune`, `sync`) - Remove stale project paths and orphaned sessions
+- **Environment Cleanup** (`tidy-up`, `prune`, `sync`) - Analyze for cleanup opportunities and remove stale data
+- **Marketplace Inspection** (`marketplace`) - Inspect and validate custom plugin marketplace directories
 
 ## Install
 
@@ -34,7 +37,13 @@ cargo install --path .
 ```bash
 cckit session      # Manage Claude Code sessions (TUI)
 cckit ls           # List Claude Code projects
+cckit skill        # Manage skills across projects (ls, copy, promote, validate, how-to-remove)
+cckit mcp          # Manage MCP servers across projects (ls, copy, how-to-remove)
+cckit agent        # Manage agents across projects (ls, how-to-remove)
 cckit permissions  # List/audit permissions across all projects
+cckit tidy-up      # Analyze skills, MCP servers, and plugins for cleanup opportunities
+cckit marketplace  # Inspect and validate a custom plugin marketplace
+cckit config       # Show ~/.claude.json contents in a readable format
 cckit prune        # Remove non-existent paths from ~/.claude.json
 cckit notify       # Send macOS notification (macOS only)
 cckit status       # Show cckit status and file paths
@@ -122,6 +131,24 @@ cckit session uninstall --codex  # Codex
 cckit session sync --execute
 ```
 
+### Session Search
+
+Search past Claude Code sessions by message text:
+
+```bash
+# Search by keywords (AND match)
+cckit session search terraform plan
+
+# Interactive fuzzy search TUI
+cckit session search -i
+
+# JSON output
+cckit session search --json deploy
+
+# Limit results
+cckit session search --limit 5 refactor
+```
+
 ## ls Command
 
 List Claude Code projects with their skills, agents, commands, and MCP servers.
@@ -173,6 +200,116 @@ cckit ls --no-skills --no-agents --no-mcp --no-commands
   MCP Servers:
     - notion (http) from ~/.ghq/github.com/example/project/.mcp.json
     - serena (stdio) - uvx serena start-mcp-server from ~/.ghq/github.com/example/project/.mcp.json
+```
+
+## skill Command
+
+Manage skills across all projects. List, copy between projects, promote to global scope, and validate for security.
+
+```bash
+# List all skills with their origin (personal, marketplace, plugin, etc.)
+cckit skill ls
+
+# Filter by name
+cckit skill ls -f terraform
+
+# Show skills in a specific project
+cckit skill ls .
+
+# Show only duplicates
+cckit skill ls --dupes
+
+# Copy a skill from another project
+cckit skill copy --from ~/other-project -n my-skill
+
+# Promote a project skill to user scope (~/.claude/skills/)
+cckit skill promote -n my-skill
+
+# Show how to remove/uninstall each skill
+cckit skill how-to-remove
+
+# Validate skills for security concerns (embedded shell commands, etc.)
+cckit skill validate                              # All installed skills
+cckit skill validate https://github.com/user/repo # GitHub URL
+cckit skill validate ./path/to/skill/             # Local path
+```
+
+## mcp Command
+
+Manage MCP servers across all projects.
+
+```bash
+# List all MCP servers with their origin
+cckit mcp ls
+
+# Filter by name
+cckit mcp ls -f notion
+
+# Copy an MCP server config from another project
+cckit mcp copy --from ~/other-project -n my-server
+
+# Show how to remove/uninstall each MCP server
+cckit mcp how-to-remove
+```
+
+## agent Command
+
+Manage agents across all projects.
+
+```bash
+# List all agents with their origin
+cckit agent ls
+
+# Filter by name
+cckit agent ls -f root-cause
+
+# Show how to remove/uninstall each agent
+cckit agent how-to-remove
+```
+
+## tidy-up Command
+
+Analyze skills, MCP servers, and plugins for cleanup opportunities.
+
+```bash
+# Full analysis
+cckit tidy-up
+
+# Skills only
+cckit tidy-up --skills-only
+
+# MCP servers only
+cckit tidy-up --mcp-only
+
+# Show context budget summary only
+cckit tidy-up --budget-only
+```
+
+## marketplace Command
+
+Inspect and validate a custom plugin marketplace directory.
+
+```bash
+# Show all plugins, skills, hooks, and MCP servers
+cckit marketplace summary ./my-marketplace
+
+# Validate structure and consistency
+cckit marketplace doctor ./my-marketplace
+```
+
+## config Command
+
+Show `~/.claude.json` contents in a readable format.
+
+```bash
+# Show overview
+cckit config
+
+# Inspect a specific key
+cckit config projects
+
+# Raw JSON output
+cckit config --raw
 ```
 
 ## notify Command
@@ -233,7 +370,7 @@ Options:
 - `-s, --subtitle` - Subtitle
 - `-m, --message` - Message body
 - `--sound` - Sound name (e.g., "Ping", "Purr", "default")
-- `-d, --duration` - Display duration in ms (default: 5000)
+- `-d, --duration` - Display duration in ms (default: 3000)
 - `-p, --position` - Window position: right-top, center-top, left-top, etc.
 - `--opacity` - Window opacity 0.0-1.0
 - `--bgcolor` - Background color as hex
@@ -430,6 +567,21 @@ open dist/CCKit.app
 3. Scans `.mcp.json` for MCP server configurations
 4. Parses YAML frontmatter from markdown files
 5. Displays name and description for each component
+
+### session search command
+
+1. Scans all Claude Code transcript JSONL files under `~/.claude/projects/`
+2. Parses user/assistant turns with timestamps
+3. Matches search terms (AND logic) against session text
+4. In interactive mode, provides a fuzzy-search ratatui TUI for browsing results
+
+### skill/mcp/agent commands
+
+1. Scans global (`~/.claude/`) and all project `.claude/` directories
+2. Detects origin: personal (skill-creator), marketplace, installed plugin, or project-local
+3. `copy` transfers configurations between projects
+4. `promote` moves project-local skills to user scope (`~/.claude/skills/`)
+5. `validate` checks skills for embedded shell commands and other security concerns
 
 ### permissions command
 

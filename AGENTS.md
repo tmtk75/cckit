@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`src/main.rs` is the CLI entrypoint and delegates most command logic to `src/cli.rs`. Session monitoring lives under `src/monitor/`, split by concern: `hook.rs` for Claude Code hook ingestion, `storage.rs` for file-backed state, `tui.rs` for the terminal UI, and `menubar.rs` / `window.rs` / `notification.rs` for macOS UI. Extra binaries live in `src/bin/` (`cckit_app.rs`, `cckit_window.rs`). Reference material is in `docs/`, visual assets in `assets/`, and the macOS app bundle script in `scripts/macos/build_app.sh`.
+`src/main.rs` is the CLI entrypoint and delegates most command logic to `src/cli.rs` (~6700 lines). Session monitoring lives under `src/monitor/`, split by concern: `hook.rs` for Claude Code hook ingestion, `storage.rs` for file-backed state, `tui.rs` for the terminal UI, `menubar.rs` / `window.rs` / `window_hover.rs` / `notification.rs` for macOS UI, and `theme.rs` / `display.rs` / `paths.rs` for shared rendering. Session search lives under `src/history/` (transcript parsing, search, interactive TUI). Plugin marketplace inspection is in `src/marketplace.rs`. Visual assets are in `assets/`, and the macOS app bundle script in `scripts/macos/build_app.sh`.
 
 ## Build, Test, and Development Commands
 Use Cargo directly or the matching `mise` tasks:

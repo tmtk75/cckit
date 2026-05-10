@@ -38,7 +38,19 @@ mise run build-app              # runs scripts/macos/build_app.sh
 - CLI mode: all subcommands including TUI (`cckit session ls`)
 - App mode: `cckit app` runs macOS window + menubar (also auto-detected when launched from .app bundle)
 
-**CLI layer** (`src/cli.rs`, ~2000 lines): All subcommand definitions (clap derive), project scanning logic (`ls`, `prune`, `config`, `doctor`, `status`), and YAML frontmatter parsing for skills/agents/commands.
+**CLI layer** (`src/cli.rs`, ~6700 lines): All subcommand definitions (clap derive), project scanning logic (`ls`, `prune`, `config`, `doctor`, `status`, `tidy-up`, `permissions`), YAML frontmatter parsing for skills/agents/commands, and dedicated `skill`/`mcp`/`agent` management subcommands (`ls`, `copy`, `promote`, `how-to-remove`, `validate`).
+
+**History module** (`src/history/`): Session search and browsing across past Claude Code transcripts.
+
+| File | Role |
+|------|------|
+| `mod.rs` | `SearchOpts`, `SessionRecord`, `Turn`, `Hit` data models |
+| `loader.rs` | Scan and parse session JSONL transcript files |
+| `search.rs` | AND-term and fuzzy search over session text |
+| `format.rs` | Plain text and JSON output formatting |
+| `tui.rs` | Interactive ratatui browser for search results |
+
+**Marketplace module** (`src/marketplace.rs`): Plugin marketplace inspection and validation (`marketplace summary`, `marketplace doctor`).
 
 **Monitor module** (`src/monitor/`): Session tracking and UI components.
 
@@ -51,8 +63,12 @@ mise run build-app              # runs scripts/macos/build_app.sh
 | `tui.rs` | ratatui-based interactive TUI |
 | `menubar.rs` | macOS NSStatusBar/NSMenu via objc2 |
 | `window.rs` | macOS NSWindow session monitor app via objc2 (`run_app` unifies window + menubar) |
+| `window_hover.rs` | Hover popover hit-testing and transcript preview extraction |
 | `notification.rs` | macOS custom notification window via objc2 |
 | `focus.rs` | Terminal focus via AppleScript (iTerm2, Terminal.app, Ghostty) |
+| `theme.rs` | Agent type colors, status colors, context gauge, inactivity fade, animations |
+| `display.rs` | Shared display helpers (relative time, elapsed, session count formatting) |
+| `paths.rs` | Data directory path resolution |
 
 **Data flow**: Claude Code / Codex hooks → `cckit session hook` (stdin JSON) → `storage.rs` (sessions.json with file lock) → TUI/menubar/window reads and displays.
 
