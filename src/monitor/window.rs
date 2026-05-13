@@ -272,23 +272,42 @@ static NOTIFIED_APPROVALS: std::sync::LazyLock<Mutex<std::collections::HashSet<S
 pub static AF_DISABLED_PROJECTS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
+static LAST_SYNC: Mutex<Option<Instant>> = Mutex::new(None);
+
 fn load_sessions() {
     let storage = Storage::new();
-    // Remove stale sessions (exited processes) from storage
-    let _ = storage.sync_sessions();
+
+    // Throttle sync_sessions (spawns ps per session) to once every 10 seconds
+    let should_sync = {
+        let mut last = LAST_SYNC.lock().unwrap();
+        let now_inst = Instant::now();
+        match *last {
+            Some(prev) if now_inst.duration_since(prev).as_secs() < 10 => false,
+            _ => {
+                *last = Some(now_inst);
+                true
+            }
+        }
+    };
+    if should_sync {
+        let _ = storage.sync_sessions();
+    }
+
     let store = storage.load();
     let mut sessions: Vec<Session> = store.sessions.into_values().collect();
     let now = chrono::Utc::now();
-    // Enrich sessions with context usage and subagent names from transcripts
     for session in &mut sessions {
         if let Some(ref tp) = session.transcript_path {
-            let ctx = crate::monitor::hook::read_context_usage(tp);
-            session.context_used_tokens = ctx.used_tokens;
-            session.context_max_tokens = ctx.max_tokens;
-            if ctx.model.is_some() {
-                session.model = ctx.model;
+            // Only re-read transcript if session was recently updated or has no cached data
+            let recently_updated = now.signed_duration_since(session.updated_at).num_seconds() < 30;
+            if recently_updated || session.context_used_tokens.is_none() {
+                let ctx = crate::monitor::hook::read_context_usage(tp);
+                session.context_used_tokens = ctx.used_tokens;
+                session.context_max_tokens = ctx.max_tokens;
+                if ctx.model.is_some() {
+                    session.model = ctx.model;
+                }
             }
-            // Backfill subagent name if missing
             if session.subagent_name.is_none() && session.is_subagent() {
                 session.subagent_name = crate::monitor::hook::extract_subagent_name(tp);
             }
