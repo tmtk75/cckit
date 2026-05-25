@@ -606,6 +606,24 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
                     *SELECTED_INDEX.lock().unwrap() = Some(idx);
                 }
             }
+            "d" => {
+                if let Some(idx) = current {
+                    let sessions = SESSION_LIST.lock().unwrap();
+                    if let Some(session) = sessions.get(idx) {
+                        let key = session.key();
+                        drop(sessions);
+                        let storage = Storage::new();
+                        let _ = storage.remove_session(&key);
+                        load_sessions();
+                        let new_count = SESSION_LIST.lock().unwrap().len();
+                        if new_count == 0 {
+                            *SELECTED_INDEX.lock().unwrap() = None;
+                        } else if idx >= new_count {
+                            *SELECTED_INDEX.lock().unwrap() = Some(new_count - 1);
+                        }
+                    }
+                }
+            }
             "f" => {
                 if let Some(idx) = current {
                     // Per-project toggle
