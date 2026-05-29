@@ -273,6 +273,8 @@ pub static AF_DISABLED_PROJECTS: std::sync::LazyLock<Mutex<std::collections::Has
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
 static LAST_SYNC: Mutex<Option<Instant>> = Mutex::new(None);
+static REDRAW_NEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static SESSION_FINGERPRINT: Mutex<u64> = Mutex::new(0);
 
 fn load_sessions() {
     let storage = Storage::new();
@@ -321,6 +323,26 @@ fn load_sessions() {
         }
     }
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    // Compute a fingerprint to detect meaningful changes
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sessions.len().hash(&mut hasher);
+    for s in &sessions {
+        s.session_id.hash(&mut hasher);
+        std::mem::discriminant(&s.status).hash(&mut hasher);
+        s.updated_at.timestamp().hash(&mut hasher);
+        s.prompt_count.hash(&mut hasher);
+        s.tool_count.hash(&mut hasher);
+        s.context_used_tokens.hash(&mut hasher);
+    }
+    let new_fp = hasher.finish();
+    let mut fp = SESSION_FINGERPRINT.lock().unwrap();
+    if *fp != new_fp {
+        *fp = new_fp;
+        REDRAW_NEEDED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     *SESSION_LIST.lock().unwrap() = sessions;
 }
 
@@ -420,7 +442,9 @@ fn calculate_fit_window_width() -> CGFloat {
             let count = sessions.len().max(1) as CGFloat;
             (count * 80.0 + 40.0).clamp(300.0, FIT_MAX_WIDTH)
         }
-        _ => (FIT_MIN_WIDTH + extra_chars * FIT_PATH_CHAR_WIDTH).clamp(FIT_MIN_WIDTH, FIT_MAX_WIDTH),
+        _ => {
+            (FIT_MIN_WIDTH + extra_chars * FIT_PATH_CHAR_WIDTH).clamp(FIT_MIN_WIDTH, FIT_MAX_WIDTH)
+        }
     }
 }
 
@@ -468,6 +492,20 @@ fn focus_selected() {
 
 // --- View helpers ---
 
+fn cached_mono_font(size: CGFloat) -> Retained<NSFont> {
+    use std::collections::HashMap;
+    thread_local! {
+        static CACHE: RefCell<HashMap<u64, Retained<NSFont>>> = RefCell::new(HashMap::new());
+    }
+    CACHE.with(|cache| {
+        let key = size.to_bits();
+        let mut map = cache.borrow_mut();
+        map.entry(key)
+            .or_insert_with(|| NSFont::monospacedSystemFontOfSize_weight(size, 0.0))
+            .clone()
+    })
+}
+
 fn create_mono_label(
     mtm: MainThreadMarker,
     text: &str,
@@ -477,7 +515,7 @@ fn create_mono_label(
 ) -> Retained<NSTextField> {
     let label = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect);
     label.setStringValue(&NSString::from_str(text));
-    let font = NSFont::monospacedSystemFontOfSize_weight(size, 0.0);
+    let font = cached_mono_font(size);
     label.setFont(Some(&font));
     label.setTextColor(Some(text_color));
     label.setBordered(false);
@@ -849,7 +887,14 @@ fn request_redraw() {
             .unwrap_or_else(|| view.frame().size.width.max(WINDOW_WIDTH));
         let view_height = view.frame().size.height;
         view.setFrameSize(NSSize::new(view_width, view_height));
-        let _: () = unsafe { msg_send![view, setNeedsDisplay: true] };
+        let theme = *CURRENT_THEME.lock().unwrap();
+        if theme_rebuilds_subviews(theme) {
+            objc2::rc::autoreleasepool(|_| {
+                rebuild_view_for_theme(view, theme);
+            });
+        } else {
+            let _: () = unsafe { msg_send![view, setNeedsDisplay: true] };
+        }
     }
     update_af_label();
 }
@@ -891,13 +936,16 @@ fn update_af_label() {
     }
 }
 
-fn rebuild_view(view: &NSView) {
-    let theme = *CURRENT_THEME.lock().unwrap();
+fn rebuild_view_for_theme(view: &NSView, theme: WindowThemeId) {
     match theme {
         WindowThemeId::Classic => rebuild_view_classic(view),
         WindowThemeId::MissionControl => rebuild_view_mission_control(view),
         WindowThemeId::Notch => rebuild_view_notch(view),
     }
+}
+
+fn theme_rebuilds_subviews(theme: WindowThemeId) -> bool {
+    matches!(theme, WindowThemeId::Classic | WindowThemeId::Notch)
 }
 
 // --- Notch theme (Dynamic Island style) ---
@@ -993,9 +1041,7 @@ fn rebuild_view_notch(view: &NSView) {
             SessionStatus::WaitingInput => {
                 NSColor::colorWithRed_green_blue_alpha(0.961, 0.620, 0.043, 1.0)
             }
-            SessionStatus::Stopped => {
-                NSColor::colorWithRed_green_blue_alpha(0.35, 0.39, 0.45, 1.0)
-            }
+            SessionStatus::Stopped => NSColor::colorWithRed_green_blue_alpha(0.35, 0.39, 0.45, 1.0),
         };
         let dot_alpha: f64 = match session.status {
             SessionStatus::Running => theme::breathing_pulse(elapsed_secs()),
@@ -1063,16 +1109,20 @@ fn cg_fill_circle(center_x: CGFloat, center_y: CGFloat, radius: CGFloat, color: 
 
 /// Build a text attributes NSDictionary with font and color.
 fn cg_text_attrs(font: &NSFont, color: &NSColor) -> *mut AnyObject {
-    unsafe {
-        let font_key = NSString::from_str("NSFont");
-        let color_key = NSString::from_str("NSColor");
-        msg_send![
-            objc2::runtime::AnyClass::get(c"NSDictionary").unwrap(),
-            dictionaryWithObjects: [font as *const NSFont as *const AnyObject, color as *const NSColor as *const AnyObject].as_ptr(),
-            forKeys: [&*font_key as *const NSString as *const AnyObject, &*color_key as *const NSString as *const AnyObject].as_ptr(),
-            count: 2_usize
-        ]
+    thread_local! {
+        static FONT_KEY: Retained<NSString> = NSString::from_str("NSFont");
+        static COLOR_KEY: Retained<NSString> = NSString::from_str("NSColor");
     }
+    FONT_KEY.with(|fk| {
+        COLOR_KEY.with(|ck| unsafe {
+            msg_send![
+                objc2::runtime::AnyClass::get(c"NSDictionary").unwrap(),
+                dictionaryWithObjects: [font as *const NSFont as *const AnyObject, color as *const NSColor as *const AnyObject].as_ptr(),
+                forKeys: [&**fk as *const NSString as *const AnyObject, &**ck as *const NSString as *const AnyObject].as_ptr(),
+                count: 2_usize
+            ]
+        })
+    })
 }
 
 fn cg_draw_text(text: &str, point: NSPoint, color: &NSColor, font: &NSFont) {
@@ -1151,9 +1201,27 @@ fn rebuild_view_mission_control(view: &NSView) {
     let total_height = HEADER_HEIGHT + card_count * (CARD_HEIGHT + CARD_SPACING);
     view.setFrameSize(NSSize::new(view_width, total_height));
 
+    // --- Cached fonts (thread_local because NSFont is !Sync) ---
+    fn mc_cached_font(size: CGFloat, weight: CGFloat) -> Retained<NSFont> {
+        use std::collections::HashMap;
+        thread_local! {
+            static CACHE: RefCell<HashMap<u64, Retained<NSFont>>> = RefCell::new(HashMap::new());
+        }
+        CACHE.with(|cache| {
+            let key = size.to_bits() ^ weight.to_bits().rotate_left(32);
+            let mut map = cache.borrow_mut();
+            map.entry(key)
+                .or_insert_with(|| NSFont::monospacedSystemFontOfSize_weight(size, weight))
+                .clone()
+        })
+    }
+    let bold_font = mc_cached_font(FONT_SIZE, 0.7);
+    let small_font = mc_cached_font(FONT_SIZE_SMALL, 0.0);
+    let normal_font = mc_cached_font(FONT_SIZE, 0.0);
+    let bold_font_row1 = mc_cached_font(FONT_SIZE, 0.5);
+
     // --- Header ---
     // Left: "◉ cckit mission control"
-    let bold_font = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE, 0.7);
     cg_draw_text(
         "\u{25C9} cckit mission control",
         NSPoint::new(LEFT_PAD, 4.0),
@@ -1163,7 +1231,6 @@ fn rebuild_view_mission_control(view: &NSView) {
 
     // Right: "{active} active / {total} total"
     let hdr_right_text = format!("{} active / {} total", active_count, total_count);
-    let small_font = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE_SMALL, 0.0);
     let hdr_right_rect = NSRect::new(
         NSPoint::new(view_width - 200.0 - LEFT_PAD, 4.0),
         NSSize::new(200.0, HEADER_HEIGHT - 4.0),
@@ -1173,7 +1240,6 @@ fn rebuild_view_mission_control(view: &NSView) {
     let y_start = HEADER_HEIGHT;
 
     if sessions.is_empty() {
-        let normal_font = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE, 0.0);
         cg_draw_text(
             "no active sessions",
             NSPoint::new(LEFT_PAD + CARD_CONTENT_LEFT, y_start + 20.0),
@@ -1182,9 +1248,6 @@ fn rebuild_view_mission_control(view: &NSView) {
         );
         return;
     }
-
-    let _normal_font = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE, 0.0);
-    let bold_font_row1 = NSFont::monospacedSystemFontOfSize_weight(FONT_SIZE, 0.5);
 
     for (i, session) in sessions.iter().enumerate() {
         let card_y = y_start + (i as CGFloat) * (CARD_HEIGHT + CARD_SPACING);
@@ -1288,7 +1351,12 @@ fn rebuild_view_mission_control(view: &NSView) {
                 };
                 sc.f64()
             };
-            let effective_alpha = dot_alpha * if is_stopped || is_inactive { card_alpha } else { 1.0 };
+            let effective_alpha = dot_alpha
+                * if is_stopped || is_inactive {
+                    card_alpha
+                } else {
+                    1.0
+                };
             NSColor::colorWithRed_green_blue_alpha(r, g, b, effective_alpha)
         };
         cg_fill_circle(content_x + dot / 2.0, dot_cy, dot / 2.0, &dot_color_alpha);
@@ -1323,7 +1391,12 @@ fn rebuild_view_mission_control(view: &NSView) {
             NSPoint::new(label_x, row1_y),
             NSSize::new(card_w - (label_x - LEFT_PAD) - 120.0, row1_h),
         );
-        cg_draw_text_truncated(&row1_text, row1_rect, &text_color_effective, &bold_font_row1);
+        cg_draw_text_truncated(
+            &row1_text,
+            row1_rect,
+            &text_color_effective,
+            &bold_font_row1,
+        );
 
         // Elapsed + context % (right side of row 1)
         let ctx_info = context_bar_info(session);
@@ -1435,16 +1508,28 @@ fn rebuild_view_classic(view: &NSView) {
     }
     fn cl_status_color(status: &SessionStatus) -> Retained<NSColor> {
         match status {
-            SessionStatus::Running => NSColor::colorWithRed_green_blue_alpha(0.133, 0.773, 0.369, 1.0),
-            SessionStatus::AwaitingApproval => NSColor::colorWithRed_green_blue_alpha(0.937, 0.267, 0.267, 1.0),
-            SessionStatus::WaitingInput => NSColor::colorWithRed_green_blue_alpha(0.475, 0.525, 0.596, 1.0),
-            SessionStatus::Stopped => NSColor::colorWithRed_green_blue_alpha(0.345, 0.388, 0.447, 1.0),
+            SessionStatus::Running => {
+                NSColor::colorWithRed_green_blue_alpha(0.133, 0.773, 0.369, 1.0)
+            }
+            SessionStatus::AwaitingApproval => {
+                NSColor::colorWithRed_green_blue_alpha(0.937, 0.267, 0.267, 1.0)
+            }
+            SessionStatus::WaitingInput => {
+                NSColor::colorWithRed_green_blue_alpha(0.475, 0.525, 0.596, 1.0)
+            }
+            SessionStatus::Stopped => {
+                NSColor::colorWithRed_green_blue_alpha(0.345, 0.388, 0.447, 1.0)
+            }
         }
     }
     fn cl_status_row_bg(status: &SessionStatus) -> Retained<NSColor> {
         match status {
-            SessionStatus::Running => NSColor::colorWithRed_green_blue_alpha(0.133, 0.773, 0.369, 0.10),
-            SessionStatus::AwaitingApproval => NSColor::colorWithRed_green_blue_alpha(0.937, 0.267, 0.267, 0.20),
+            SessionStatus::Running => {
+                NSColor::colorWithRed_green_blue_alpha(0.133, 0.773, 0.369, 0.10)
+            }
+            SessionStatus::AwaitingApproval => {
+                NSColor::colorWithRed_green_blue_alpha(0.937, 0.267, 0.267, 0.20)
+            }
             _ => NSColor::colorWithRed_green_blue_alpha(0.0, 0.0, 0.0, 0.0),
         }
     }
@@ -1483,11 +1568,26 @@ fn rebuild_view_classic(view: &NSView) {
         NSPoint::new(CL_TEXT_LEFT, 2.0),
         NSSize::new(proj_w, CL_HEADER_HEIGHT - 2.0),
     );
-    view.addSubview(&create_mono_label(mtm, &hdr_left, hdr_left_rect, &cl_color_dim(), CL_FONT_SIZE));
+    view.addSubview(&create_mono_label(
+        mtm,
+        &hdr_left,
+        hdr_left_rect,
+        &cl_color_dim(),
+        CL_FONT_SIZE,
+    ));
 
     let path_x = CL_TEXT_LEFT + proj_w;
-    let hdr_path_rect = NSRect::new(NSPoint::new(path_x, 2.0), NSSize::new(100.0, CL_HEADER_HEIGHT - 2.0));
-    view.addSubview(&create_mono_label(mtm, "PATH", hdr_path_rect, &cl_color_dim(), CL_FONT_SIZE));
+    let hdr_path_rect = NSRect::new(
+        NSPoint::new(path_x, 2.0),
+        NSSize::new(100.0, CL_HEADER_HEIGHT - 2.0),
+    );
+    view.addSubview(&create_mono_label(
+        mtm,
+        "PATH",
+        hdr_path_rect,
+        &cl_color_dim(),
+        CL_FONT_SIZE,
+    ));
 
     let hdr_ctx_w: CGFloat = if any_has_context { 70.0 } else { 0.0 };
     let hdr_stats_w: CGFloat = 230.0;
@@ -1497,7 +1597,13 @@ fn rebuild_view_classic(view: &NSView) {
         NSPoint::new(view_width - hdr_right_total - CL_LEFT_PAD, 2.0),
         NSSize::new(hdr_stats_w, CL_HEADER_HEIGHT - 2.0),
     );
-    let hdr_right_label = create_mono_label(mtm, &hdr_right, hdr_right_rect, &cl_color_dim(), CL_FONT_SIZE_SMALL);
+    let hdr_right_label = create_mono_label(
+        mtm,
+        &hdr_right,
+        hdr_right_rect,
+        &cl_color_dim(),
+        CL_FONT_SIZE_SMALL,
+    );
     let _: () = unsafe { msg_send![&*hdr_right_label, setAlignment: 1_isize] };
     view.addSubview(&hdr_right_label);
 
@@ -1506,7 +1612,13 @@ fn rebuild_view_classic(view: &NSView) {
             NSPoint::new(view_width - hdr_ctx_w - CL_LEFT_PAD, 2.0),
             NSSize::new(hdr_ctx_w, CL_HEADER_HEIGHT - 2.0),
         );
-        let hdr_ctx_label = create_mono_label(mtm, "CONTEXT", hdr_ctx_rect, &cl_color_dim(), CL_FONT_SIZE_SMALL);
+        let hdr_ctx_label = create_mono_label(
+            mtm,
+            "CONTEXT",
+            hdr_ctx_rect,
+            &cl_color_dim(),
+            CL_FONT_SIZE_SMALL,
+        );
         let _: () = unsafe { msg_send![&*hdr_ctx_label, setAlignment: 1_isize] };
         view.addSubview(&hdr_ctx_label);
     }
@@ -1514,7 +1626,10 @@ fn rebuild_view_classic(view: &NSView) {
     // Header separator
     view.addSubview(&create_colored_view(
         mtm,
-        NSRect::new(NSPoint::new(CL_LEFT_PAD, CL_HEADER_HEIGHT), NSSize::new(view_width - CL_LEFT_PAD * 2.0, 1.0)),
+        NSRect::new(
+            NSPoint::new(CL_LEFT_PAD, CL_HEADER_HEIGHT),
+            NSSize::new(view_width - CL_LEFT_PAD * 2.0, 1.0),
+        ),
         &cl_color_border(),
         0.0,
     ));
@@ -1522,8 +1637,17 @@ fn rebuild_view_classic(view: &NSView) {
     let y_start = CL_HEADER_HEIGHT + 1.0;
 
     if sessions.is_empty() {
-        let rect = NSRect::new(NSPoint::new(CL_TEXT_LEFT, y_start + 8.0), NSSize::new(view_width - CL_TEXT_LEFT - CL_LEFT_PAD, CL_ROW_HEIGHT));
-        view.addSubview(&create_mono_label(mtm, "  no active sessions", rect, &cl_color_dim(), CL_FONT_SIZE));
+        let rect = NSRect::new(
+            NSPoint::new(CL_TEXT_LEFT, y_start + 8.0),
+            NSSize::new(view_width - CL_TEXT_LEFT - CL_LEFT_PAD, CL_ROW_HEIGHT),
+        );
+        view.addSubview(&create_mono_label(
+            mtm,
+            "  no active sessions",
+            rect,
+            &cl_color_dim(),
+            CL_FONT_SIZE,
+        ));
         return;
     }
 
@@ -1532,9 +1656,17 @@ fn rebuild_view_classic(view: &NSView) {
     for (i, session) in sessions.iter().enumerate() {
         let y = y_start + (i as CGFloat) * CL_ROW_HEIGHT;
 
-        let row_rect = NSRect::new(NSPoint::new(4.0, y + 1.0), NSSize::new(view_width - 8.0, CL_ROW_HEIGHT - 2.0));
+        let row_rect = NSRect::new(
+            NSPoint::new(4.0, y + 1.0),
+            NSSize::new(view_width - 8.0, CL_ROW_HEIGHT - 2.0),
+        );
         if Some(i) == selected {
-            view.addSubview(&create_colored_view(mtm, row_rect, &cl_color_selection(), 4.0));
+            view.addSubview(&create_colored_view(
+                mtm,
+                row_rect,
+                &cl_color_selection(),
+                4.0,
+            ));
         } else {
             let tint = cl_status_row_bg(&session.status);
             view.addSubview(&create_colored_view(mtm, row_rect, &tint, 4.0));
@@ -1586,13 +1718,30 @@ fn rebuild_view_classic(view: &NSView) {
             cl_color_text()
         };
 
-        let left_text = format!("{:>2}  {:<4}  {}", i + 1, status_label(&session.status), project);
-        let left_rect = NSRect::new(NSPoint::new(CL_TEXT_LEFT, y + 2.0), NSSize::new(proj_w, CL_ROW_HEIGHT - 4.0));
-        view.addSubview(&create_mono_label(mtm, &left_text, left_rect, &text_color, CL_FONT_SIZE));
+        let left_text = format!(
+            "{:>2}  {:<4}  {}",
+            i + 1,
+            status_label(&session.status),
+            project
+        );
+        let left_rect = NSRect::new(
+            NSPoint::new(CL_TEXT_LEFT, y + 2.0),
+            NSSize::new(proj_w, CL_ROW_HEIGHT - 4.0),
+        );
+        view.addSubview(&create_mono_label(
+            mtm,
+            &left_text,
+            left_rect,
+            &text_color,
+            CL_FONT_SIZE,
+        ));
 
         let path_x = CL_TEXT_LEFT + proj_w;
         let path_w = (view_width - path_x - right_col_w - CL_LEFT_PAD).max(40.0);
-        let path_rect = NSRect::new(NSPoint::new(path_x, y + 2.0), NSSize::new(path_w, CL_ROW_HEIGHT - 4.0));
+        let path_rect = NSRect::new(
+            NSPoint::new(path_x, y + 2.0),
+            NSSize::new(path_w, CL_ROW_HEIGHT - 4.0),
+        );
         let path_label = create_mono_label(mtm, &path, path_rect, &cl_color_dim(), 9.5);
         let _: () = unsafe { msg_send![&*path_label, setLineBreakMode: 5_isize] };
         view.addSubview(&path_label);
@@ -1609,7 +1758,13 @@ fn rebuild_view_classic(view: &NSView) {
             NSPoint::new(view_width - right_w - CL_LEFT_PAD, y + 2.0),
             NSSize::new(stats_w, CL_ROW_HEIGHT - 4.0),
         );
-        let right_label = create_mono_label(mtm, &right_text, right_rect, &text_color, CL_FONT_SIZE_SMALL);
+        let right_label = create_mono_label(
+            mtm,
+            &right_text,
+            right_rect,
+            &text_color,
+            CL_FONT_SIZE_SMALL,
+        );
         let _: () = unsafe { msg_send![&*right_label, setAlignment: 1_isize] };
         view.addSubview(&right_label);
 
@@ -1620,21 +1775,37 @@ fn rebuild_view_classic(view: &NSView) {
             let bar_y = y + (CL_ROW_HEIGHT - bar_h) / 2.0;
 
             if let Some(ref info) = ctx_info {
-                let track_rect = NSRect::new(NSPoint::new(col_x, bar_y), NSSize::new(bar_total_w, bar_h));
+                let track_rect =
+                    NSRect::new(NSPoint::new(col_x, bar_y), NSSize::new(bar_total_w, bar_h));
                 view.addSubview(&create_colored_view(
-                    mtm, track_rect,
+                    mtm,
+                    track_rect,
                     &NSColor::colorWithRed_green_blue_alpha(1.0, 1.0, 1.0, 0.1),
                     3.0,
                 ));
 
                 let fill_w = (bar_total_w * info.ratio).max(1.0);
                 let fill_rect = NSRect::new(NSPoint::new(col_x, bar_y), NSSize::new(fill_w, bar_h));
-                view.addSubview(&create_colored_view(mtm, fill_rect, &context_bar_color(info.ratio), 3.0));
+                view.addSubview(&create_colored_view(
+                    mtm,
+                    fill_rect,
+                    &context_bar_color(info.ratio),
+                    3.0,
+                ));
 
                 let label_x = col_x + bar_total_w + 4.0;
                 let label_w = ctx_col_w - bar_total_w - 4.0;
-                let label_rect = NSRect::new(NSPoint::new(label_x, y + 2.0), NSSize::new(label_w, CL_ROW_HEIGHT - 4.0));
-                view.addSubview(&create_mono_label(mtm, &info.label, label_rect, &text_color, CL_FONT_SIZE_SMALL));
+                let label_rect = NSRect::new(
+                    NSPoint::new(label_x, y + 2.0),
+                    NSSize::new(label_w, CL_ROW_HEIGHT - 4.0),
+                );
+                view.addSubview(&create_mono_label(
+                    mtm,
+                    &info.label,
+                    label_rect,
+                    &text_color,
+                    CL_FONT_SIZE_SMALL,
+                ));
             }
         }
 
@@ -1642,7 +1813,10 @@ fn rebuild_view_classic(view: &NSView) {
         if i + 1 < sessions.len() {
             view.addSubview(&create_colored_view(
                 mtm,
-                NSRect::new(NSPoint::new(CL_LEFT_PAD, y + CL_ROW_HEIGHT - 1.0), NSSize::new(view_width - CL_LEFT_PAD * 2.0, 1.0)),
+                NSRect::new(
+                    NSPoint::new(CL_LEFT_PAD, y + CL_ROW_HEIGHT - 1.0),
+                    NSSize::new(view_width - CL_LEFT_PAD * 2.0, 1.0),
+                ),
                 &cl_color_border(),
                 0.0,
             ));
@@ -1652,9 +1826,12 @@ fn rebuild_view_classic(view: &NSView) {
 
 extern "C" fn draw_rect(this: *mut AnyObject, _sel: Sel, _dirty_rect: NSRect) {
     let view: &NSView = unsafe { &*(this as *const NSView) };
-    objc2::rc::autoreleasepool(|_| {
-        rebuild_view(view);
-    });
+    let theme = *CURRENT_THEME.lock().unwrap();
+    if !theme_rebuilds_subviews(theme) {
+        objc2::rc::autoreleasepool(|_| {
+            rebuild_view_for_theme(view, theme);
+        });
+    }
 }
 
 extern "C" fn is_flipped(_this: *mut AnyObject, _sel: Sel) -> Bool {
@@ -1843,7 +2020,9 @@ fn update_sessions_and_redraw() {
         }
     }
     drop(idx);
-    request_redraw();
+    if REDRAW_NEEDED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        request_redraw();
+    }
 }
 
 fn bring_window_to_front() {
@@ -2376,6 +2555,7 @@ fn setup_window(
     unsafe {
         let _: () = msg_send![&*doc_view, updateTrackingAreas];
     }
+    request_redraw();
 
     // Set up standard application menu (provides Cmd+H hide, Cmd+Q quit, Cmd+M minimize)
     setup_main_menu(mtm, app);
@@ -2397,22 +2577,14 @@ fn setup_window(
     let _data_timer =
         unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &data_block) };
 
-    // Animation timer (5fps = 200ms interval) — only redraws when active sessions exist
+    // Animation timer — only redraws when data has changed (dirty flag set by load_sessions)
     let anim_block = block2::RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
-        let has_active = SESSION_LIST
-            .lock()
-            .map(|sessions| {
-                sessions
-                    .iter()
-                    .any(|s| s.status != SessionStatus::Stopped)
-            })
-            .unwrap_or(false);
-        if has_active {
+        if REDRAW_NEEDED.swap(false, std::sync::atomic::Ordering::Relaxed) {
             request_redraw();
         }
     });
     let _anim_timer =
-        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.2, true, &anim_block) };
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0, true, &anim_block) };
 
     // Store window pointer for bring-to-front on state transitions
     *WINDOW_PTR.lock().unwrap() = Some(&*window as *const NSWindow as usize);

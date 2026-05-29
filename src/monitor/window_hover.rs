@@ -204,11 +204,7 @@ impl HoverTracker {
         Self::default()
     }
 
-    pub fn on_mouse(
-        &mut self,
-        hit: Option<(HoverHit, String)>,
-        now: Instant,
-    ) -> HoverEvent {
+    pub fn on_mouse(&mut self, hit: Option<(HoverHit, String)>, now: Instant) -> HoverEvent {
         match (hit, self.current.as_ref()) {
             (None, None) => HoverEvent::Unchanged,
             (None, Some(_)) => {
@@ -230,7 +226,10 @@ impl HoverTracker {
                     version,
                     hit: h,
                 });
-                HoverEvent::Entered { idx: h.idx, version }
+                HoverEvent::Entered {
+                    idx: h.idx,
+                    version,
+                }
             }
         }
     }
@@ -265,10 +264,13 @@ pub struct TranscriptCache {
     entries: HashMap<PathBuf, CacheEntry>,
 }
 
+const CACHE_MAX_ENTRIES: usize = 64;
+
 #[derive(Debug, Clone)]
 struct CacheEntry {
     file_size: u64,
     text: Option<String>,
+    last_accessed: std::time::Instant,
 }
 
 impl TranscriptCache {
@@ -282,10 +284,12 @@ impl TranscriptCache {
     pub fn get_or_load(&mut self, path: &Path, max_lines: usize) -> Option<String> {
         let metadata = std::fs::metadata(path).ok()?;
         let file_size = metadata.len();
+        let now = std::time::Instant::now();
 
-        if let Some(entry) = self.entries.get(path)
+        if let Some(entry) = self.entries.get_mut(path)
             && entry.file_size == file_size
         {
+            entry.last_accessed = now;
             return entry.text.clone();
         }
 
@@ -296,9 +300,29 @@ impl TranscriptCache {
             CacheEntry {
                 file_size,
                 text: text.clone(),
+                last_accessed: now,
             },
         );
+
+        if self.entries.len() > CACHE_MAX_ENTRIES {
+            self.evict_oldest();
+        }
         text
+    }
+
+    fn evict_oldest(&mut self) {
+        while self.entries.len() > CACHE_MAX_ENTRIES {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_accessed)
+                .map(|(k, _)| k.clone());
+            if let Some(key) = oldest {
+                self.entries.remove(&key);
+            } else {
+                break;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -430,10 +454,7 @@ impl HoverPopover {
         if self.window.is_some() {
             return;
         }
-        let initial_rect = NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(POPOVER_WIDTH, 100.0),
-        );
+        let initial_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(POPOVER_WIDTH, 100.0));
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -754,9 +775,8 @@ mod tests {
     #[test]
     fn cache_returns_some_for_known_fixture() {
         let mut cache = TranscriptCache::new();
-        let path = std::path::PathBuf::from(
-            "tests/fixtures/history/assistant_text_and_tool_use.jsonl",
-        );
+        let path =
+            std::path::PathBuf::from("tests/fixtures/history/assistant_text_and_tool_use.jsonl");
         let text = cache.get_or_load(&path, 10);
         assert!(
             text.is_some(),
@@ -776,9 +796,8 @@ mod tests {
     #[test]
     fn cache_serves_subsequent_calls_without_re_parse() {
         let mut cache = TranscriptCache::new();
-        let path = std::path::PathBuf::from(
-            "tests/fixtures/history/assistant_text_and_tool_use.jsonl",
-        );
+        let path =
+            std::path::PathBuf::from("tests/fixtures/history/assistant_text_and_tool_use.jsonl");
         let first = cache.get_or_load(&path, 10);
         let second = cache.get_or_load(&path, 10);
         assert_eq!(first, second);
