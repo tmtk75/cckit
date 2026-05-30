@@ -38,7 +38,7 @@ mise run build-app              # runs scripts/macos/build_app.sh
 - CLI mode: all subcommands including TUI (`cckit session ls`)
 - App mode: `cckit app` runs macOS window + menubar (also auto-detected when launched from .app bundle)
 
-**CLI layer** (`src/cli.rs`, ~6700 lines): All subcommand definitions (clap derive), project scanning logic (`ls`, `prune`, `config`, `doctor`, `status`, `tidy-up`, `permissions`), YAML frontmatter parsing for skills/agents/commands, and dedicated `skill`/`mcp`/`agent` management subcommands (`ls`, `copy`, `promote`, `how-to-remove`, `validate`).
+**CLI layer** (`src/cli.rs`, ~6700 lines): All subcommand definitions (clap derive), project scanning logic (`ls`, `prune`, `config`, `doctor`, `status`, `tidy-up`, `permissions`), YAML frontmatter parsing for skills/agents/commands, and dedicated `skill`/`mcp`/`agent` management subcommands (`ls`, `copy`, `promote`, `prune`, `remove`, `how-to-remove`, `validate`). `mcp prune` removes stale MCP residue (orphaned `enabledMcpjsonServers`/`disabledMcpjsonServers` approvals and empty `.mcp.json` files); `mcp remove` deletes matching MCP server definitions across project/user/global scopes (plugin entries are reported, not removed). Both are dry-run by default with `--execute` to apply and `.bak` backups.
 
 **History module** (`src/history/`): Session search and browsing across past Claude Code transcripts.
 

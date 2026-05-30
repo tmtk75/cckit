@@ -388,10 +388,19 @@ enum McpCommands {
         dupes: bool,
     },
 
-    /// Show how to remove/uninstall each MCP server
-    HowToRemove {
+    /// Remove MCP server definitions across scopes (project/user/global)
+    Remove {
         #[arg(short, long, help = "Filter MCP servers by name pattern")]
         filter: Option<String>,
+
+        #[arg(long, help = "Restrict to one scope: global, user, or project")]
+        scope: Option<String>,
+
+        #[arg(long, help = "Actually apply removals (default is dry-run)")]
+        execute: bool,
+
+        #[arg(long, help = "Skip creating .bak backups")]
+        no_backup: bool,
     },
 
     /// Copy an MCP server config from another project
@@ -407,6 +416,15 @@ enum McpCommands {
 
         #[arg(long, help = "Overwrite existing MCP server without confirmation")]
         force: bool,
+    },
+
+    /// Remove stale MCP residue (orphaned approvals, empty .mcp.json) across projects
+    Prune {
+        #[arg(long, help = "Actually apply changes (default is dry-run)")]
+        execute: bool,
+
+        #[arg(long, help = "Skip creating .bak backups")]
+        no_backup: bool,
     },
 }
 
@@ -1843,158 +1861,6 @@ fn mcp_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) {
                 scopes.join(", ").yellow(),
                 width = max_name,
             );
-        }
-        println!();
-    }
-}
-
-fn mcp_how_to_remove_command(filter: Option<String>) {
-    let home = dirs::home_dir().expect("Could not find home directory");
-
-    struct McpRemoveEntry {
-        name: String,
-        server_type: String,
-        scope: String,
-        command: String,
-    }
-
-    let mut entries: Vec<McpRemoveEntry> = Vec::new();
-
-    // 1. Global MCP servers (~/.claude/.mcp.json)
-    let global_mcp = home.join(".claude/.mcp.json");
-    if global_mcp.exists() {
-        for server in parse_mcp_json(&global_mcp) {
-            entries.push(McpRemoveEntry {
-                name: server.name.clone(),
-                server_type: server.server_type,
-                scope: "global".to_string(),
-                command: format!(
-                    "Edit ~/.claude/.mcp.json and remove \"{}\" from mcpServers",
-                    server.name
-                ),
-            });
-        }
-    }
-
-    // 2. User MCP servers (~/.claude.json top-level mcpServers)
-    let user_config = home.join(".claude.json");
-    if user_config.exists() {
-        for server in parse_user_mcp_servers(&user_config) {
-            entries.push(McpRemoveEntry {
-                name: server.name.clone(),
-                server_type: server.server_type,
-                scope: "user".to_string(),
-                command: format!(
-                    "Edit ~/.claude.json and remove \"{}\" from mcpServers",
-                    server.name
-                ),
-            });
-        }
-    }
-
-    // 3. Plugin MCP servers (installed only)
-    let plugin_mcps = load_plugin_mcp_definitions();
-    for (name, server) in &plugin_mcps {
-        let plugin_name = Path::new(&server.source)
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        entries.push(McpRemoveEntry {
-            name: name.clone(),
-            server_type: server.server_type.clone(),
-            scope: format!("plugin:{}", plugin_name),
-            command: format!("claude plugin uninstall {}", plugin_name),
-        });
-    }
-
-    // 4. Project MCP servers
-    if let Ok(config) = load_claude_config()
-        && let Some(projects) = config.projects
-    {
-        for project_path in projects.keys() {
-            let project_dir = Path::new(project_path);
-            if !project_dir.exists() {
-                continue;
-            }
-            let mcp_file = project_dir.join(".mcp.json");
-            if !mcp_file.exists() {
-                continue;
-            }
-            for server in parse_mcp_json(&mcp_file) {
-                let short = shorten_path(project_path);
-                entries.push(McpRemoveEntry {
-                    name: server.name.clone(),
-                    server_type: server.server_type,
-                    scope: format!("project:{}", short),
-                    command: format!(
-                        "Edit {}/.mcp.json and remove \"{}\" from mcpServers",
-                        project_path, server.name
-                    ),
-                });
-            }
-        }
-    }
-
-    // Apply filter
-    if let Some(ref f) = filter {
-        let f_lower = f.to_lowercase();
-        entries.retain(|e| e.name.to_lowercase().contains(&f_lower));
-    }
-
-    if entries.is_empty() {
-        println!("{}", "No MCP servers found.".dimmed());
-        return;
-    }
-
-    println!("{} MCP servers found\n", entries.len().to_string().cyan());
-
-    let max_name = entries
-        .iter()
-        .map(|e| e.name.len())
-        .max()
-        .unwrap_or(10)
-        .min(30);
-
-    let section_defs: &[(&str, &str)] = &[
-        ("Global", "global"),
-        ("User", "user"),
-        ("Plugin", "plugin:"),
-        ("Project", "project:"),
-    ];
-
-    for &(section_label, scope_prefix) in section_defs {
-        let section_entries: Vec<&McpRemoveEntry> = entries
-            .iter()
-            .filter(|e| {
-                if scope_prefix.ends_with(':') {
-                    e.scope.starts_with(scope_prefix)
-                } else {
-                    e.scope == scope_prefix
-                }
-            })
-            .collect();
-        if section_entries.is_empty() {
-            continue;
-        }
-
-        let header = format!("── {} ({}) ", section_label, section_entries.len());
-        let pad_len = 50usize.saturating_sub(header.len());
-        println!("{}{}", header.bold(), "─".repeat(pad_len));
-
-        for entry in &section_entries {
-            let type_colored = match entry.server_type.as_str() {
-                "stdio" => format!("({})", entry.server_type).green(),
-                "http" | "sse" => format!("({})", entry.server_type).cyan(),
-                _ => format!("({})", entry.server_type).dimmed(),
-            };
-            println!(
-                "  {:<width$} {}",
-                entry.name.bright_cyan(),
-                type_colored,
-                width = max_name,
-            );
-            println!("    {} {}", "remove:".dimmed(), entry.command.bold());
         }
         println!();
     }
@@ -4028,6 +3894,597 @@ fn collect_all_mcp_servers(from: Option<&str>) -> Vec<McpSource> {
 
     all.sort_by(|a, b| a.server_name.cmp(&b.server_name));
     all
+}
+
+/// True when a parsed `.mcp.json` carries no real server config: either an empty
+/// object, or only an empty `mcpServers` map with no other top-level keys.
+fn is_empty_mcp_json(json: &serde_json::Value) -> bool {
+    let obj = match json.as_object() {
+        Some(o) => o,
+        None => return false,
+    };
+    if obj.keys().any(|k| k != "mcpServers") {
+        return false;
+    }
+    match obj.get("mcpServers") {
+        Some(serde_json::Value::Object(m)) => m.is_empty(),
+        None => true, // `{}` with no keys at all
+        _ => false,
+    }
+}
+
+/// Names present in an approval array but absent from the project's live set.
+fn stale_names(approvals: &[String], live: &std::collections::HashSet<String>) -> Vec<String> {
+    approvals
+        .iter()
+        .filter(|n| !live.contains(*n))
+        .cloned()
+        .collect()
+}
+
+/// Project paths for which `exists` returns false. The predicate is injected so the
+/// logic is testable without touching the filesystem.
+fn filter_dead_paths<F: Fn(&str) -> bool>(paths: &[String], exists: F) -> Vec<String> {
+    paths.iter().filter(|p| !exists(p)).cloned().collect()
+}
+
+#[derive(Debug)]
+struct StaleApproval {
+    /// Path to the `settings.local.json` holding the approval.
+    file: std::path::PathBuf,
+    /// The orphaned server name.
+    name: String,
+}
+
+#[derive(Debug, Default)]
+struct McpPrunePlan {
+    enabled_removals: Vec<StaleApproval>,
+    disabled_removals: Vec<StaleApproval>,
+    empty_mcp_json: Vec<std::path::PathBuf>,
+    dead_paths: Vec<String>,
+}
+
+impl McpPrunePlan {
+    fn is_empty(&self) -> bool {
+        self.enabled_removals.is_empty()
+            && self.disabled_removals.is_empty()
+            && self.empty_mcp_json.is_empty()
+            && self.dead_paths.is_empty()
+    }
+}
+
+/// The set of server names that are "live" regardless of project: user scope,
+/// global `~/.claude/.mcp.json`, and installed plugins.
+fn build_global_live_set() -> std::collections::HashSet<String> {
+    let mut live = std::collections::HashSet::new();
+    if let Some(home) = dirs::home_dir() {
+        for s in parse_user_mcp_servers(&home.join(".claude.json")) {
+            live.insert(s.name);
+        }
+        for s in parse_mcp_json(&home.join(".claude/.mcp.json")) {
+            live.insert(s.name);
+        }
+    }
+    for name in load_plugin_mcp_definitions().keys() {
+        live.insert(name.clone());
+    }
+    live
+}
+
+/// Scan all projects in `~/.claude.json` and collect stale MCP residue.
+fn compute_mcp_prune_plan() -> McpPrunePlan {
+    let mut plan = McpPrunePlan::default();
+    let global = build_global_live_set();
+
+    let config = match load_claude_config() {
+        Ok(c) => c,
+        Err(_) => return plan,
+    };
+    let projects = match config.projects {
+        Some(p) => p,
+        None => return plan,
+    };
+
+    // D: dead project paths (report-only)
+    let paths: Vec<String> = projects.keys().cloned().collect();
+    plan.dead_paths = filter_dead_paths(&paths, |p| Path::new(p).exists());
+
+    for (path, project_val) in &projects {
+        let project_dir = Path::new(path);
+        if !project_dir.exists() {
+            continue;
+        }
+
+        // Per-project live set = global + local scope (.claude.json projects[path])
+        //                        + project .mcp.json
+        let mut live = global.clone();
+        if let Some(local) = project_val.get("mcpServers").and_then(|v| v.as_object()) {
+            for name in local.keys() {
+                live.insert(name.clone());
+            }
+        }
+        for s in parse_mcp_json(&project_dir.join(".mcp.json")) {
+            live.insert(s.name);
+        }
+
+        // C: empty .mcp.json
+        let mcp_file = project_dir.join(".mcp.json");
+        if let Ok(content) = fs::read_to_string(&mcp_file)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+            && is_empty_mcp_json(&json)
+        {
+            plan.empty_mcp_json.push(mcp_file);
+        }
+
+        // A/B: stale approvals in .claude/settings.local.json
+        let settings_file = project_dir.join(".claude/settings.local.json");
+        if let Ok(content) = fs::read_to_string(&settings_file)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+        {
+            for (key, is_enabled) in [
+                ("enabledMcpjsonServers", true),
+                ("disabledMcpjsonServers", false),
+            ] {
+                let approvals: Vec<String> = json
+                    .get(key)
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for name in stale_names(&approvals, &live) {
+                    let entry = StaleApproval {
+                        file: settings_file.clone(),
+                        name,
+                    };
+                    if is_enabled {
+                        plan.enabled_removals.push(entry);
+                    } else {
+                        plan.disabled_removals.push(entry);
+                    }
+                }
+            }
+        }
+    }
+
+    plan.enabled_removals
+        .sort_by(|a, b| a.file.cmp(&b.file).then(a.name.cmp(&b.name)));
+    plan.disabled_removals
+        .sort_by(|a, b| a.file.cmp(&b.file).then(a.name.cmp(&b.name)));
+    plan.empty_mcp_json.sort();
+    plan.dead_paths.sort();
+    plan
+}
+
+/// Copy `file` to `file.bak` unless `no_backup`. Returns false on copy error.
+fn backup_file(file: &Path, no_backup: bool) -> bool {
+    if no_backup {
+        return true;
+    }
+    let backup = file.with_extension(format!(
+        "{}bak",
+        file.extension()
+            .map(|e| format!("{}.", e.to_string_lossy()))
+            .unwrap_or_default()
+    ));
+    match fs::copy(file, &backup) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("{}: {} ({})", "Backup failed".red(), file.display(), e);
+            false
+        }
+    }
+}
+
+/// Remove `names` from `json[key]` when it is an array of strings. Leaves an empty
+/// array in place (does not delete the key).
+fn prune_array(json: &mut serde_json::Value, key: &str, names: &[String]) {
+    if names.is_empty() {
+        return;
+    }
+    if let Some(arr) = json.get_mut(key).and_then(|v| v.as_array_mut()) {
+        arr.retain(|v| {
+            v.as_str()
+                .map(|s| !names.contains(&s.to_string()))
+                .unwrap_or(true)
+        });
+    }
+}
+
+/// Remove `name` from the top-level `mcpServers` object. Returns true if a key was
+/// actually removed.
+fn remove_mcp_server_key(json: &mut serde_json::Value, name: &str) -> bool {
+    json.get_mut("mcpServers")
+        .and_then(|v| v.as_object_mut())
+        .map(|m| m.remove(name).is_some())
+        .unwrap_or(false)
+}
+
+fn mcp_prune_command(execute: bool, no_backup: bool) {
+    let plan = compute_mcp_prune_plan();
+
+    if plan.is_empty() {
+        println!("{}", "Nothing to prune.".green());
+        return;
+    }
+
+    let print_approvals = |title: &str, items: &[StaleApproval]| {
+        if items.is_empty() {
+            return;
+        }
+        println!();
+        println!("{} ({})", title, items.len().to_string().yellow());
+        for it in items {
+            println!(
+                "  {} {:<22} {}",
+                "-".dimmed(),
+                it.name.red(),
+                shorten_path(&it.file.to_string_lossy()).dimmed()
+            );
+        }
+    };
+
+    print_approvals("Stale enabled approvals", &plan.enabled_removals);
+    print_approvals("Stale disabled approvals", &plan.disabled_removals);
+
+    if !plan.empty_mcp_json.is_empty() {
+        println!();
+        println!(
+            "Empty .mcp.json files ({})",
+            plan.empty_mcp_json.len().to_string().yellow()
+        );
+        for f in &plan.empty_mcp_json {
+            println!(
+                "  {} {}",
+                "-".dimmed(),
+                shorten_path(&f.to_string_lossy()).red()
+            );
+        }
+    }
+
+    if !plan.dead_paths.is_empty() {
+        println!();
+        println!(
+            "Dead project paths ({})  {}",
+            plan.dead_paths.len().to_string().yellow(),
+            "-> run `cckit prune` to remove".dimmed()
+        );
+    }
+
+    if !execute {
+        println!();
+        println!("Run with {} to apply.", "--execute".cyan());
+        return;
+    }
+
+    println!();
+
+    // Group approval removals by file so each file is rewritten once.
+    use std::collections::BTreeMap;
+    let mut by_file: BTreeMap<std::path::PathBuf, (Vec<String>, Vec<String>)> = BTreeMap::new();
+    for it in &plan.enabled_removals {
+        by_file
+            .entry(it.file.clone())
+            .or_default()
+            .0
+            .push(it.name.clone());
+    }
+    for it in &plan.disabled_removals {
+        by_file
+            .entry(it.file.clone())
+            .or_default()
+            .1
+            .push(it.name.clone());
+    }
+
+    let mut changed = 0usize;
+    for (file, (enabled, disabled)) in &by_file {
+        let content = match fs::read_to_string(file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let mut json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        prune_array(&mut json, "enabledMcpjsonServers", enabled);
+        prune_array(&mut json, "disabledMcpjsonServers", disabled);
+
+        if !backup_file(file, no_backup) {
+            continue;
+        }
+        match serde_json::to_string_pretty(&json) {
+            Ok(s) => {
+                if fs::write(file, s + "\n").is_ok() {
+                    changed += 1;
+                }
+            }
+            Err(e) => eprintln!("{}: {}", "Serialize failed".red(), e),
+        }
+    }
+
+    let mut deleted = 0usize;
+    for f in &plan.empty_mcp_json {
+        if !backup_file(f, no_backup) {
+            continue;
+        }
+        if fs::remove_file(f).is_ok() {
+            deleted += 1;
+        }
+    }
+
+    println!(
+        "{} {} settings file(s) updated, {} empty .mcp.json removed.",
+        "Done:".green(),
+        changed,
+        deleted
+    );
+    if !plan.dead_paths.is_empty() {
+        println!(
+            "{} {} dead project path(s) remain — run `cckit prune`.",
+            "Note:".yellow(),
+            plan.dead_paths.len()
+        );
+    }
+}
+
+#[derive(Debug)]
+struct McpRemoveTarget {
+    name: String,
+    server_type: String,
+    /// Display label, e.g. "project:~/foo" or "user".
+    #[allow(dead_code)]
+    scope_label: String,
+    /// One of: "global", "user", "project", "plugin".
+    scope_class: String,
+    /// Concrete file to edit for global/user/project; None for plugin.
+    file: Option<std::path::PathBuf>,
+    /// Plugin name when scope_class == "plugin".
+    plugin: Option<String>,
+}
+
+/// Enumerate every MCP server that `remove` can act on (global/user/project) plus
+/// plugin entries (reported only).
+fn collect_mcp_remove_targets() -> Vec<McpRemoveTarget> {
+    let mut targets = Vec::new();
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return targets,
+    };
+
+    // global: ~/.claude/.mcp.json
+    let global_mcp = home.join(".claude/.mcp.json");
+    if global_mcp.exists() {
+        for s in parse_mcp_json(&global_mcp) {
+            targets.push(McpRemoveTarget {
+                name: s.name,
+                server_type: s.server_type,
+                scope_label: "global".to_string(),
+                scope_class: "global".to_string(),
+                file: Some(global_mcp.clone()),
+                plugin: None,
+            });
+        }
+    }
+
+    // user: ~/.claude.json top-level mcpServers
+    let user_config = home.join(".claude.json");
+    if user_config.exists() {
+        for s in parse_user_mcp_servers(&user_config) {
+            targets.push(McpRemoveTarget {
+                name: s.name,
+                server_type: s.server_type,
+                scope_label: "user".to_string(),
+                scope_class: "user".to_string(),
+                file: Some(user_config.clone()),
+                plugin: None,
+            });
+        }
+    }
+
+    // plugin: reported only
+    for (name, s) in &load_plugin_mcp_definitions() {
+        let plugin_name = Path::new(&s.source)
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        targets.push(McpRemoveTarget {
+            name: name.clone(),
+            server_type: s.server_type.clone(),
+            scope_label: format!("plugin:{}", plugin_name),
+            scope_class: "plugin".to_string(),
+            file: None,
+            plugin: Some(plugin_name),
+        });
+    }
+
+    // project: each <dir>/.mcp.json
+    if let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
+    {
+        for project_path in projects.keys() {
+            let dir = Path::new(project_path);
+            let mcp_file = dir.join(".mcp.json");
+            if !dir.exists() || !mcp_file.exists() {
+                continue;
+            }
+            let short = shorten_path(project_path);
+            for s in parse_mcp_json(&mcp_file) {
+                targets.push(McpRemoveTarget {
+                    name: s.name,
+                    server_type: s.server_type,
+                    scope_label: format!("project:{}", short),
+                    scope_class: "project".to_string(),
+                    file: Some(mcp_file.clone()),
+                    plugin: None,
+                });
+            }
+        }
+    }
+
+    targets
+}
+
+fn mcp_remove_command(
+    filter: Option<String>,
+    scope: Option<String>,
+    execute: bool,
+    no_backup: bool,
+) {
+    let mut targets = collect_mcp_remove_targets();
+
+    if let Some(ref f) = filter {
+        let fl = f.to_lowercase();
+        targets.retain(|t| t.name.to_lowercase().contains(&fl));
+    }
+    if let Some(ref s) = scope {
+        targets.retain(|t| &t.scope_class == s);
+    }
+
+    if targets.is_empty() {
+        println!("{}", "No matching MCP servers.".dimmed());
+        return;
+    }
+
+    let removable = targets.iter().filter(|t| t.file.is_some()).count();
+    match &filter {
+        Some(f) => println!(
+            "{} entries match \"{}\" (will remove)\n",
+            removable.to_string().cyan(),
+            f
+        ),
+        None => println!("{} entries (will remove)\n", removable.to_string().cyan()),
+    }
+
+    // Sections in a stable order.
+    for (label, class) in [
+        ("Global", "global"),
+        ("User", "user"),
+        ("Project", "project"),
+        ("Plugin", "plugin"),
+    ] {
+        let section: Vec<&McpRemoveTarget> =
+            targets.iter().filter(|t| t.scope_class == class).collect();
+        if section.is_empty() {
+            continue;
+        }
+        if class == "plugin" {
+            println!(
+                "{} ({})  {}",
+                "Plugin".bold(),
+                section.len(),
+                "[skipped]".yellow()
+            );
+            for t in &section {
+                println!(
+                    "  {} {:<14} -> run `claude plugin uninstall {}`",
+                    "-".dimmed(),
+                    t.name.bright_cyan(),
+                    t.plugin.clone().unwrap_or_default()
+                );
+            }
+            println!();
+            continue;
+        }
+        println!("{} ({})", label.bold(), section.len());
+        for t in &section {
+            let loc = t
+                .file
+                .as_ref()
+                .map(|p| shorten_path(&p.to_string_lossy()))
+                .unwrap_or_default();
+            println!(
+                "  {} {} {}   {}",
+                "-".dimmed(),
+                t.name.bright_cyan(),
+                format!("({})", t.server_type).dimmed(),
+                loc.dimmed()
+            );
+        }
+        println!();
+    }
+
+    println!(
+        "{}",
+        "Note: local-scope servers are handled by `claude mcp remove -s local`.".dimmed()
+    );
+
+    if !execute {
+        println!();
+        println!("Run with {} to remove.", "--execute".cyan());
+        return;
+    }
+
+    // Group removable targets by file.
+    use std::collections::BTreeMap;
+    let mut by_file: BTreeMap<std::path::PathBuf, Vec<String>> = BTreeMap::new();
+    for t in &targets {
+        if let Some(file) = &t.file {
+            by_file
+                .entry(file.clone())
+                .or_default()
+                .push(t.name.clone());
+        }
+    }
+
+    let mut removed = 0usize;
+    let mut files_changed = 0usize;
+    let mut deleted = 0usize;
+    for (file, names) in &by_file {
+        let content = match fs::read_to_string(file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let mut json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let mut local_removed = 0usize;
+        for name in names {
+            if remove_mcp_server_key(&mut json, name) {
+                local_removed += 1;
+            }
+        }
+        if local_removed == 0 {
+            continue;
+        }
+        if !backup_file(file, no_backup) {
+            continue;
+        }
+        // Delete only .mcp.json files that became empty; never delete ~/.claude.json.
+        let is_dot_mcp = file.to_string_lossy().ends_with(".mcp.json");
+        if is_dot_mcp && is_empty_mcp_json(&json) {
+            if fs::remove_file(file).is_ok() {
+                deleted += 1;
+                removed += local_removed;
+                files_changed += 1;
+            }
+            continue;
+        }
+        match serde_json::to_string_pretty(&json) {
+            Ok(s) => {
+                if fs::write(file, s + "\n").is_ok() {
+                    removed += local_removed;
+                    files_changed += 1;
+                }
+            }
+            Err(e) => eprintln!("{}: {}", "Serialize failed".red(), e),
+        }
+    }
+
+    let plugin_skipped = targets.iter().filter(|t| t.scope_class == "plugin").count();
+    println!();
+    println!(
+        "{} removed {} entr(ies) from {} file(s), {} empty .mcp.json deleted, {} plugin skipped.",
+        "Done:".green(),
+        removed,
+        files_changed,
+        deleted,
+        plugin_skipped
+    );
 }
 
 fn select_mcp(servers: &[McpSource], filter: Option<&str>) -> Option<usize> {
@@ -6377,8 +6834,13 @@ pub fn run() {
             } => {
                 mcp_ls_command(filter, scope, dupes);
             }
-            McpCommands::HowToRemove { filter } => {
-                mcp_how_to_remove_command(filter);
+            McpCommands::Remove {
+                filter,
+                scope,
+                execute,
+                no_backup,
+            } => {
+                mcp_remove_command(filter, scope, execute, no_backup);
             }
             McpCommands::Copy {
                 filter,
@@ -6387,6 +6849,9 @@ pub fn run() {
                 force,
             } => {
                 mcp_copy_command(filter, from, name, force);
+            }
+            McpCommands::Prune { execute, no_backup } => {
+                mcp_prune_command(execute, no_backup);
             }
         },
         Some(Commands::Agent { command }) => match command {
@@ -6856,5 +7321,77 @@ name: agent-name
         assert_eq!(format_duration(chrono::Duration::seconds(3600)), "1h 0m");
         assert_eq!(format_duration(chrono::Duration::seconds(3660)), "1h 1m");
         assert_eq!(format_duration(chrono::Duration::seconds(7200)), "2h 0m");
+    }
+
+    #[test]
+    fn test_is_empty_mcp_json() {
+        use serde_json::json;
+        // empty mcpServers object -> empty
+        assert!(is_empty_mcp_json(&json!({"mcpServers": {}})));
+        // totally empty object -> empty
+        assert!(is_empty_mcp_json(&json!({})));
+        // has a server -> not empty
+        assert!(!is_empty_mcp_json(
+            &json!({"mcpServers": {"foo": {"command": "x"}}})
+        ));
+        // empty mcpServers but another top-level key -> not empty (intentional config)
+        assert!(!is_empty_mcp_json(
+            &json!({"mcpServers": {}, "other": true})
+        ));
+        // non-object -> not empty
+        assert!(!is_empty_mcp_json(&json!("nope")));
+    }
+
+    #[test]
+    fn test_stale_names() {
+        use std::collections::HashSet;
+        let live: HashSet<String> = ["alive".to_string(), "userscope".to_string()]
+            .into_iter()
+            .collect();
+        let approvals = vec![
+            "alive".to_string(),     // in live set -> kept
+            "ghost".to_string(),     // not in live set -> stale
+            "userscope".to_string(), // live via another scope -> kept
+        ];
+        let stale = stale_names(&approvals, &live);
+        assert_eq!(stale, vec!["ghost".to_string()]);
+
+        // empty approvals -> nothing stale
+        assert!(stale_names(&[], &live).is_empty());
+    }
+
+    #[test]
+    fn test_filter_dead_paths() {
+        let paths = vec![
+            "/exists/a".to_string(),
+            "/gone/b".to_string(),
+            "/exists/c".to_string(),
+        ];
+        // predicate: only /exists/* paths "exist"
+        let dead = filter_dead_paths(&paths, |p| p.starts_with("/exists/"));
+        assert_eq!(dead, vec!["/gone/b".to_string()]);
+    }
+
+    #[test]
+    fn test_remove_mcp_server_key() {
+        use serde_json::json;
+        // removing an existing key returns true and drops it
+        let mut v = json!({"mcpServers": {"notion": {"type": "http"}, "keep": {}}});
+        assert!(remove_mcp_server_key(&mut v, "notion"));
+        assert_eq!(v, json!({"mcpServers": {"keep": {}}}));
+
+        // removing a missing key returns false, leaves it unchanged
+        let mut v2 = json!({"mcpServers": {"keep": {}}});
+        assert!(!remove_mcp_server_key(&mut v2, "nope"));
+        assert_eq!(v2, json!({"mcpServers": {"keep": {}}}));
+
+        // removing the last key leaves an empty object that is_empty_mcp_json flags
+        let mut v3 = json!({"mcpServers": {"only": {}}});
+        assert!(remove_mcp_server_key(&mut v3, "only"));
+        assert!(is_empty_mcp_json(&v3));
+
+        // no mcpServers object -> false
+        let mut v4 = json!({"other": true});
+        assert!(!remove_mcp_server_key(&mut v4, "x"));
     }
 }
