@@ -646,11 +646,7 @@ pub fn run_install_codex(force: bool) -> io::Result<()> {
             }
             Ok(false) => {}
             Err(e) => {
-                println!(
-                    "{} Failed to clear hooks.state: {}",
-                    "⚠".yellow(),
-                    e
-                );
+                println!("{} Failed to clear hooks.state: {}", "⚠".yellow(), e);
             }
         }
     }

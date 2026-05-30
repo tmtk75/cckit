@@ -59,6 +59,17 @@ Local scope (`~/.claude.json` `projects[path].mcpServers`) is **not** a target â
 not enumerated by `how-to-remove` either. The dry-run output notes that local-scope
 servers are handled by `claude mcp remove -s local`.
 
+### Approval cleanup (always, under `--execute`)
+
+Removing a project-scope server from a `.mcp.json` leaves a stale approval in that
+project's `.claude/settings.local.json` (`enabledMcpjsonServers` /
+`disabledMcpjsonServers`), which then surfaces as a phantom `(local)` entry in `mcp ls`.
+A stale approval for a deleted server is never wanted, so `--execute` **always** strips
+the removed server's name from the same project's approval lists (reusing `prune_array`,
+with a `.bak` backup) â€” no separate flag. This makes `remove` self-contained: no
+follow-up `mcp prune` is needed for what it removed. The dry-run notes that approvals
+will also be cleaned.
+
 ## Selection semantics
 
 `--filter` matches a substring of the server name and targets **every matching entry

@@ -38,7 +38,7 @@ mise run build-app              # runs scripts/macos/build_app.sh
 - CLI mode: all subcommands including TUI (`cckit session ls`)
 - App mode: `cckit app` runs macOS window + menubar (also auto-detected when launched from .app bundle)
 
-**CLI layer** (`src/cli.rs`, ~6700 lines): All subcommand definitions (clap derive), project scanning logic (`ls`, `prune`, `config`, `doctor`, `status`, `tidy-up`, `permissions`), YAML frontmatter parsing for skills/agents/commands, and dedicated `skill`/`mcp`/`agent` management subcommands (`ls`, `copy`, `promote`, `prune`, `remove`, `how-to-remove`, `validate`). `mcp prune` removes stale MCP residue (orphaned `enabledMcpjsonServers`/`disabledMcpjsonServers` approvals and empty `.mcp.json` files); `mcp remove` deletes matching MCP server definitions across project/user/global scopes (plugin entries are reported, not removed). Both are dry-run by default with `--execute` to apply and `.bak` backups.
+**CLI layer** (`src/cli.rs`, ~7900 lines): All subcommand definitions (clap derive), project scanning logic (`ls`, `prune`, `config`, `doctor`, `status`, `tidy-up`, `permissions`), YAML frontmatter parsing for skills/agents/commands, and dedicated `skill`/`mcp`/`agent` management subcommands (`ls`, `copy`, `promote`, `prune`, `remove`, `stale`, `how-to-remove`, `validate`). `mcp prune` removes stale MCP residue (orphaned `enabledMcpjsonServers`/`disabledMcpjsonServers` approvals and empty `.mcp.json` files); `mcp remove` deletes matching MCP server definitions across project/user/global scopes (plugin entries are reported, not removed); both are dry-run by default with `--execute` to apply and `.bak` backups. `skill remove` moves matching directory skills to a reversible trash (`<data_dir>/trash/`; marketplace/plugin untouched). `skill stale` mines Skill tool invocations from `~/.claude/projects/**/*.jsonl` to flag skills not fired in `--days N` (default 90), with an origin label (`self` / `external:marketplace` / `external:installed`).
 
 **History module** (`src/history/`): Session search and browsing across past Claude Code transcripts.
 
@@ -49,6 +49,7 @@ mise run build-app              # runs scripts/macos/build_app.sh
 | `search.rs` | AND-term and fuzzy search over session text |
 | `format.rs` | Plain text and JSON output formatting |
 | `tui.rs` | Interactive ratatui browser for search results |
+| `skill_usage.rs` | Aggregate Skill tool invocations from transcripts (last-fired/count) for `skill stale` |
 
 **Marketplace module** (`src/marketplace.rs`): Plugin marketplace inspection and validation (`marketplace summary`, `marketplace doctor`).
 
@@ -83,5 +84,5 @@ mise run build-app              # runs scripts/macos/build_app.sh
 - **Version**: embedded via `build.rs` running `git describe --always --dirty`
 - **Data directory**: `~/Library/Application Support/cckit/` (macOS) or `~/.local/share/cckit/` (Linux)
 - **Config**: reads `~/.claude.json` for project list, `~/.claude/settings.json` for Claude Code hooks, `~/.codex/hooks.json` for Codex hooks
-- Project-local config: `cckit.toml` (optional, for `disable_paths`)
+- Config for `disable_paths`: `./config.toml`, `~/.config/cckit/config.toml`, or the platform config dir (read by `load_cckit_config`); patterns support a leading `~/`
 - Uses `serde_json` with `preserve_order` feature for JSON field ordering

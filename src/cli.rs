@@ -346,10 +346,34 @@ Origins:
         dry_run: bool,
     },
 
-    /// Show how to remove/uninstall each skill
-    HowToRemove {
+    /// Remove directory skills by moving them to trash (marketplace/plugin untouched)
+    Remove {
         #[arg(short, long, help = "Filter skills by name pattern")]
         filter: Option<String>,
+
+        #[arg(long, help = "Restrict to one scope: global or project")]
+        scope: Option<String>,
+
+        #[arg(
+            long,
+            help = "Actually move matched skills to trash (default is dry-run)"
+        )]
+        execute: bool,
+    },
+
+    /// Show skills not fired recently (mined from Claude Code transcripts)
+    Stale {
+        #[arg(long, default_value_t = 90, help = "Staleness threshold in days")]
+        days: i64,
+
+        #[arg(long, help = "Also list skills that fired within the threshold")]
+        all: bool,
+
+        #[arg(long, help = "Show each skill's description")]
+        desc: bool,
+
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
     },
 
     /// Validate a skill's SKILL.md for security concerns (e.g. embedded shell commands)
@@ -914,6 +938,27 @@ fn detect_skill_origin(skill_dir: &Path) -> String {
     "no author".to_string()
 }
 
+/// Collision-free destination under `trash_dir` for a skill named `dir_name`.
+/// `exists` is injected so the logic is testable without the filesystem.
+fn trash_dest<F: Fn(&Path) -> bool>(
+    trash_dir: &Path,
+    dir_name: &str,
+    exists: F,
+) -> std::path::PathBuf {
+    let first = trash_dir.join(dir_name);
+    if !exists(&first) {
+        return first;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = trash_dir.join(format!("{}-{}", dir_name, n));
+        if !exists(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 fn skill_ls_command(
     project_path: Option<String>,
     filter: Option<String>,
@@ -1134,191 +1179,453 @@ fn skill_ls_command(
     }
 }
 
-fn skill_how_to_remove_command(filter: Option<String>) {
-    let home = dirs::home_dir().expect("Could not find home directory");
-    let global_claude = home.join(".claude");
+#[derive(Debug)]
+struct SkillRemoveTarget {
+    name: String,
+    origin: String,
+    scope_label: String,
+    dir: std::path::PathBuf,
+}
 
-    struct RemoveEntry {
-        name: String,
-        origin: String,
-        scope: String,
-        /// How it was installed (shown as "installed via: ...")
-        installed_via: Option<String>,
-        /// Primary removal command
-        command: String,
-        /// Additional removal step (e.g. full uninstall after symlink removal)
-        also: Option<String>,
+/// Enumerate removable directory skills (global + project), excluding symlinks
+/// (marketplace) and honoring disable_paths for projects.
+fn collect_skill_remove_targets(scope: Option<&str>) -> Vec<SkillRemoveTarget> {
+    let mut targets = Vec::new();
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return targets,
+    };
+
+    let want = |s: &str| scope.is_none_or(|sc| sc == s);
+    // Dedup by directory path so a skill reachable as both "global" and the
+    // home-as-project "project:~" is not listed (and moved) twice.
+    let mut seen_dirs: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+
+    // global: ~/.claude/skills/<dir>
+    if want("global") {
+        let global_skills = home.join(".claude/skills");
+        if let Ok(entries) = fs::read_dir(&global_skills) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_symlink() || !path.join("SKILL.md").exists() {
+                    continue;
+                }
+                let origin = detect_skill_origin(&path);
+                if origin == "marketplace" || origin == "symlink" {
+                    continue;
+                }
+                if !seen_dirs.insert(path.clone()) {
+                    continue;
+                }
+                let dir_name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let name = fs::read_to_string(path.join("SKILL.md"))
+                    .ok()
+                    .and_then(|c| parse_frontmatter(&c).0)
+                    .unwrap_or_else(|| dir_name.clone());
+                targets.push(SkillRemoveTarget {
+                    name,
+                    origin,
+                    scope_label: "global".to_string(),
+                    dir: path,
+                });
+            }
+        }
     }
 
-    let mut entries: Vec<RemoveEntry> = Vec::new();
-
-    // 1. Global user skills
-    let global_skills_dir = global_claude.join("skills");
-    if global_skills_dir.exists()
-        && let Ok(dirs) = fs::read_dir(&global_skills_dir)
+    // project: <proj>/.claude/skills/<dir>
+    if want("project")
+        && let Ok(config) = load_claude_config()
+        && let Some(projects) = config.projects
     {
-        for entry in dirs.flatten() {
-            let path = entry.path();
-            let is_dir = if path.is_symlink() {
-                fs::metadata(&path).is_ok_and(|m| m.is_dir())
-            } else {
-                path.is_dir()
-            };
-            if !is_dir || !path.join("SKILL.md").exists() {
+        let cckit_config = load_cckit_config();
+        let mut seen: std::collections::HashSet<(String, u64)> = std::collections::HashSet::new();
+        for project_path in projects.keys() {
+            if is_path_disabled(project_path, &cckit_config.disable_paths) {
                 continue;
             }
-            let dir_name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let name = if let Ok(content) = fs::read_to_string(path.join("SKILL.md")) {
-                parse_frontmatter(&content)
-                    .0
-                    .unwrap_or_else(|| dir_name.clone())
-            } else {
-                dir_name.clone()
-            };
-            let origin = detect_skill_origin(&path);
-            let (installed_via, command) = if origin == "marketplace" {
-                (
-                    Some("npx @anthropic/skills add".to_string()),
-                    format!("npx @anthropic/skills remove {}", dir_name),
-                )
-            } else {
-                (None, format!("rm -rf ~/.claude/skills/{}", dir_name))
-            };
-            entries.push(RemoveEntry {
-                name,
-                origin,
-                scope: "global".to_string(),
-                installed_via,
-                command,
-                also: None,
-            });
+            let claude_dir = Path::new(project_path).join(".claude");
+            if !claude_dir.join("skills").exists() {
+                continue;
+            }
+            for src in scan_skills_with_paths(&claude_dir) {
+                if src.skill_dir.is_symlink() {
+                    continue;
+                }
+                let origin = detect_skill_origin(&src.skill_dir);
+                if origin == "marketplace" || origin == "symlink" {
+                    continue;
+                }
+                if !seen_dirs.insert(src.skill_dir.clone()) {
+                    continue;
+                }
+                let content_hash = fs::read_to_string(src.skill_dir.join("SKILL.md"))
+                    .map(|c| {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        c.hash(&mut h);
+                        h.finish()
+                    })
+                    .unwrap_or(0);
+                if !seen.insert((src.info.name.clone(), content_hash)) {
+                    continue;
+                }
+                targets.push(SkillRemoveTarget {
+                    name: src.info.name,
+                    origin,
+                    scope_label: format!("project:{}", shorten_path(project_path)),
+                    dir: src.skill_dir,
+                });
+            }
         }
     }
 
-    // 2. Plugin skills
-    let plugins = scan_plugins(&global_claude);
-    for plugin in &plugins {
-        for skill in &plugin.skills {
-            entries.push(RemoveEntry {
-                name: skill.name.clone(),
-                origin: "plugin".to_string(),
-                scope: format!("plugin:{}", plugin.name),
-                installed_via: Some(format!("claude plugin install {}", plugin.name)),
-                command: format!("claude plugin uninstall {}", plugin.name),
-                also: None,
-            });
+    targets.sort_by(|a, b| a.name.cmp(&b.name).then(a.dir.cmp(&b.dir)));
+    targets
+}
+
+fn skill_remove_command(filter: Option<String>, scope: Option<String>, execute: bool) {
+    let mut targets = collect_skill_remove_targets(scope.as_deref());
+
+    if let Some(ref f) = filter {
+        let fl = f.to_lowercase();
+        targets.retain(|t| t.name.to_lowercase().contains(&fl));
+    }
+
+    if targets.is_empty() {
+        println!("{}", "No matching skills.".dimmed());
+        return;
+    }
+
+    match &filter {
+        Some(f) => println!(
+            "{} skills match \"{}\" (will move to trash)\n",
+            targets.len().to_string().cyan(),
+            f
+        ),
+        None => println!(
+            "{} skills (will move to trash)\n",
+            targets.len().to_string().cyan()
+        ),
+    }
+
+    for t in &targets {
+        println!(
+            "  {} {} {} {}",
+            "-".dimmed(),
+            t.name.bright_cyan(),
+            format!("({})", t.origin).dimmed(),
+            format!("[{}]", t.scope_label).dimmed()
+        );
+        println!("      {}", shorten_path(&t.dir.to_string_lossy()).dimmed());
+    }
+    println!();
+    println!(
+        "{}",
+        "Note: marketplace (symlink) and plugin skills are not removed here.".dimmed()
+    );
+    println!(
+        "{}",
+        "      marketplace -> npx @anthropic/skills remove <name>;  plugin -> claude plugin uninstall <plugin>".dimmed()
+    );
+
+    if !execute {
+        println!();
+        println!("Run with {} to move them to trash.", "--execute".cyan());
+        return;
+    }
+
+    let home = dirs::home_dir().unwrap_or_default();
+    let trash_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| home.join(".local/share"))
+        .join("cckit")
+        .join("trash");
+    if let Err(e) = fs::create_dir_all(&trash_dir) {
+        eprintln!("{}: {}", "Could not create trash dir".red(), e);
+        return;
+    }
+
+    let mut moved = 0usize;
+    for t in &targets {
+        let dir_name = t
+            .dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let dest = trash_dest(&trash_dir, &dir_name, |p| p.exists());
+        match fs::rename(&t.dir, &dest) {
+            Ok(_) => moved += 1,
+            Err(e) => eprintln!(
+                "{} {}: {}",
+                "Failed to move".red(),
+                shorten_path(&t.dir.to_string_lossy()),
+                e
+            ),
         }
     }
 
-    // 3. Project skills
+    println!();
+    println!(
+        "{} moved {} skill(s) to {}.",
+        "Done:".green(),
+        moved,
+        shorten_path(&trash_dir.to_string_lossy()).dimmed()
+    );
+}
+
+/// Candidate invocation names that should match an installed skill: its directory name,
+/// its frontmatter name, and (for namespaced invocations like `ns:foo`/`ns.foo`) the
+/// trailing segment is matched separately at lookup time.
+fn skill_match_keys(dir_name: &str, frontmatter_name: Option<&str>) -> Vec<String> {
+    let mut keys = vec![dir_name.to_string()];
+    if let Some(n) = frontmatter_name
+        && n != dir_name
+    {
+        keys.push(n.to_string());
+    }
+    keys
+}
+
+/// The bare skill name from a possibly-namespaced invocation (`ns:foo` / `ns.foo` -> foo).
+fn skill_name_tail(invocation: &str) -> &str {
+    invocation.rsplit([':', '.']).next().unwrap_or(invocation)
+}
+
+/// Collapse origin into one of: self, external:marketplace, external:installed.
+/// Only structural markers count as external (symlink to ~/.agents/skills, or a
+/// `.claude-plugin/plugin.json`); everything else is treated as self-made. Plugin-bundled
+/// skills are enumerated separately and never reach this path.
+fn classify_skill_origin_label(skill_dir: &Path) -> String {
+    match detect_skill_origin(skill_dir).as_str() {
+        "marketplace" => "external:marketplace".to_string(),
+        "installed" => "external:installed".to_string(),
+        _ => "self".to_string(),
+    }
+}
+
+/// Status of a skill given its last firing, "now", and the staleness threshold.
+fn firing_status(
+    last_fired: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    days: i64,
+) -> &'static str {
+    match last_fired {
+        None => "never",
+        Some(ts) => {
+            if now.signed_duration_since(ts).num_days() > days {
+                "stale"
+            } else {
+                "active"
+            }
+        }
+    }
+}
+
+fn skill_stale_command(days: i64, all: bool, show_desc: bool, json: bool) {
+    use crate::history::skill_usage::{SkillFiring, scan_skill_firings};
+
+    let firings = scan_skill_firings();
+    let now = chrono::Utc::now();
+
+    // Enumerate installed directory skills (global + project), all origins, deduped.
+    struct StaleRow {
+        name: String,
+        origin: String,
+        status: &'static str,
+        last_fired: Option<chrono::DateTime<chrono::Utc>>,
+        count: u32,
+        dir: std::path::PathBuf,
+        description: Option<String>,
+    }
+
+    let lookup_firing = |keys: &[String]| -> Option<SkillFiring> {
+        // Direct match on any key, or match a namespaced invocation by its tail.
+        for (inv, f) in &firings {
+            if keys.iter().any(|k| k == inv) || keys.iter().any(|k| k == skill_name_tail(inv)) {
+                return Some(f.clone());
+            }
+        }
+        None
+    };
+
+    let mut rows: Vec<StaleRow> = Vec::new();
+    let mut seen_dirs: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+
+    let mut consider = |dir: std::path::PathBuf| {
+        if dir.is_symlink() || !dir.join("SKILL.md").exists() {
+            return;
+        }
+        if !seen_dirs.insert(dir.clone()) {
+            return;
+        }
+        let dir_name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let (fm_name, fm_desc) = fs::read_to_string(dir.join("SKILL.md"))
+            .ok()
+            .map(|c| parse_frontmatter(&c))
+            .unwrap_or((None, None));
+        let keys = skill_match_keys(&dir_name, fm_name.as_deref());
+        let display_name = fm_name.unwrap_or_else(|| dir_name.clone());
+        let origin = classify_skill_origin_label(&dir);
+        let firing = lookup_firing(&keys);
+        let last_fired = firing.as_ref().map(|f| f.last_fired);
+        let count = firing.as_ref().map(|f| f.count).unwrap_or(0);
+        let status = firing_status(last_fired, now, days);
+        rows.push(StaleRow {
+            name: display_name,
+            origin,
+            status,
+            last_fired,
+            count,
+            dir,
+            description: fm_desc,
+        });
+    };
+
+    if let Some(home) = dirs::home_dir() {
+        let global_skills = home.join(".claude/skills");
+        if let Ok(entries) = fs::read_dir(&global_skills) {
+            for entry in entries.flatten() {
+                consider(entry.path());
+            }
+        }
+    }
     if let Ok(config) = load_claude_config()
         && let Some(projects) = config.projects
     {
-        let mut seen: std::collections::HashSet<(String, u64)> = std::collections::HashSet::new();
+        let cckit_config = load_cckit_config();
         for project_path in projects.keys() {
-            let claude_dir = Path::new(project_path).join(".claude");
-            if claude_dir.join("skills").exists() {
-                for skill_source in scan_skills_with_paths(&claude_dir) {
-                    let content_hash = fs::read_to_string(skill_source.skill_dir.join("SKILL.md"))
-                        .map(|c| {
-                            use std::hash::{Hash, Hasher};
-                            let mut h = std::collections::hash_map::DefaultHasher::new();
-                            c.hash(&mut h);
-                            h.finish()
-                        })
-                        .unwrap_or(0);
-                    let key = (skill_source.info.name.clone(), content_hash);
-                    if !seen.insert(key) {
-                        continue;
-                    }
-                    let dir_name = skill_source
-                        .skill_dir
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let short = shorten_path(project_path);
-                    let origin = detect_skill_origin(&skill_source.skill_dir);
-                    let (installed_via, command, also) = if origin == "marketplace" {
-                        (
-                            Some("npx @anthropic/skills add (symlinked)".to_string()),
-                            format!("rm {}/.claude/skills/{}", project_path, dir_name),
-                            Some(format!("npx @anthropic/skills remove {}", dir_name)),
-                        )
-                    } else {
-                        (
-                            None,
-                            format!("rm -rf {}/.claude/skills/{}", project_path, dir_name),
-                            None,
-                        )
-                    };
-                    entries.push(RemoveEntry {
-                        name: skill_source.info.name,
-                        origin,
-                        scope: format!("project:{}", short),
-                        installed_via,
-                        command,
-                        also,
-                    });
+            if is_path_disabled(project_path, &cckit_config.disable_paths) {
+                continue;
+            }
+            let skills_dir = Path::new(project_path).join(".claude/skills");
+            if let Ok(entries) = fs::read_dir(&skills_dir) {
+                for entry in entries.flatten() {
+                    consider(entry.path());
                 }
             }
         }
     }
 
-    // Apply filter
-    if let Some(ref f) = filter {
-        let f_lower = f.to_lowercase();
-        entries.retain(|e| e.name.to_lowercase().contains(&f_lower));
-    }
+    // Sort: never first, then by last_fired ascending (oldest first).
+    rows.sort_by(|a, b| match (a.last_fired, b.last_fired) {
+        (None, None) => a.name.cmp(&b.name),
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(x), Some(y)) => x.cmp(&y),
+    });
 
-    if entries.is_empty() {
-        println!("{}", "No skills found.".dimmed());
+    let never = rows.iter().filter(|r| r.status == "never").count();
+    let stale = rows.iter().filter(|r| r.status == "stale").count();
+    let active = rows.iter().filter(|r| r.status == "active").count();
+
+    if json {
+        let arr: Vec<serde_json::Value> = rows
+            .iter()
+            .filter(|r| all || r.status != "active")
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "origin": r.origin,
+                    "status": r.status,
+                    "last_fired": r.last_fired.map(|t| t.to_rfc3339()),
+                    "days_ago": r.last_fired.map(|t| now.signed_duration_since(t).num_days()),
+                    "fire_count": r.count,
+                    "dir": r.dir.to_string_lossy(),
+                    "description": r.description,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!(arr)).unwrap_or_default()
+        );
         return;
     }
 
-    println!("{} skills found\n", entries.len().to_string().cyan());
+    println!(
+        "{} (threshold: {}d)\n",
+        format!("Skills not fired in {}+ days", days).bold(),
+        days
+    );
 
-    let max_name = entries
+    let max_name = rows
         .iter()
-        .map(|e| e.name.len())
+        .filter(|r| all || r.status != "active")
+        .map(|r| r.name.len())
         .max()
         .unwrap_or(10)
-        .min(30);
+        .min(36);
 
-    for entry in &entries {
-        let origin_colored = match entry.origin.as_str() {
-            "personal" => format!("({})", entry.origin).green(),
-            "marketplace" => format!("({})", entry.origin).bright_blue(),
-            "installed" => format!("({})", entry.origin).cyan(),
-            "plugin" => format!("({})", entry.origin).magenta(),
-            "no author" => format!("({})", entry.origin).dimmed(),
-            _ => format!("({})", entry.origin).yellow(),
+    for r in rows.iter().filter(|r| all || r.status != "active") {
+        let status_col = match r.status {
+            "never" => "never".red(),
+            "stale" => "stale".yellow(),
+            _ => "active".green(),
+        };
+        let when = match r.last_fired {
+            Some(t) => format!(
+                "last: {} ({}d)",
+                t.format("%Y-%m-%d"),
+                now.signed_duration_since(t).num_days()
+            ),
+            None => String::new(),
+        };
+        let count = if r.count > 0 {
+            format!("{}x", r.count)
+        } else {
+            String::new()
+        };
+        let desc = if show_desc {
+            r.description
+                .as_deref()
+                .map(|d| format!("  {}", d.replace('\n', " ").trim()))
+                .unwrap_or_default()
+        } else {
+            String::new()
         };
         println!(
-            "  {:<width$} {} {}",
-            entry.name.bright_cyan(),
-            origin_colored,
-            format!("[{}]", entry.scope).dimmed(),
+            "  {:<7} {:<20} {:<width$}  {:<26} {:<5} {}{}",
+            status_col,
+            r.origin.dimmed(),
+            r.name.bright_cyan(),
+            when.dimmed(),
+            count.dimmed(),
+            shorten_path(&r.dir.to_string_lossy()).dimmed(),
+            desc.dimmed(),
             width = max_name,
         );
-        if let Some(ref via) = entry.installed_via {
-            println!("    {} {}", "installed via:".dimmed(), via);
-        }
-        let remove_label = if entry.also.is_some() {
-            "remove symlink:"
-        } else {
-            "remove:"
-        };
-        println!("    {} {}", remove_label.dimmed(), entry.command.bold(),);
-        if let Some(ref also) = entry.also {
-            println!("    {} {}", "full uninstall:".dimmed(), also.bold(),);
-        }
-        println!();
     }
+
+    println!();
+    if all {
+        println!(
+            "Summary: {} never, {} stale, {} active.",
+            never.to_string().red(),
+            stale.to_string().yellow(),
+            active.to_string().green(),
+        );
+    } else {
+        println!(
+            "Summary: {} never, {} stale, {} active (hidden; use --all).",
+            never.to_string().red(),
+            stale.to_string().yellow(),
+            active,
+        );
+    }
+    println!(
+        "{}",
+        "Note: \"never\" = no record in retained transcripts, not necessarily never used.".dimmed()
+    );
 }
 
 fn agent_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) {
@@ -1649,12 +1956,16 @@ fn mcp_ls_command(filter: Option<String>, scope: Option<String>, dupes: bool) {
     }
 
     // 4. Project MCP servers
+    let cckit_config = load_cckit_config();
     if let Ok(config) = load_claude_config()
         && let Some(projects) = config.projects
     {
         for project_path in projects.keys() {
             let project_dir = Path::new(project_path);
             if !project_dir.exists() {
+                continue;
+            }
+            if is_path_disabled(project_path, &cckit_config.disable_paths) {
                 continue;
             }
             for server in scan_mcp_servers(project_dir) {
@@ -3985,13 +4296,22 @@ fn compute_mcp_prune_plan() -> McpPrunePlan {
         None => return plan,
     };
 
-    // D: dead project paths (report-only)
-    let paths: Vec<String> = projects.keys().cloned().collect();
+    let cckit_config = load_cckit_config();
+
+    // D: dead project paths (report-only), excluding ignored paths
+    let paths: Vec<String> = projects
+        .keys()
+        .filter(|p| !is_path_disabled(p, &cckit_config.disable_paths))
+        .cloned()
+        .collect();
     plan.dead_paths = filter_dead_paths(&paths, |p| Path::new(p).exists());
 
     for (path, project_val) in &projects {
         let project_dir = Path::new(path);
         if !project_dir.exists() {
+            continue;
+        }
+        if is_path_disabled(path, &cckit_config.disable_paths) {
             continue;
         }
 
@@ -4302,6 +4622,7 @@ fn collect_mcp_remove_targets() -> Vec<McpRemoveTarget> {
     }
 
     // project: each <dir>/.mcp.json
+    let cckit_config = load_cckit_config();
     if let Ok(config) = load_claude_config()
         && let Some(projects) = config.projects
     {
@@ -4309,6 +4630,9 @@ fn collect_mcp_remove_targets() -> Vec<McpRemoveTarget> {
             let dir = Path::new(project_path);
             let mcp_file = dir.join(".mcp.json");
             if !dir.exists() || !mcp_file.exists() {
+                continue;
+            }
+            if is_path_disabled(project_path, &cckit_config.disable_paths) {
                 continue;
             }
             let short = shorten_path(project_path);
@@ -4366,8 +4690,10 @@ fn mcp_remove_command(
         ("Project", "project"),
         ("Plugin", "plugin"),
     ] {
-        let section: Vec<&McpRemoveTarget> =
+        let mut section: Vec<&McpRemoveTarget> =
             targets.iter().filter(|t| t.scope_class == class).collect();
+        // Sort by server name, then by file path for a stable order.
+        section.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.file.cmp(&b.file)));
         if section.is_empty() {
             continue;
         }
@@ -4411,6 +4737,15 @@ fn mcp_remove_command(
         "{}",
         "Note: local-scope servers are handled by `claude mcp remove -s local`.".dimmed()
     );
+
+    let has_project = targets.iter().any(|t| t.scope_class == "project");
+    if has_project {
+        println!(
+            "{}",
+            "Note: matching project approvals (enabledMcpjsonServers) will also be cleaned."
+                .dimmed()
+        );
+    }
 
     if !execute {
         println!();
@@ -4475,14 +4810,56 @@ fn mcp_remove_command(
         }
     }
 
+    // Also strip the removed server names from each project's approval lists so no
+    // stale (local) phantom remains. Reuses prune_array; approvals live in
+    // <project>/.claude/settings.local.json (sibling of the project .mcp.json).
+    let mut proj_approvals: BTreeMap<std::path::PathBuf, Vec<String>> = BTreeMap::new();
+    for t in &targets {
+        if t.scope_class == "project"
+            && let Some(file) = &t.file
+            && let Some(dir) = file.parent()
+        {
+            proj_approvals
+                .entry(dir.join(".claude/settings.local.json"))
+                .or_default()
+                .push(t.name.clone());
+        }
+    }
+    let mut approvals_cleaned = 0usize;
+    for (settings, names) in &proj_approvals {
+        let content = match fs::read_to_string(settings) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let mut json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let before = json.clone();
+        prune_array(&mut json, "enabledMcpjsonServers", names);
+        prune_array(&mut json, "disabledMcpjsonServers", names);
+        if json == before {
+            continue; // nothing to clean in this file
+        }
+        if !backup_file(settings, no_backup) {
+            continue;
+        }
+        if let Ok(s) = serde_json::to_string_pretty(&json)
+            && fs::write(settings, s + "\n").is_ok()
+        {
+            approvals_cleaned += 1;
+        }
+    }
+
     let plugin_skipped = targets.iter().filter(|t| t.scope_class == "plugin").count();
     println!();
     println!(
-        "{} removed {} entr(ies) from {} file(s), {} empty .mcp.json deleted, {} plugin skipped.",
+        "{} removed {} entr(ies) from {} file(s), {} empty .mcp.json deleted, {} approval file(s) cleaned, {} plugin skipped.",
         "Done:".green(),
         removed,
         files_changed,
         deleted,
+        approvals_cleaned,
         plugin_skipped
     );
 }
@@ -4768,9 +5145,11 @@ fn load_claude_config() -> Result<ClaudeConfig, Box<dyn std::error::Error>> {
 }
 
 fn load_cckit_config() -> ClamonConfig {
-    // Priority: ./config.toml > ~/.config/cckit/config.toml
+    // Priority: ./config.toml > ~/.config/cckit/config.toml (XDG) >
+    //           platform config dir (macOS: ~/Library/Application Support/cckit)
     let candidates = [
         std::env::current_dir().ok().map(|p| p.join("config.toml")),
+        dirs::home_dir().map(|p| p.join(".config/cckit/config.toml")),
         dirs::config_dir().map(|p| p.join("cckit/config.toml")),
     ];
 
@@ -4795,8 +5174,21 @@ fn shorten_path(path: &str) -> String {
     path.to_string()
 }
 
+/// Expand a leading `~/` in a config pattern to the home directory. Patterns without
+/// a leading `~/` are returned unchanged.
+fn expand_tilde(pattern: &str) -> String {
+    if let Some(rest) = pattern.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return format!("{}/{}", home.to_string_lossy(), rest);
+    }
+    pattern.to_string()
+}
+
 fn is_path_disabled(path: &str, disable_paths: &[String]) -> bool {
     for pattern in disable_paths {
+        let expanded = expand_tilde(pattern);
+        let pattern = expanded.as_str();
         if pattern.contains('*') || pattern.contains('?') {
             // Glob pattern matching
             if let Ok(glob_pattern) = glob::Pattern::new(pattern)
@@ -6819,11 +7211,23 @@ pub fn run() {
             } => {
                 skill_promote_command(filter, name, force, dry_run);
             }
-            SkillCommands::HowToRemove { filter } => {
-                skill_how_to_remove_command(filter);
+            SkillCommands::Remove {
+                filter,
+                scope,
+                execute,
+            } => {
+                skill_remove_command(filter, scope, execute);
             }
             SkillCommands::Validate { spec, verbose } => {
                 skill_validate_command(spec.as_deref(), verbose);
+            }
+            SkillCommands::Stale {
+                days,
+                all,
+                desc,
+                json,
+            } => {
+                skill_stale_command(days, all, desc, json);
             }
         },
         Some(Commands::Mcp { command }) => match command {
@@ -7393,5 +7797,104 @@ name: agent-name
         // no mcpServers object -> false
         let mut v4 = json!({"other": true});
         assert!(!remove_mcp_server_key(&mut v4, "x"));
+    }
+
+    #[test]
+    fn test_skill_match_keys() {
+        // dir == name -> single key
+        assert_eq!(
+            skill_match_keys("foo", Some("foo")),
+            vec!["foo".to_string()]
+        );
+        // dir != name -> both
+        assert_eq!(
+            skill_match_keys("dir-name", Some("Display Name")),
+            vec!["dir-name".to_string(), "Display Name".to_string()]
+        );
+        // no frontmatter name -> just dir
+        assert_eq!(skill_match_keys("foo", None), vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn test_skill_name_tail() {
+        assert_eq!(skill_name_tail("foo"), "foo");
+        assert_eq!(
+            skill_name_tail("superpowers:brainstorming"),
+            "brainstorming"
+        );
+        assert_eq!(
+            skill_name_tail("lambda-zip.release-lambda-function"),
+            "release-lambda-function"
+        );
+    }
+
+    #[test]
+    fn test_firing_status() {
+        use chrono::{TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+        assert_eq!(firing_status(None, now, 90), "never");
+        // 100 days ago -> stale (>90)
+        let old = Utc.with_ymd_and_hms(2026, 1, 21, 0, 0, 0).unwrap();
+        assert_eq!(firing_status(Some(old), now, 90), "stale");
+        // 10 days ago -> active
+        let recent = Utc.with_ymd_and_hms(2026, 4, 21, 0, 0, 0).unwrap();
+        assert_eq!(firing_status(Some(recent), now, 90), "active");
+    }
+
+    #[test]
+    fn test_trash_dest() {
+        use std::collections::HashSet;
+        let trash = Path::new("/trash");
+
+        // no collision
+        let taken: HashSet<String> = HashSet::new();
+        assert_eq!(
+            trash_dest(trash, "foo", |p| taken
+                .contains(&p.to_string_lossy().to_string())),
+            Path::new("/trash/foo")
+        );
+
+        // collision on foo -> foo-2
+        let taken: HashSet<String> = ["/trash/foo".to_string()].into_iter().collect();
+        assert_eq!(
+            trash_dest(trash, "foo", |p| taken
+                .contains(&p.to_string_lossy().to_string())),
+            Path::new("/trash/foo-2")
+        );
+
+        // collision on foo and foo-2 -> foo-3
+        let taken: HashSet<String> = ["/trash/foo".to_string(), "/trash/foo-2".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            trash_dest(trash, "foo", |p| taken
+                .contains(&p.to_string_lossy().to_string())),
+            Path::new("/trash/foo-3")
+        );
+    }
+
+    #[test]
+    fn test_is_path_disabled() {
+        // prefix match
+        assert!(is_path_disabled("/abs/foo/bar", &["/abs/foo".to_string()]));
+        // glob match
+        assert!(is_path_disabled(
+            "/x/my-biz-workspace/projects/corona/echonet-lite",
+            &["*/my-biz-workspace/projects/*".to_string()]
+        ));
+        // non-match
+        assert!(!is_path_disabled("/abs/other", &["/abs/foo".to_string()]));
+        // empty patterns
+        assert!(!is_path_disabled("/abs/foo", &[]));
+
+        // tilde-expanded pattern matches the corresponding absolute path
+        if let Some(home) = dirs::home_dir() {
+            let abs = format!("{}/.ghq/proj", home.to_string_lossy());
+            assert!(is_path_disabled(&abs, &["~/.ghq/proj".to_string()]));
+            assert!(!is_path_disabled(
+                &format!("{}/.ghq/other", home.to_string_lossy()),
+                &["~/.ghq/proj".to_string()]
+            ));
+        }
     }
 }

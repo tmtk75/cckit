@@ -132,9 +132,7 @@ fn read_mcp_servers(plugin_path: &Path) -> (Vec<McpServer>, Option<bool>) {
     };
 
     let mut servers = Vec::new();
-    let obj = value
-        .get("mcpServers")
-        .and_then(|v| v.as_object());
+    let obj = value.get("mcpServers").and_then(|v| v.as_object());
     if let Some(obj) = obj {
         for (key, val) in obj {
             let server_type = val
@@ -208,11 +206,7 @@ pub fn scan_marketplace(path: &Path) -> Marketplace {
 pub fn summary_command(path: &Path) {
     let marketplace = scan_marketplace(path);
     let plugin_count = marketplace.plugins.len();
-    println!(
-        "{} ({} plugins)",
-        marketplace.name.bold(),
-        plugin_count
-    );
+    println!("{} ({} plugins)", marketplace.name.bold(), plugin_count);
 
     for plugin in &marketplace.plugins {
         println!();
@@ -337,10 +331,7 @@ pub fn validate_marketplace(marketplace: &Marketplace) -> ValidationResult {
         if let Some(valid) = plugin.mcp_valid_json {
             checks_total += 1;
             if !valid {
-                issues.push(format!(
-                    "[{}] mcp-servers/config.json is invalid JSON",
-                    dir
-                ));
+                issues.push(format!("[{}] mcp-servers/config.json is invalid JSON", dir));
             } else {
                 checks_passed += 1;
             }
@@ -372,11 +363,7 @@ pub fn doctor_command(path: &Path) {
     let marketplace = scan_marketplace(path);
     let result = validate_marketplace(&marketplace);
 
-    println!(
-        "{}: {}",
-        "cckit Marketplace Doctor".bold(),
-        path.display()
-    );
+    println!("{}: {}", "cckit Marketplace Doctor".bold(), path.display());
     println!();
 
     if marketplace.plugins.is_empty() {
@@ -571,10 +558,7 @@ mod tests {
         assert!(p.manifest.is_some());
         assert_eq!(p.skills.len(), 1);
         assert_eq!(p.skills[0].name, "sample");
-        assert_eq!(
-            p.skills[0].description.as_deref(),
-            Some("A sample skill")
-        );
+        assert_eq!(p.skills[0].description.as_deref(), Some("A sample skill"));
         assert!(p.skills[0].has_frontmatter);
         assert!(p.hooks.is_some());
         let hooks = p.hooks.as_ref().unwrap();
@@ -588,14 +572,7 @@ mod tests {
     #[test]
     fn test_scan_marketplace_no_manifest() {
         let tmp = TempDir::new().unwrap();
-        create_plugin_fixture(
-            tmp.path(),
-            "no-manifest",
-            None,
-            &[],
-            None,
-            None,
-        );
+        create_plugin_fixture(tmp.path(), "no-manifest", None, &[], None, None);
 
         let m = scan_marketplace(tmp.path());
         assert_eq!(m.plugins.len(), 1);
@@ -657,7 +634,11 @@ mod tests {
         let m = scan_marketplace(tmp.path());
         let r = validate_marketplace(&m);
         assert!(r.issues.is_empty(), "expected no issues: {:?}", r.issues);
-        assert!(r.warnings.is_empty(), "expected no warnings: {:?}", r.warnings);
+        assert!(
+            r.warnings.is_empty(),
+            "expected no warnings: {:?}",
+            r.warnings
+        );
         assert_eq!(r.checks_passed, r.checks_total);
     }
 
@@ -712,7 +693,7 @@ mod tests {
             tmp.path(),
             "empty-plugin",
             Some("empty-plugin"),
-            &[], // no skills
+            &[],  // no skills
             None, // no hooks
             None, // no mcp
         );

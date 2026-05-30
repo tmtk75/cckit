@@ -1,6 +1,7 @@
 pub mod format;
 pub mod loader;
 pub mod search;
+pub mod skill_usage;
 pub mod tui;
 
 use chrono::{DateTime, Utc};

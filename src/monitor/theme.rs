@@ -160,7 +160,10 @@ pub const INACTIVE_MIN_ALPHA: f64 = 0.55;
 /// Returns an "inactivity factor" in `[0.0, 1.0]` based on how long since
 /// `updated_at`.  0.0 = active (≤ 1 h), 1.0 = fully inactive (≥ 24 h),
 /// linearly interpolated in between.
-pub fn inactivity_factor(updated_at: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> f64 {
+pub fn inactivity_factor(
+    updated_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> f64 {
     let idle_secs = now.signed_duration_since(updated_at).num_seconds().max(0) as f64;
     ((idle_secs - INACTIVE_START_SECS) / (INACTIVE_END_SECS - INACTIVE_START_SECS)).clamp(0.0, 1.0)
 }
