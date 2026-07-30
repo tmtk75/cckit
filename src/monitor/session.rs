@@ -76,6 +76,16 @@ impl Session {
         self.cwd.rsplit('/').next().unwrap_or(&self.cwd)
     }
 
+    /// Context window size for this session.
+    ///
+    /// Derived from `model` on every read instead of trusting the persisted
+    /// `context_max_tokens`: that value may have been written by an older build
+    /// and only gets rewritten when the session next fires a Stop hook, which
+    /// leaves idle sessions showing a stale percentage.
+    pub fn context_max(&self) -> Option<u64> {
+        super::hook::resolve_max_tokens(self.model.as_deref(), None).or(self.context_max_tokens)
+    }
+
     /// Returns true if this session is a subagent.
     /// Detection: transcript_path contains "/subagents/" (definitive),
     /// subagent_name already extracted (confirmed),

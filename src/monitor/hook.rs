@@ -14,16 +14,39 @@ pub struct ContextUsage {
     pub model: Option<String>,
 }
 
+/// Models whose transcript name implies the 1M context window.
+/// Claude Code enables 1M by default for the frontier 4.x and 5 generations.
+const ONE_M_CONTEXT_FAMILIES: [&str; 5] = ["opus-4", "sonnet-4", "opus-5", "sonnet-5", "fable-5"];
+
 /// Derive max context window size from model name.
-/// Claude Code uses 1M context for Opus 4.x and Sonnet 4.x by default.
+///
+/// Model IDs carry an explicit `[1m]` suffix when the 1M window is enabled
+/// (e.g. `claude-opus-5[1m]`), but transcripts strip it before writing
+/// `message.model`, so fall back to a generation heuristic.
 pub fn model_max_tokens(model: &str) -> Option<u64> {
-    if model.contains("opus-4") || model.contains("sonnet-4") {
-        Some(1_000_000)
-    } else if model.contains("haiku") || model.contains("opus") || model.contains("sonnet") {
-        Some(200_000)
-    } else {
-        None
+    if model.contains("[1m]") {
+        return Some(1_000_000);
     }
+    if ONE_M_CONTEXT_FAMILIES.iter().any(|f| model.contains(f)) {
+        return Some(1_000_000);
+    }
+    if model.contains("haiku") || model.contains("opus") || model.contains("sonnet") {
+        return Some(200_000);
+    }
+    None
+}
+
+/// Resolve the context window for a session from the two model IDs we can see.
+///
+/// `hook_model` comes from the hook payload and is authoritative: both Claude
+/// Code and Codex send the full ID there, including the `[1m]` suffix that
+/// transcripts strip. `transcript_model` is the fallback for sessions that
+/// never delivered a model in a hook payload.
+pub fn resolve_max_tokens(hook_model: Option<&str>, transcript_model: Option<&str>) -> Option<u64> {
+    if hook_model.is_some_and(|m| m.contains("[1m]")) {
+        return Some(1_000_000);
+    }
+    transcript_model.or(hook_model).and_then(model_max_tokens)
 }
 
 /// Read the last assistant message from a transcript JSONL to extract usage info.
@@ -103,7 +126,10 @@ pub struct HookInput {
     pub tool_input: Option<serde_json::Value>,
     #[serde(default)]
     pub transcript_path: Option<String>,
-    /// Model name (always present in Codex hooks, absent in Claude Code hooks)
+    /// Full model ID, e.g. "claude-opus-5[1m]". Always present in Codex hooks
+    /// and sent by Claude Code too. Unlike the transcript's `message.model`,
+    /// this keeps the "[1m]" suffix, so it is the source of truth for the
+    /// context window size.
     #[serde(default)]
     pub model: Option<String>,
 }
@@ -255,9 +281,16 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(ref tp) = session.transcript_path {
                         let ctx = read_context_usage(tp);
                         if ctx.used_tokens.is_some() {
+                            let hook_model =
+                                hook_input.model.clone().or_else(|| session.model.clone());
+                            let max =
+                                resolve_max_tokens(hook_model.as_deref(), ctx.model.as_deref());
                             session.context_used_tokens = ctx.used_tokens;
-                            session.context_max_tokens = ctx.max_tokens;
-                            session.model = ctx.model;
+                            session.context_max_tokens = max;
+                            // Never downgrade a hook-provided ID: it carries "[1m]".
+                            if !session.model.as_deref().is_some_and(|m| m.contains("[1m]")) {
+                                session.model = ctx.model;
+                            }
                         }
                     }
                 }
@@ -293,10 +326,10 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
             session.transcript_path = Some(tp.clone());
         }
 
-        // Set model from hook input if provided (Codex always sends this)
+        // Set model from hook input whenever provided. This is the authoritative
+        // ID (it keeps the "[1m]" suffix), so it overrides any transcript value.
         if let Some(ref model) = hook_input.model
             && let Some(session) = store.sessions.get_mut(&key)
-            && session.model.is_none()
         {
             session.model = Some(model.clone());
         }
@@ -631,5 +664,90 @@ mod tests {
         assert_eq!(hook_input.session_id, "abc123");
         assert_eq!(hook_input.tool_name, None);
         assert_eq!(hook_input.tool_input, None);
+    }
+
+    #[test]
+    fn test_model_max_tokens_explicit_1m_suffix() {
+        // An explicit "[1m]" suffix wins over any family heuristic.
+        assert_eq!(model_max_tokens("claude-opus-5[1m]"), Some(1_000_000));
+        assert_eq!(model_max_tokens("claude-opus-4-8[1m]"), Some(1_000_000));
+        assert_eq!(model_max_tokens("claude-haiku-4-5[1m]"), Some(1_000_000));
+    }
+
+    #[test]
+    fn test_model_max_tokens_claude_5_family() {
+        // Transcripts strip the "[1m]" suffix, so the 5 generation falls back
+        // to the family heuristic and must not land on the 200k default.
+        assert_eq!(model_max_tokens("claude-opus-5"), Some(1_000_000));
+        assert_eq!(model_max_tokens("claude-sonnet-5"), Some(1_000_000));
+        assert_eq!(model_max_tokens("claude-fable-5"), Some(1_000_000));
+    }
+
+    #[test]
+    fn test_model_max_tokens_claude_4_family() {
+        assert_eq!(model_max_tokens("claude-opus-4-7"), Some(1_000_000));
+        assert_eq!(model_max_tokens("claude-sonnet-4-6"), Some(1_000_000));
+        assert_eq!(
+            model_max_tokens("claude-opus-4-5-20251101"),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn test_model_max_tokens_200k_models() {
+        assert_eq!(model_max_tokens("claude-haiku-4-5-20251001"), Some(200_000));
+        assert_eq!(model_max_tokens("haiku"), Some(200_000));
+        assert_eq!(model_max_tokens("opus"), Some(200_000));
+        assert_eq!(model_max_tokens("sonnet"), Some(200_000));
+    }
+
+    #[test]
+    fn test_model_max_tokens_unknown() {
+        assert_eq!(model_max_tokens("<synthetic>"), None);
+        assert_eq!(model_max_tokens("gpt-5-codex"), None);
+    }
+
+    #[test]
+    fn test_resolve_max_tokens_hook_suffix_wins() {
+        // Hook input keeps "[1m]"; the transcript strips it. Hook wins.
+        assert_eq!(
+            resolve_max_tokens(Some("claude-opus-5[1m]"), Some("claude-opus-5")),
+            Some(1_000_000)
+        );
+        // Even when the family heuristic would say 200k.
+        assert_eq!(
+            resolve_max_tokens(
+                Some("claude-haiku-4-5[1m]"),
+                Some("claude-haiku-4-5-20251001")
+            ),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn test_resolve_max_tokens_falls_back_to_transcript() {
+        assert_eq!(
+            resolve_max_tokens(None, Some("claude-opus-5")),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            resolve_max_tokens(None, Some("claude-haiku-4-5-20251001")),
+            Some(200_000)
+        );
+        // A hook model without the suffix is no better than the transcript one.
+        assert_eq!(
+            resolve_max_tokens(Some("claude-opus-5"), Some("claude-opus-5")),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn test_resolve_max_tokens_uses_hook_when_no_transcript() {
+        assert_eq!(
+            resolve_max_tokens(Some("claude-haiku-4-5-20251001"), None),
+            Some(200_000)
+        );
+        assert_eq!(resolve_max_tokens(Some("gpt-5.6-sol"), None), None);
+        assert_eq!(resolve_max_tokens(None, None), None);
     }
 }

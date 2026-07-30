@@ -304,9 +304,17 @@ fn load_sessions() {
             let recently_updated = now.signed_duration_since(session.updated_at).num_seconds() < 30;
             if recently_updated || session.context_used_tokens.is_none() {
                 let ctx = crate::monitor::hook::read_context_usage(tp);
+                // The stored model came from the hook payload and keeps the
+                // "[1m]" suffix, so it outranks the transcript's stripped ID.
+                let max = crate::monitor::hook::resolve_max_tokens(
+                    session.model.as_deref(),
+                    ctx.model.as_deref(),
+                );
                 session.context_used_tokens = ctx.used_tokens;
-                session.context_max_tokens = ctx.max_tokens;
-                if ctx.model.is_some() {
+                session.context_max_tokens = max;
+                if ctx.model.is_some()
+                    && !session.model.as_deref().is_some_and(|m| m.contains("[1m]"))
+                {
                     session.model = ctx.model;
                 }
             }
@@ -371,7 +379,7 @@ struct ContextBarInfo {
 /// Extract context window usage info for rendering
 fn context_bar_info(session: &Session) -> Option<ContextBarInfo> {
     let used = session.context_used_tokens?;
-    let max = session.context_max_tokens?;
+    let max = session.context_max()?;
     if max == 0 {
         return None;
     }
@@ -1558,7 +1566,7 @@ fn rebuild_view_classic(view: &NSView) {
 
     let any_has_context = sessions
         .iter()
-        .any(|s| s.context_used_tokens.is_some() && s.context_max_tokens.is_some());
+        .any(|s| s.context_used_tokens.is_some() && s.context_max().is_some());
 
     let any_has_model = sessions.iter().any(|s| {
         s.model

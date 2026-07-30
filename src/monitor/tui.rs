@@ -512,7 +512,7 @@ fn draw_sessions(frame: &mut Frame, area: Rect, app: &App) {
         let elapsed = display::format_elapsed_short(session.updated_at);
 
         // Context ratio
-        let context_ratio = match (session.context_used_tokens, session.context_max_tokens) {
+        let context_ratio = match (session.context_used_tokens, session.context_max()) {
             (Some(used), Some(max)) if max > 0 => used as f64 / max as f64,
             _ => 0.0,
         };

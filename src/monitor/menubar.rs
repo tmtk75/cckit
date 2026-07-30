@@ -352,7 +352,7 @@ impl std::str::FromStr for MenubarStyle {
 /// Format a context-usage mini bar: "▓▓▓░ 72%" (4 blocks + percentage).
 /// Returns empty string if context info is unavailable.
 fn format_context_mini_bar(session: &Session) -> String {
-    let (used, max) = match (session.context_used_tokens, session.context_max_tokens) {
+    let (used, max) = match (session.context_used_tokens, session.context_max()) {
         (Some(u), Some(m)) if m > 0 => (u, m),
         _ => return String::new(),
     };
