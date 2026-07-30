@@ -30,7 +30,7 @@ pub fn print_sessions_list() {
     }
 
     let mut sessions: Vec<&Session> = store.sessions.values().collect();
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
 
     let active_count = sessions
         .iter()

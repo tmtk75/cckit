@@ -736,7 +736,7 @@ mod tests {
         for i in 0..100 {
             let t = i as f64 * 0.05;
             let v = breathing_pulse(t);
-            assert!(v >= 0.39 && v <= 1.01, "breathing_pulse({t}) = {v}");
+            assert!((0.39..=1.01).contains(&v), "breathing_pulse({t}) = {v}");
         }
     }
 
@@ -759,7 +759,7 @@ mod tests {
         for i in 0..100 {
             let t = i as f64 * 0.1;
             let v = slow_fade(t);
-            assert!(v >= 0.59 && v <= 1.01, "slow_fade({t}) = {v}");
+            assert!((0.59..=1.01).contains(&v), "slow_fade({t}) = {v}");
         }
     }
 
@@ -767,19 +767,23 @@ mod tests {
 
     #[test]
     fn test_window_layout_positive() {
-        assert!(window_layout::WIDTH > 0.0);
-        assert!(window_layout::CARD_HEIGHT > 0.0);
-        assert!(window_layout::HEADER_HEIGHT > 0.0);
-        assert!(window_layout::FOOTER_HEIGHT > 0.0);
+        const {
+            assert!(window_layout::WIDTH > 0.0);
+            assert!(window_layout::CARD_HEIGHT > 0.0);
+            assert!(window_layout::HEADER_HEIGHT > 0.0);
+            assert!(window_layout::FOOTER_HEIGHT > 0.0);
+        }
     }
 
     // --- notif_layout ---
 
     #[test]
     fn test_notif_layout_bounds() {
-        assert!(notif_layout::MIN_HEIGHT < notif_layout::MAX_HEIGHT);
-        assert!(notif_layout::DEFAULT_OPACITY > 0.0);
-        assert!(notif_layout::DEFAULT_OPACITY <= 1.0);
+        const {
+            assert!(notif_layout::MIN_HEIGHT < notif_layout::MAX_HEIGHT);
+            assert!(notif_layout::DEFAULT_OPACITY > 0.0);
+            assert!(notif_layout::DEFAULT_OPACITY <= 1.0);
+        }
         assert_eq!(notif_layout::BG_HEX, "#1a1a2e");
     }
 
@@ -787,8 +791,10 @@ mod tests {
 
     #[test]
     fn test_palette_border_alpha() {
-        assert!(palette::BORDER_ALPHA > 0.0);
-        assert!(palette::BORDER_ALPHA < 1.0);
+        const {
+            assert!(palette::BORDER_ALPHA > 0.0);
+            assert!(palette::BORDER_ALPHA < 1.0);
+        }
     }
 
     // --- inactivity ---

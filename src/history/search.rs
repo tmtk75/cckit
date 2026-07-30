@@ -13,7 +13,7 @@ pub fn search_sessions(sessions: Vec<SessionRecord>, terms: &[String], limit: us
         .into_iter()
         .filter_map(|session| match_session(session, &lower_terms))
         .collect();
-    hits.sort_by(|a, b| b.session.ended_at.cmp(&a.session.ended_at));
+    hits.sort_by_key(|h| std::cmp::Reverse(h.session.ended_at));
     hits.truncate(limit);
     hits
 }

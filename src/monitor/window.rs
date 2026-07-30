@@ -330,7 +330,7 @@ fn load_sessions() {
             }
         }
     }
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
 
     // Compute a fingerprint to detect meaningful changes
     use std::hash::{Hash, Hasher};

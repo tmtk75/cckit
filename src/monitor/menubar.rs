@@ -697,7 +697,7 @@ impl MenubarApp {
         menu.addItem(&separator_legend);
 
         let mut sessions: Vec<&Session> = store.sessions.values().collect();
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
 
         if sessions.is_empty() {
             let item = create_menu_item(self.mtm, "No active sessions", None);

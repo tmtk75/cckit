@@ -6307,7 +6307,7 @@ fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
                     }
                 }
             }
-            skill_tokens.sort_by(|a, b| b.1.cmp(&a.1));
+            skill_tokens.sort_by_key(|t| std::cmp::Reverse(t.1));
             let count = skill_tokens.len();
             if count > 15 || total_tokens > 5000 {
                 println!(

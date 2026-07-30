@@ -42,7 +42,7 @@ impl App {
     fn update_sessions(&mut self, storage: &Storage) {
         let store = storage.load();
         let mut sessions: Vec<Session> = store.sessions.values().cloned().collect();
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         self.sessions = sessions;
 
         if !self.sessions.is_empty() && self.selected_index >= self.sessions.len() {
