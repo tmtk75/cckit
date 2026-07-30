@@ -1378,13 +1378,22 @@ fn rebuild_view_mission_control(view: &NSView) {
             color_text()
         };
 
-        // Agent label + project name
-        let agent_label_text = match agent {
-            AgentType::Claude => "Claude",
-            AgentType::Codex => "Codex",
-            AgentType::Gemini => "Gemini",
-            AgentType::Unknown => "Agent",
-        };
+        // Agent label + project name.
+        // Prefer the short model label (e.g. "Opus 4.7") when the session's
+        // last-seen model id maps to one; fall back to the agent-family name.
+        let agent_label_text: String = session
+            .model
+            .as_deref()
+            .and_then(theme::model_short_label)
+            .unwrap_or_else(|| {
+                match agent {
+                    AgentType::Claude => "Claude",
+                    AgentType::Codex => "Codex",
+                    AgentType::Gemini => "Gemini",
+                    AgentType::Unknown => "Agent",
+                }
+                .to_string()
+            });
         let row1_text = format!("{} \u{2022} {}", agent_label_text, project);
         let label_x = content_x + dot + 4.0;
         let row1_rect = NSRect::new(
@@ -1551,6 +1560,15 @@ fn rebuild_view_classic(view: &NSView) {
         .iter()
         .any(|s| s.context_used_tokens.is_some() && s.context_max_tokens.is_some());
 
+    let any_has_model = sessions.iter().any(|s| {
+        s.model
+            .as_deref()
+            .and_then(theme::model_short_label)
+            .is_some()
+    });
+    // Space allocated for the MODEL column (0 when no session reports one).
+    let model_col_w: CGFloat = if any_has_model { 80.0 } else { 0.0 };
+
     let any_has_subagent_name = sessions.iter().any(|s| s.subagent_name.is_some());
     let proj_w = if any_has_subagent_name {
         CL_PROJECT_COL_WIDTH_WIDE
@@ -1591,10 +1609,9 @@ fn rebuild_view_classic(view: &NSView) {
 
     let hdr_ctx_w: CGFloat = if any_has_context { 70.0 } else { 0.0 };
     let hdr_stats_w: CGFloat = 230.0;
-    let hdr_right_total = hdr_stats_w + hdr_ctx_w;
     let hdr_right = format!("{:>12} {:>6}  {:>5}  {:<2}", "STAT", "TOOL", "AGE", "AF");
     let hdr_right_rect = NSRect::new(
-        NSPoint::new(view_width - hdr_right_total - CL_LEFT_PAD, 2.0),
+        NSPoint::new(view_width - hdr_stats_w - hdr_ctx_w - CL_LEFT_PAD, 2.0),
         NSSize::new(hdr_stats_w, CL_HEADER_HEIGHT - 2.0),
     );
     let hdr_right_label = create_mono_label(
@@ -1606,6 +1623,25 @@ fn rebuild_view_classic(view: &NSView) {
     );
     let _: () = unsafe { msg_send![&*hdr_right_label, setAlignment: 1_isize] };
     view.addSubview(&hdr_right_label);
+
+    if any_has_model {
+        let hdr_model_rect = NSRect::new(
+            NSPoint::new(
+                view_width - hdr_stats_w - hdr_ctx_w - model_col_w - CL_LEFT_PAD,
+                2.0,
+            ),
+            NSSize::new(model_col_w - 6.0, CL_HEADER_HEIGHT - 2.0),
+        );
+        let hdr_model_label = create_mono_label(
+            mtm,
+            "MODEL",
+            hdr_model_rect,
+            &cl_color_dim(),
+            CL_FONT_SIZE_SMALL,
+        );
+        let _: () = unsafe { msg_send![&*hdr_model_label, setAlignment: 1_isize] };
+        view.addSubview(&hdr_model_label);
+    }
 
     if any_has_context {
         let hdr_ctx_rect = NSRect::new(
@@ -1651,7 +1687,7 @@ fn rebuild_view_classic(view: &NSView) {
         return;
     }
 
-    let right_col_w: CGFloat = if any_has_context { 230.0 + 70.0 } else { 230.0 };
+    let right_col_w: CGFloat = 230.0 + if any_has_context { 70.0 } else { 0.0 } + model_col_w;
 
     for (i, session) in sessions.iter().enumerate() {
         let y = y_start + (i as CGFloat) * CL_ROW_HEIGHT;
@@ -1752,10 +1788,9 @@ fn rebuild_view_classic(view: &NSView) {
         let af_col = if af_off { "\u{23F8}" } else { "\u{2713}" };
         let ctx_col_w: CGFloat = if any_has_context { 70.0 } else { 0.0 };
         let stats_w: CGFloat = 230.0;
-        let right_w = stats_w + ctx_col_w;
         let right_text = format!("{:>12} {:>6}  {:>5}  {:<2}", stats, tool, elapsed, af_col);
         let right_rect = NSRect::new(
-            NSPoint::new(view_width - right_w - CL_LEFT_PAD, y + 2.0),
+            NSPoint::new(view_width - stats_w - ctx_col_w - CL_LEFT_PAD, y + 2.0),
             NSSize::new(stats_w, CL_ROW_HEIGHT - 4.0),
         );
         let right_label = create_mono_label(
@@ -1767,6 +1802,35 @@ fn rebuild_view_classic(view: &NSView) {
         );
         let _: () = unsafe { msg_send![&*right_label, setAlignment: 1_isize] };
         view.addSubview(&right_label);
+
+        if any_has_model {
+            let model_label_text = session
+                .model
+                .as_deref()
+                .and_then(theme::model_short_label)
+                .unwrap_or_else(|| match session.agent_type() {
+                    AgentType::Claude => "Claude".to_string(),
+                    AgentType::Codex => "Codex".to_string(),
+                    AgentType::Gemini => "Gemini".to_string(),
+                    AgentType::Unknown => "-".to_string(),
+                });
+            let model_rect = NSRect::new(
+                NSPoint::new(
+                    view_width - stats_w - ctx_col_w - model_col_w - CL_LEFT_PAD,
+                    y + 2.0,
+                ),
+                NSSize::new(model_col_w - 6.0, CL_ROW_HEIGHT - 4.0),
+            );
+            let model_label = create_mono_label(
+                mtm,
+                &model_label_text,
+                model_rect,
+                &text_color,
+                CL_FONT_SIZE_SMALL,
+            );
+            let _: () = unsafe { msg_send![&*model_label, setAlignment: 1_isize] };
+            view.addSubview(&model_label);
+        }
 
         if any_has_context {
             let col_x = view_width - ctx_col_w - CL_LEFT_PAD;

@@ -58,6 +58,118 @@ impl AgentType {
     }
 }
 
+/// Claude model families, paired with their display name.
+const CLAUDE_FAMILIES: [(&str, &str); 4] = [
+    ("opus", "Opus"),
+    ("sonnet", "Sonnet"),
+    ("haiku", "Haiku"),
+    ("fable", "Fable"),
+];
+
+/// Read the version that follows a family name in a modern Claude model id.
+///
+/// `-4-7-20250101` -> `"4.7"`, `-5` -> `"5"`, `-4-20250514` -> `"4"` (a trailing
+/// date stamp is not a minor version). Returns `None` when no version follows,
+/// as in the bare `opus` alias or the legacy `claude-3-5-sonnet-…` ordering.
+fn claude_version(rest: &str) -> Option<String> {
+    let mut parts = rest
+        .trim_start_matches('-')
+        .split('-')
+        .take_while(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    let major = parts.next()?;
+    if major.len() >= 5 {
+        return None; // a date stamp, not a version
+    }
+    match parts.next() {
+        Some(minor) if minor.len() <= 2 => Some(format!("{major}.{minor}")),
+        _ => Some(major.to_string()),
+    }
+}
+
+/// Read the version segment that follows a `gpt-` prefix.
+///
+/// `gpt-5.6-sol` -> `"5.6"`, `gpt-5-codex` -> `"5"`, `gpt-4o-mini` -> `"4o"`.
+/// Returns `None` when that segment is not a version, as in `gpt-oss-120b`.
+fn gpt_version(m: &str) -> Option<&str> {
+    let seg = m.strip_prefix("gpt-")?.split('-').next()?;
+    seg.starts_with(|c: char| c.is_ascii_digit()).then_some(seg)
+}
+
+/// Return a short, human-readable label for a model id (e.g. "Opus 4.7").
+/// Returns `None` if the id is unrecognized; callers fall back to the
+/// `AgentType` family label. Matching is case-insensitive: the version is
+/// parsed from the id where the layout allows, otherwise ordered substring
+/// rules apply — more specific patterns come first.
+pub fn model_short_label(model: &str) -> Option<String> {
+    let lowered = model.to_ascii_lowercase();
+    // Drop a trailing context-window marker such as "[1m]".
+    let m = lowered.split('[').next().unwrap_or(&lowered);
+    if m.is_empty() {
+        return None;
+    }
+
+    // Modern ids look like "claude-<family>-<major>[-<minor>][-<date>]". Parse
+    // the version rather than enumerating releases, so a model newer than this
+    // code still shows its version instead of degrading to the bare family.
+    for (family, display) in CLAUDE_FAMILIES {
+        if let Some(pos) = m.find(family)
+            && let Some(v) = claude_version(&m[pos + family.len()..])
+        {
+            return Some(format!("{display} {v}"));
+        }
+    }
+
+    // Same idea for OpenAI ids: "gpt-<version>[-<variant>]".
+    if let Some(v) = gpt_version(m) {
+        return Some(format!("GPT-{v}"));
+    }
+
+    let label = if m.contains("opus-4-8") {
+        "Opus 4.8"
+    } else if m.contains("opus-4-7") {
+        "Opus 4.7"
+    } else if m.contains("opus-4") {
+        "Opus 4"
+    } else if m.contains("sonnet-5") {
+        "Sonnet 5"
+    } else if m.contains("sonnet-4-5") {
+        "Sonnet 4.5"
+    } else if m.contains("sonnet-4") {
+        "Sonnet 4"
+    } else if m.contains("sonnet-3-5") || m.contains("3-5-sonnet") {
+        "Sonnet 3.5"
+    } else if m.contains("haiku-4-5") {
+        "Haiku 4.5"
+    } else if m.contains("haiku") {
+        "Haiku"
+    } else if m.contains("fable-5") {
+        "Fable 5"
+    } else if m.contains("fable") {
+        "Fable"
+    } else if m.contains("sonnet") {
+        "Sonnet"
+    } else if m.contains("opus") {
+        "Opus"
+    } else if m.starts_with("gpt-") {
+        "GPT"
+    } else if m.contains("codex-mini") {
+        "Codex mini"
+    } else if m.starts_with("codex-") {
+        "Codex"
+    } else if m.contains("gemini-2.5") {
+        "Gemini 2.5"
+    } else if m.contains("gemini-2.0") {
+        "Gemini 2.0"
+    } else if m.contains("gemini-1.5") {
+        "Gemini 1.5"
+    } else if m.contains("gemini") {
+        "Gemini"
+    } else {
+        return None;
+    };
+    Some(label.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // StatusColor
 // ---------------------------------------------------------------------------
@@ -336,6 +448,187 @@ mod tests {
             AgentType::from_model(Some("some-future-model")),
             AgentType::Unknown
         );
+    }
+
+    // --- model_short_label ---
+
+    #[test]
+    fn test_model_short_label_opus_variants() {
+        assert_eq!(
+            model_short_label("claude-opus-4-8"),
+            Some("Opus 4.8".to_string())
+        );
+        assert_eq!(
+            model_short_label("claude-opus-4-7-20241022"),
+            Some("Opus 4.7".to_string())
+        );
+        assert_eq!(
+            model_short_label("claude-opus-4-20240101"),
+            Some("Opus 4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_sonnet_variants() {
+        assert_eq!(
+            model_short_label("claude-sonnet-4-5-20250101"),
+            Some("Sonnet 4.5".to_string())
+        );
+        assert_eq!(
+            model_short_label("claude-sonnet-4-20250101"),
+            Some("Sonnet 4".to_string())
+        );
+        assert_eq!(
+            model_short_label("claude-3-5-sonnet-20241022"),
+            Some("Sonnet 3.5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_haiku() {
+        assert_eq!(
+            model_short_label("claude-haiku-4-5-20251001"),
+            Some("Haiku 4.5".to_string())
+        );
+        assert_eq!(
+            model_short_label("claude-haiku-3"),
+            Some("Haiku 3".to_string())
+        );
+        // Legacy ordering puts the version before the family; no version is
+        // parsed there, so it falls through to the enumerated rules.
+        assert_eq!(
+            model_short_label("claude-3-haiku-20240307"),
+            Some("Haiku".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_fable() {
+        assert_eq!(
+            model_short_label("claude-fable-5"),
+            Some("Fable 5".to_string())
+        );
+        assert_eq!(model_short_label("claude-fable"), Some("Fable".to_string()));
+    }
+
+    #[test]
+    fn test_model_short_label_sonnet_5() {
+        assert_eq!(
+            model_short_label("claude-sonnet-5"),
+            Some("Sonnet 5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_opus_5() {
+        assert_eq!(
+            model_short_label("claude-opus-5"),
+            Some("Opus 5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_strips_context_suffix() {
+        assert_eq!(
+            model_short_label("claude-opus-5[1m]"),
+            Some("Opus 5".to_string())
+        );
+        assert_eq!(
+            model_short_label("claude-opus-4-8[1m]"),
+            Some("Opus 4.8".to_string())
+        );
+    }
+
+    /// Versions are parsed, not enumerated, so releases that postdate this
+    /// code still render with a version instead of degrading to the family.
+    #[test]
+    fn test_model_short_label_unenumerated_versions() {
+        assert_eq!(
+            model_short_label("claude-opus-4-6"),
+            Some("Opus 4.6".to_string())
+        );
+        assert_eq!(
+            model_short_label("claude-sonnet-4-6"),
+            Some("Sonnet 4.6".to_string())
+        );
+        assert_eq!(
+            model_short_label("claude-opus-4-5-20251101"),
+            Some("Opus 4.5".to_string())
+        );
+        assert_eq!(
+            model_short_label("claude-opus-9-3"),
+            Some("Opus 9.3".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_gpt() {
+        assert_eq!(model_short_label("gpt-5-turbo"), Some("GPT-5".to_string()));
+        assert_eq!(model_short_label("gpt-4o"), Some("GPT-4o".to_string()));
+        assert_eq!(model_short_label("gpt-4"), Some("GPT-4".to_string()));
+    }
+
+    #[test]
+    fn test_model_short_label_gpt_minor_versions() {
+        assert_eq!(
+            model_short_label("gpt-5.6-sol"),
+            Some("GPT-5.6".to_string())
+        );
+        assert_eq!(model_short_label("gpt-5-codex"), Some("GPT-5".to_string()));
+        assert_eq!(model_short_label("gpt-4o-mini"), Some("GPT-4o".to_string()));
+        assert_eq!(
+            model_short_label("gpt-3.5-turbo"),
+            Some("GPT-3.5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_gpt_without_version() {
+        // The segment after "gpt-" is not a version; fall back to the family.
+        assert_eq!(model_short_label("gpt-oss-120b"), Some("GPT".to_string()));
+    }
+
+    #[test]
+    fn test_model_short_label_codex() {
+        assert_eq!(
+            model_short_label("codex-mini-latest"),
+            Some("Codex mini".to_string())
+        );
+        assert_eq!(
+            model_short_label("codex-experimental"),
+            Some("Codex".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_gemini() {
+        assert_eq!(
+            model_short_label("gemini-2.5-pro"),
+            Some("Gemini 2.5".to_string())
+        );
+        assert_eq!(
+            model_short_label("gemini-2.0-flash"),
+            Some("Gemini 2.0".to_string())
+        );
+        assert_eq!(
+            model_short_label("gemini-1.5-pro"),
+            Some("Gemini 1.5".to_string())
+        );
+        assert_eq!(model_short_label("gemini-nano"), Some("Gemini".to_string()));
+    }
+
+    #[test]
+    fn test_model_short_label_case_insensitive() {
+        assert_eq!(
+            model_short_label("Claude-Opus-4-7-20241022"),
+            Some("Opus 4.7".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_unknown() {
+        assert_eq!(model_short_label("some-future-model-x"), None);
+        assert_eq!(model_short_label(""), None);
     }
 
     #[test]
