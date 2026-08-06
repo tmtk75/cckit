@@ -466,6 +466,25 @@ fn status_label(status: &SessionStatus) -> &'static str {
     }
 }
 
+/// Row to select when moving up. Movement is purely positional: rows without
+/// a TTY are selectable too, so they can be deleted with "d". `focus_selected`
+/// is the one that declines to focus them.
+fn prev_index(current: Option<usize>, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    Some(current.unwrap_or(1).saturating_sub(1))
+}
+
+/// Row to select when moving down; wraps around at the bottom.
+fn next_index(current: Option<usize>, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let from = current.map_or(0, |i| i + 1);
+    Some(if from < count { from } else { 0 })
+}
+
 fn focus_selected() {
     let sessions = SESSION_LIST.lock().unwrap();
     let index = match *SELECTED_INDEX.lock().unwrap() {
@@ -596,28 +615,16 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
     let session_count = SESSION_LIST.lock().unwrap().len();
     let current = *SELECTED_INDEX.lock().unwrap();
 
-    // Find next/prev focusable index (skip tty=unknown sessions)
-    let find_focusable = |mut range: Box<dyn Iterator<Item = usize>>| -> Option<usize> {
-        let sessions = SESSION_LIST.lock().unwrap();
-        range.find(|&i| sessions.get(i).is_some_and(|s| s.tty != "unknown"))
-    };
-
     match key_code {
         // Up arrow
         126 => {
-            let from = current.unwrap_or(1);
-            let target = find_focusable(Box::new((0..from).rev()))
-                .or_else(|| find_focusable(Box::new(0..session_count)));
-            if let Some(idx) = target {
+            if let Some(idx) = prev_index(current, session_count) {
                 *SELECTED_INDEX.lock().unwrap() = Some(idx);
             }
         }
         // Down arrow
         125 => {
-            let from = current.map(|i| i + 1).unwrap_or(0);
-            let target = find_focusable(Box::new(from..session_count))
-                .or_else(|| find_focusable(Box::new(0..session_count)));
-            if let Some(idx) = target {
+            if let Some(idx) = next_index(current, session_count) {
                 *SELECTED_INDEX.lock().unwrap() = Some(idx);
             }
         }
@@ -637,18 +644,12 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
         }
         _ => match char_str.as_str() {
             "k" => {
-                let from = current.unwrap_or(1);
-                let target = find_focusable(Box::new((0..from).rev()))
-                    .or_else(|| find_focusable(Box::new(0..session_count)));
-                if let Some(idx) = target {
+                if let Some(idx) = prev_index(current, session_count) {
                     *SELECTED_INDEX.lock().unwrap() = Some(idx);
                 }
             }
             "j" => {
-                let from = current.map(|i| i + 1).unwrap_or(0);
-                let target = find_focusable(Box::new(from..session_count))
-                    .or_else(|| find_focusable(Box::new(0..session_count)));
-                if let Some(idx) = target {
+                if let Some(idx) = next_index(current, session_count) {
                     *SELECTED_INDEX.lock().unwrap() = Some(idx);
                 }
             }
@@ -2692,5 +2693,49 @@ mod tests {
     fn target_content_height_respects_min_height() {
         let target = calculate_target_content_height(40.0, 28.0, 240.0);
         assert_eq!(target, MIN_WINDOW_HEIGHT);
+    }
+
+    #[test]
+    fn prev_index_steps_up_and_stops_at_top() {
+        assert_eq!(prev_index(Some(3), 6), Some(2));
+        assert_eq!(prev_index(Some(1), 6), Some(0));
+        assert_eq!(prev_index(Some(0), 6), Some(0));
+    }
+
+    #[test]
+    fn prev_index_from_no_selection_lands_on_first_row() {
+        assert_eq!(prev_index(None, 6), Some(0));
+    }
+
+    #[test]
+    fn next_index_steps_down_and_wraps_to_top() {
+        assert_eq!(next_index(Some(2), 6), Some(3));
+        assert_eq!(next_index(Some(5), 6), Some(0));
+    }
+
+    #[test]
+    fn next_index_from_no_selection_lands_on_first_row() {
+        assert_eq!(next_index(None, 6), Some(0));
+    }
+
+    #[test]
+    fn navigation_yields_nothing_without_rows() {
+        assert_eq!(prev_index(None, 0), None);
+        assert_eq!(prev_index(Some(0), 0), None);
+        assert_eq!(next_index(None, 0), None);
+        assert_eq!(next_index(Some(0), 0), None);
+    }
+
+    /// Rows without a TTY (Claude Code / Codex desktop sessions) used to be
+    /// skipped by navigation, which left them unreachable and therefore
+    /// impossible to delete with "d". Indices are now purely positional.
+    #[test]
+    fn navigation_is_purely_positional() {
+        for count in 1..8usize {
+            for i in 0..count {
+                assert_eq!(next_index(Some(i), count), Some((i + 1) % count));
+                assert_eq!(prev_index(Some(i), count), Some(i.saturating_sub(1)));
+            }
+        }
     }
 }
