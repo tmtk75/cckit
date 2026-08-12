@@ -497,6 +497,9 @@ struct ClaudeConfig {
 struct ClamonConfig {
     #[serde(default)]
     disable_paths: Vec<String>,
+    /// Skill names (or globs) to hide from `skill stale`.
+    #[serde(default)]
+    skill_stale_exclude: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1453,7 +1456,9 @@ fn skill_stale_command(days: i64, all: bool, show_desc: bool, json: bool) {
         None
     };
 
+    let cckit_config = load_cckit_config();
     let mut rows: Vec<StaleRow> = Vec::new();
+    let mut excluded = 0usize;
     let mut seen_dirs: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
 
@@ -1474,6 +1479,10 @@ fn skill_stale_command(days: i64, all: bool, show_desc: bool, json: bool) {
             .map(|c| parse_frontmatter(&c))
             .unwrap_or((None, None));
         let keys = skill_match_keys(&dir_name, fm_name.as_deref());
+        if is_skill_excluded(&dir, &keys, &cckit_config.skill_stale_exclude) {
+            excluded += 1;
+            return;
+        }
         let display_name = fm_name.unwrap_or_else(|| dir_name.clone());
         let origin = classify_skill_origin_label(&dir);
         let firing = lookup_firing(&keys);
@@ -1502,7 +1511,6 @@ fn skill_stale_command(days: i64, all: bool, show_desc: bool, json: bool) {
     if let Ok(config) = load_claude_config()
         && let Some(projects) = config.projects
     {
-        let cckit_config = load_cckit_config();
         for project_path in projects.keys() {
             if is_path_disabled(project_path, &cckit_config.disable_paths) {
                 continue;
@@ -1620,6 +1628,12 @@ fn skill_stale_command(days: i64, all: bool, show_desc: bool, json: bool) {
             never.to_string().red(),
             stale.to_string().yellow(),
             active,
+        );
+    }
+    if excluded > 0 {
+        println!(
+            "{}",
+            format!("{} excluded by skill_stale_exclude config.", excluded).dimmed()
         );
     }
     println!(
@@ -5206,6 +5220,34 @@ fn is_path_disabled(path: &str, disable_paths: &[String]) -> bool {
     false
 }
 
+/// Whether a skill is excluded by the `skill_stale_exclude` config patterns.
+///
+/// Every pattern is a glob, matched against the skill's name keys (`keys`: the directory
+/// name plus the frontmatter `name`) and against the skill directory path. A glob with no
+/// wildcards matches exactly, so a bare skill name works as-is and never swallows a
+/// neighbour (`git` does not match `github-helper`). A leading `~/` expands; a pattern
+/// that is not absolute may match anywhere in the path, so `github.com/kiicorp/**`
+/// excludes every skill under that org.
+fn is_skill_excluded(dir: &Path, keys: &[String], patterns: &[String]) -> bool {
+    let path = dir.to_string_lossy();
+    patterns.iter().any(|pattern| {
+        let expanded = expand_tilde(pattern);
+        if let Ok(p) = glob::Pattern::new(&expanded)
+            && keys.iter().any(|k| p.matches(k))
+        {
+            return true;
+        }
+        let anchored = if expanded.starts_with('/') {
+            expanded
+        } else {
+            format!("**/{}", expanded)
+        };
+        glob::Pattern::new(&anchored)
+            .map(|p| p.matches(&path))
+            .unwrap_or(false)
+    })
+}
+
 fn truncate_str(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() > max_chars {
@@ -7839,6 +7881,96 @@ name: agent-name
         // 10 days ago -> active
         let recent = Utc.with_ymd_and_hms(2026, 4, 21, 0, 0, 0).unwrap();
         assert_eq!(firing_status(Some(recent), now, 90), "active");
+    }
+
+    #[test]
+    fn test_is_skill_excluded() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let dir = Path::new("/home/me/.claude/skills/foo");
+
+        // no patterns -> nothing excluded
+        assert!(!is_skill_excluded(dir, &v(&["foo"]), &[]));
+
+        // exact match on the directory name
+        assert!(is_skill_excluded(dir, &v(&["foo"]), &v(&["foo"])));
+        assert!(!is_skill_excluded(dir, &v(&["foo"]), &v(&["bar"])));
+
+        // exact match, not prefix: "git" must not swallow "github-helper"
+        assert!(!is_skill_excluded(
+            dir,
+            &v(&["github-helper"]),
+            &v(&["git"])
+        ));
+
+        // glob match
+        assert!(is_skill_excluded(
+            dir,
+            &v(&["slack-digest"]),
+            &v(&["slack-*"])
+        ));
+        assert!(!is_skill_excluded(
+            dir,
+            &v(&["notion-search"]),
+            &v(&["slack-*"])
+        ));
+
+        // frontmatter name matches even when the directory name does not
+        assert!(is_skill_excluded(
+            dir,
+            &v(&["dir-name", "frontmatter-name"]),
+            &v(&["frontmatter-name"])
+        ));
+
+        // any pattern in the list may match
+        assert!(is_skill_excluded(dir, &v(&["foo"]), &v(&["bar", "foo"])));
+    }
+
+    #[test]
+    fn test_is_skill_excluded_by_path() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let keys = v(&["triggering-vrp-route-creation"]);
+        let work = Path::new(
+            "/home/me/.ghq/github.com/kiicorp/vrp-sfn/.claude/skills/triggering-vrp-route-creation",
+        );
+        let own = Path::new(
+            "/home/me/.ghq/github.com/tmtk75/cckit/.claude/skills/triggering-vrp-route-creation",
+        );
+
+        // a pattern containing "/" matches the skill directory path, anchored anywhere
+        assert!(is_skill_excluded(
+            work,
+            &keys,
+            &v(&["github.com/kiicorp/**"])
+        ));
+        assert!(!is_skill_excluded(
+            own,
+            &keys,
+            &v(&["github.com/kiicorp/**"])
+        ));
+
+        // a leading "~/" expands to the home directory
+        let home = dirs::home_dir().unwrap();
+        let under_home = home.join(".ghq/github.com/kiicorp/isms/.claude/skills/audit");
+        assert!(is_skill_excluded(
+            &under_home,
+            &v(&["audit"]),
+            &v(&["~/.ghq/github.com/kiicorp/**"])
+        ));
+
+        // an absolute pattern is anchored at the root
+        assert!(is_skill_excluded(
+            work,
+            &keys,
+            &v(&["/home/me/.ghq/github.com/kiicorp/**"])
+        ));
+        assert!(!is_skill_excluded(
+            work,
+            &keys,
+            &v(&["/elsewhere/github.com/kiicorp/**"])
+        ));
+
+        // a name pattern must not accidentally match part of the path
+        assert!(!is_skill_excluded(work, &keys, &v(&["vrp-sfn"])));
     }
 
     #[test]

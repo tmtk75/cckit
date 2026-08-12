@@ -488,12 +488,27 @@ Checks:
 
 ## Configuration
 
-Create `cckit.toml` in the current directory to disable specific paths from `ls` output:
+cckit reads `config.toml` from the current directory, `~/.config/cckit/config.toml`, or the
+platform config directory (first one found wins; they are not merged).
 
 ```toml
+# Paths to skip when scanning projects (ls, skill, mcp, ...).
+# A pattern with `*` or `?` is a glob, otherwise it matches as a prefix. A leading `~/` expands.
 disable_paths = [
     "/path/to/ignore",
     "/path/with/glob/*",
+]
+
+# Skills to hide from `cckit skill stale`, for skills you knowingly keep around
+# but rarely fire. Every entry is a glob, matched against the skill name (the
+# directory name and the frontmatter `name`) and against the skill directory
+# path. A glob with no wildcards matches exactly, so a bare name works as-is.
+# A leading `~/` expands; a pattern that is not absolute matches anywhere in the
+# path, so `github.com/acme/**` hides every skill under that org.
+skill_stale_exclude = [
+    "isms-monthly-audit",
+    "slack-*",
+    "github.com/acme/**",
 ]
 ```
 

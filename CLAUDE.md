@@ -84,5 +84,5 @@ mise run build-app              # runs scripts/macos/build_app.sh
 - **Version**: embedded via `build.rs` running `git describe --always --dirty`
 - **Data directory**: `~/Library/Application Support/cckit/` (macOS) or `~/.local/share/cckit/` (Linux)
 - **Config**: reads `~/.claude.json` for project list, `~/.claude/settings.json` for Claude Code hooks, `~/.codex/hooks.json` for Codex hooks
-- Config for `disable_paths`: `./config.toml`, `~/.config/cckit/config.toml`, or the platform config dir (read by `load_cckit_config`); patterns support a leading `~/`
+- Config: `./config.toml`, `~/.config/cckit/config.toml`, or the platform config dir (read by `load_cckit_config`; first found wins, no merging). Keys: `disable_paths` (project paths to skip; glob or prefix, leading `~/` expands) and `skill_stale_exclude` (skills hidden from `skill stale`; every entry is a glob matched against both the skill name and the skill directory path, so `github.com/org/**` excludes a whole org, and a wildcard-free glob is an exact name match)
 - Uses `serde_json` with `preserve_order` feature for JSON field ordering

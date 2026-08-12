@@ -2,3 +2,15 @@
 disable_paths = [
     "/path/to/excluded/project",
 ]
+
+# Skills to hide from `cckit skill stale`: ones you knowingly keep around but
+# rarely fire, so they stop showing up as noise. Every entry is a glob, matched
+# against the skill name (the directory name and the frontmatter `name`) and
+# against the skill directory path. A glob with no wildcards matches exactly, so
+# a bare skill name works as-is. A leading `~/` expands; a pattern that is not
+# absolute matches anywhere in the path.
+skill_stale_exclude = [
+    "isms-monthly-audit",
+    "slack-*",
+    "github.com/acme/**",
+]

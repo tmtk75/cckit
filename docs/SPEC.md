@@ -49,12 +49,23 @@ cckit ls [OPTIONS]
 
 ### Configuration
 
-Optional `cckit.toml` in the current directory:
+Optional `config.toml`, read from the current directory, `~/.config/cckit/config.toml`, or the
+platform config directory (first found wins):
 
 ```toml
 disable_paths = [
   "/path/to/ignore",
   "/path/with/glob/*"
+]
+
+# Skills hidden from `skill stale`. Every entry is a glob, matched against the skill name
+# (directory name and frontmatter `name`) and against the skill directory path. A glob with
+# no wildcards matches exactly. A leading `~/` expands; a non-absolute pattern matches
+# anywhere in the path.
+skill_stale_exclude = [
+  "isms-monthly-audit",
+  "slack-*",
+  "github.com/acme/**"
 ]
 ```
 
