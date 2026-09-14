@@ -147,7 +147,21 @@ cckit session search --json deploy
 
 # Limit results
 cckit session search --limit 5 refactor
+
+# Report no matches instead of falling back to fuzzy
+cckit session search --exact terraform plan
 ```
+
+When the keyword search finds nothing, the same query is retried fuzzily so a typo still
+reaches the session, and the output says so:
+
+```
+No exact match for "skll stale". Showing fuzzy matches.
+```
+
+The fallback only runs when the exact search came up empty, so a query that matches keeps
+behaving exactly as before. `--exact` turns the fallback off. With `--json` the notice goes
+to stderr, leaving stdout a bare JSON array.
 
 ## ls Command
 

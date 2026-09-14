@@ -253,6 +253,10 @@ enum SessionCommands {
         /// Emit results as JSON (cannot be combined with --interactive)
         #[arg(long)]
         json: bool,
+
+        /// Report no matches instead of retrying fuzzily when the exact search finds nothing
+        #[arg(long)]
+        exact: bool,
     },
 
     /// Handle hook events from Claude Code (internal use)
@@ -7412,12 +7416,14 @@ pub fn run() {
                     interactive,
                     limit,
                     json,
+                    exact,
                 }) => {
                     let opts = crate::history::SearchOpts {
                         terms,
                         interactive,
                         limit,
                         json,
+                        exact,
                     };
                     match crate::history::run_search(opts) {
                         Ok(code) => std::process::exit(code),

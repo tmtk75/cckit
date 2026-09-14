@@ -1,6 +1,6 @@
 // Text and JSON output formatters for search hits.
 
-use crate::history::Hit;
+use crate::history::{Hit, MatchMode};
 use std::time::Duration;
 
 const MAX_TEXT_LEN: usize = 120;
@@ -36,9 +36,28 @@ pub fn format_hit(hit: &Hit) -> String {
     )
 }
 
+/// The line shown when the exact search came up empty and the fuzzy retry found results.
+pub fn fuzzy_fallback_notice(terms: &[String]) -> String {
+    format!(
+        "No exact match for \"{}\". Showing fuzzy matches.",
+        terms.join(" ")
+    )
+}
+
 /// Full one-shot output for a result set, including the trailing statistics line.
-pub fn format_oneshot(hits: &[Hit], scanned_files: usize, elapsed: Duration) -> String {
+/// When `mode` is `Fuzzy` the output opens with the fallback notice.
+pub fn format_oneshot(
+    hits: &[Hit],
+    scanned_files: usize,
+    elapsed: Duration,
+    mode: MatchMode,
+    terms: &[String],
+) -> String {
     let mut out = String::new();
+    if mode == MatchMode::Fuzzy {
+        out.push_str(&fuzzy_fallback_notice(terms));
+        out.push_str("\n\n");
+    }
     for hit in hits {
         out.push_str(&format_hit(hit));
         out.push_str("\n\n");
@@ -158,9 +177,43 @@ mod tests {
 
     #[test]
     fn format_oneshot_includes_stats_line_and_empty_hint() {
-        let out = format_oneshot(&[], 42, Duration::from_millis(1500));
+        let out = format_oneshot(&[], 42, Duration::from_millis(1500), MatchMode::Exact, &[]);
         assert!(out.contains("No sessions matched."));
         assert!(out.contains("Found 0 sessions (scanned 42 jsonl files in 1.5s)"));
+    }
+
+    #[test]
+    fn format_oneshot_says_when_results_came_from_the_fuzzy_fallback() {
+        let terms = vec!["skil".to_string(), "stale".to_string()];
+        let out = format_oneshot(
+            &[hit_with(&[("q", Role::User)])],
+            42,
+            Duration::from_millis(100),
+            MatchMode::Fuzzy,
+            &terms,
+        );
+        assert!(out.starts_with("No exact match for \"skil stale\". Showing fuzzy matches.\n\n"));
+    }
+
+    #[test]
+    fn format_oneshot_stays_silent_about_the_matcher_when_exact_hit() {
+        let out = format_oneshot(
+            &[hit_with(&[("q", Role::User)])],
+            42,
+            Duration::from_millis(100),
+            MatchMode::Exact,
+            &["q".to_string()],
+        );
+        assert!(!out.contains("fuzzy"));
+    }
+
+    #[test]
+    fn fuzzy_fallback_notice_names_the_query() {
+        let terms = vec!["skil".to_string(), "stale".to_string()];
+        assert_eq!(
+            fuzzy_fallback_notice(&terms),
+            "No exact match for \"skil stale\". Showing fuzzy matches."
+        );
     }
 
     #[test]

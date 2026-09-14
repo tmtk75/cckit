@@ -7,11 +7,69 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 /// Return all sessions whose any user-turn text contains every query term (AND),
 /// compared case-insensitively. Results are sorted by `ended_at` descending and
 /// truncated to `limit` entries.
-pub fn search_sessions(sessions: Vec<SessionRecord>, terms: &[String], limit: usize) -> Vec<Hit> {
+///
+/// Sessions are borrowed rather than consumed so a caller can retry the same corpus with
+/// `fuzzy_search_sessions` when this finds nothing. Only the matched sessions are cloned.
+pub fn search_sessions(sessions: &[SessionRecord], terms: &[String], limit: usize) -> Vec<Hit> {
     let lower_terms: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+    collect_hits(sessions, limit, |session| {
+        if lower_terms.is_empty() {
+            return Vec::new();
+        }
+        user_turn_indices(session, |text| {
+            let lower = text.to_lowercase();
+            lower_terms.iter().all(|t| lower.contains(t))
+        })
+    })
+}
+
+/// Return all sessions with a user turn that fuzzy-matches `query`, absorbing typos and
+/// reordered characters. Like the exact search, results are sorted by `ended_at`
+/// descending rather than by score, so the list stays chronologically readable.
+///
+/// Matching is per user turn (not against the concatenated session text) so the matched
+/// turn indices are real, and the hit count means the same thing as in the exact search.
+pub fn fuzzy_search_sessions(sessions: &[SessionRecord], query: &str, limit: usize) -> Vec<Hit> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let matcher = SkimMatcherV2::default().ignore_case();
+    collect_hits(sessions, limit, |session| {
+        user_turn_indices(session, |text| matcher.fuzzy_match(text, query).is_some())
+    })
+}
+
+/// Indices of the user turns in `session` whose text satisfies `is_match`.
+fn user_turn_indices(session: &SessionRecord, is_match: impl Fn(&str) -> bool) -> Vec<usize> {
+    session
+        .turns
+        .iter()
+        .enumerate()
+        .filter(|(_, turn)| turn.role == Role::User)
+        .filter(|(_, turn)| is_match(&turn.text))
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Build hits from whichever sessions `matching_turns` reports turns for, newest first,
+/// truncated to `limit`. Cloning happens only for sessions that actually matched.
+fn collect_hits(
+    sessions: &[SessionRecord],
+    limit: usize,
+    matching_turns: impl Fn(&SessionRecord) -> Vec<usize>,
+) -> Vec<Hit> {
     let mut hits: Vec<Hit> = sessions
-        .into_iter()
-        .filter_map(|session| match_session(session, &lower_terms))
+        .iter()
+        .filter_map(|session| {
+            let matched = matching_turns(session);
+            if matched.is_empty() {
+                return None;
+            }
+            Some(Hit {
+                session: session.clone(),
+                matched_turn_indices: matched,
+            })
+        })
         .collect();
     hits.sort_by_key(|h| std::cmp::Reverse(h.session.ended_at));
     hits.truncate(limit);
@@ -68,30 +126,6 @@ pub fn fuzzy_filter(
     matched
 }
 
-fn match_session(session: SessionRecord, lower_terms: &[String]) -> Option<Hit> {
-    if lower_terms.is_empty() {
-        return None;
-    }
-    let mut matched: Vec<usize> = Vec::new();
-    for (idx, turn) in session.turns.iter().enumerate() {
-        if turn.role != Role::User {
-            continue;
-        }
-        let lower_text = turn.text.to_lowercase();
-        if lower_terms.iter().all(|t| lower_text.contains(t)) {
-            matched.push(idx);
-        }
-    }
-    if matched.is_empty() {
-        None
-    } else {
-        Some(Hit {
-            session,
-            matched_turn_indices: matched,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,10 +156,51 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_search_tolerates_a_typo_that_exact_search_misses() {
+        let a = sample("a", (2026, 3, 12), &["add skill stale exclude"]);
+
+        // "skll" is not a substring of "skill", so the exact matcher finds nothing.
+        assert!(search_sessions(std::slice::from_ref(&a), &["skll".into()], 10).is_empty());
+
+        // The fuzzy matcher still reaches it: s-k-l-l appears in order in "skill".
+        let hits = fuzzy_search_sessions(std::slice::from_ref(&a), "skll stale", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session.session_id, "a");
+        assert_eq!(hits[0].matched_turn_indices, vec![0]);
+    }
+
+    #[test]
+    fn fuzzy_search_records_every_matching_turn() {
+        let a = sample(
+            "a",
+            (2026, 3, 12),
+            &["progress bar", "unrelated", "progress line"],
+        );
+        let hits = fuzzy_search_sessions(std::slice::from_ref(&a), "progres", 10);
+        assert_eq!(hits[0].matched_turn_indices, vec![0, 2]);
+    }
+
+    #[test]
+    fn fuzzy_search_returns_nothing_for_an_unrelated_query() {
+        let a = sample("a", (2026, 3, 12), &["osrm jni compile"]);
+        assert!(fuzzy_search_sessions(std::slice::from_ref(&a), "zzzqqq", 10).is_empty());
+    }
+
+    #[test]
+    fn fuzzy_search_sorts_by_ended_at_descending_and_applies_limit() {
+        let old = sample("old", (2024, 1, 1), &["progress"]);
+        let new = sample("new", (2026, 6, 1), &["progress"]);
+        let mid = sample("mid", (2025, 1, 1), &["progress"]);
+        let hits = fuzzy_search_sessions(&[old, new, mid], "progress", 2);
+        let ids: Vec<&str> = hits.iter().map(|h| h.session.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["new", "mid"]);
+    }
+
+    #[test]
     fn and_match_requires_all_terms_in_same_turn() {
         let a = sample("a", (2026, 3, 12), &["osrm jni test"]);
         let b = sample("b", (2026, 3, 11), &["osrm only", "jni only"]);
-        let hits = search_sessions(vec![a, b], &["osrm".into(), "jni".into()], 10);
+        let hits = search_sessions(&[a, b], &["osrm".into(), "jni".into()], 10);
         let ids: Vec<&str> = hits.iter().map(|h| h.session.session_id.as_str()).collect();
         assert_eq!(ids, vec!["a"]);
     }
@@ -133,7 +208,7 @@ mod tests {
     #[test]
     fn case_insensitive_and_substring() {
         let a = sample("a", (2026, 3, 12), &["OSRM JNI compile"]);
-        let hits = search_sessions(vec![a], &["osrm".into(), "jni".into()], 10);
+        let hits = search_sessions(&[a], &["osrm".into(), "jni".into()], 10);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].matched_turn_indices, vec![0]);
     }
@@ -143,7 +218,7 @@ mod tests {
         let a = sample("old", (2024, 1, 1), &["foo"]);
         let b = sample("new", (2026, 6, 1), &["foo"]);
         let c = sample("mid", (2025, 1, 1), &["foo"]);
-        let hits = search_sessions(vec![a, b, c], &["foo".into()], 2);
+        let hits = search_sessions(&[a, b, c], &["foo".into()], 2);
         let ids: Vec<&str> = hits.iter().map(|h| h.session.session_id.as_str()).collect();
         assert_eq!(ids, vec!["new", "mid"]);
     }
@@ -151,7 +226,7 @@ mod tests {
     #[test]
     fn no_match_returns_empty() {
         let a = sample("a", (2026, 3, 12), &["hello world"]);
-        let hits = search_sessions(vec![a], &["zzz".into()], 10);
+        let hits = search_sessions(&[a], &["zzz".into()], 10);
         assert!(hits.is_empty());
     }
 
@@ -257,7 +332,7 @@ mod tests {
                 text: "osrm jni".into(),
             }],
         };
-        let hits = search_sessions(vec![rec], &["osrm".into(), "jni".into()], 10);
+        let hits = search_sessions(&[rec], &["osrm".into(), "jni".into()], 10);
         assert!(hits.is_empty());
     }
 }

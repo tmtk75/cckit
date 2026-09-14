@@ -44,12 +44,17 @@ mise run build-app              # runs scripts/macos/build_app.sh
 
 | File | Role |
 |------|------|
-| `mod.rs` | `SearchOpts`, `SessionRecord`, `Turn`, `Hit` data models |
-| `loader.rs` | Scan and parse session JSONL transcript files |
+| `mod.rs` | `SearchOpts`, `SessionRecord`, `Turn`, `Hit`, `MatchMode` data models; `run_search` and the progress-reporting scan entry points |
+| `loader.rs` | Scan and parse session JSONL transcript files (`collect_session_paths` + `parse_paths`, parsed in parallel via rayon) |
 | `search.rs` | AND-term and fuzzy search over session text |
 | `format.rs` | Plain text and JSON output formatting |
+| `progress.rs` | Determinate scan progress on stderr, drawn only on a TTY and only after a 250ms delay |
 | `tui.rs` | Interactive ratatui browser for search results |
 | `skill_usage.rs` | Aggregate Skill tool invocations from transcripts (last-fired/count) for `skill stale` |
+
+`session search` runs the AND-term matcher first and, when it finds nothing, retries the same
+corpus with the fuzzy matcher so typos still land (`--exact` disables the retry). The notice is
+inline in text output and on stderr under `--json`, which keeps stdout a bare JSON array.
 
 **Marketplace module** (`src/marketplace.rs`): Plugin marketplace inspection and validation (`marketplace summary`, `marketplace doctor`).
 
