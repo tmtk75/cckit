@@ -1430,9 +1430,9 @@ fn firing_status(
 }
 
 fn skill_stale_command(days: i64, all: bool, show_desc: bool, json: bool) {
-    use crate::history::skill_usage::{SkillFiring, scan_skill_firings};
+    use crate::history::skill_usage::SkillFiring;
 
-    let firings = scan_skill_firings();
+    let firings = crate::history::scan_skill_firings_with_progress();
     let now = chrono::Utc::now();
 
     // Enumerate installed directory skills (global + project), all origins, deduped.

@@ -182,34 +182,54 @@ fn extract_text(role: Role, content: &serde_json::Value) -> String {
     }
 }
 
+use rayon::prelude::*;
 use walkdir::WalkDir;
 
+/// Collect every transcript path under `root`. Files under any `subagents/` or
+/// `tool-results/` directory are ignored (they are supplementary sidecar logs for their
+/// parent session). The walk is sequential because it is cheap next to parsing.
+///
+/// Exposed separately from parsing so a caller can learn the total up front and report
+/// progress against it.
+pub fn collect_session_paths(root: &Path) -> Vec<std::path::PathBuf> {
+    WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.into_path())
+        .filter(|path| {
+            path.is_file()
+                && path.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                && !path.components().any(|c| {
+                    matches!(
+                        c.as_os_str().to_str(),
+                        Some("subagents") | Some("tool-results")
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Parse every path into a SessionRecord across rayon's pool, calling `on_file` once per
+/// file. `par_iter().filter_map().collect()` preserves the input order, so the result
+/// matches a sequential parse.
+pub fn parse_paths(
+    paths: &[std::path::PathBuf],
+    on_file: impl Fn() + Sync + Send,
+) -> Vec<SessionRecord> {
+    paths
+        .par_iter()
+        .filter_map(|path| {
+            let rec = parse_session_file(path);
+            on_file();
+            rec
+        })
+        .collect()
+}
+
 /// Walk `root` recursively and parse every reachable `*.jsonl` file into a SessionRecord.
-/// Files under any `subagents/` or `tool-results/` directory are ignored (they are
-/// supplementary sidecar logs for their parent session).
 pub fn scan_sessions_in(root: &Path) -> Vec<SessionRecord> {
-    let mut out = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false).into_iter().flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        if path.components().any(|c| {
-            matches!(
-                c.as_os_str().to_str(),
-                Some("subagents") | Some("tool-results")
-            )
-        }) {
-            continue;
-        }
-        if let Some(rec) = parse_session_file(path) {
-            out.push(rec);
-        }
-    }
-    out
+    parse_paths(&collect_session_paths(root), || {})
 }
 
 /// Scan the default Claude Code history directory `~/.claude/projects`.

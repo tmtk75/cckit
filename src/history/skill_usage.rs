@@ -2,6 +2,7 @@
 // to compute, per skill, the last time it fired and how many times.
 
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -95,9 +96,45 @@ fn find_skill_invocation_name(v: &serde_json::Value) -> Option<String> {
     walk(v)
 }
 
-/// Walk every `*.jsonl` under `root`, folding Skill firings into a per-name aggregate.
-pub fn aggregate_firings(root: &Path) -> HashMap<String, SkillFiring> {
-    let mut map: HashMap<String, SkillFiring> = HashMap::new();
+/// Fold one firing into an aggregate: bump the count, keep the latest timestamp.
+fn record_firing(map: &mut HashMap<String, SkillFiring>, name: String, ts: DateTime<Utc>) {
+    map.entry(name)
+        .and_modify(|f| {
+            f.count += 1;
+            if ts > f.last_fired {
+                f.last_fired = ts;
+            }
+        })
+        .or_insert(SkillFiring {
+            last_fired: ts,
+            count: 1,
+        });
+}
+
+/// Combine two partial aggregates. Counts add and the later firing wins, both of which
+/// are associative and commutative, so any split of the corpus yields the same result.
+fn merge_firings(
+    mut acc: HashMap<String, SkillFiring>,
+    other: HashMap<String, SkillFiring>,
+) -> HashMap<String, SkillFiring> {
+    for (name, firing) in other {
+        acc.entry(name)
+            .and_modify(|f| {
+                f.count += firing.count;
+                if firing.last_fired > f.last_fired {
+                    f.last_fired = firing.last_fired;
+                }
+            })
+            .or_insert(firing);
+    }
+    acc
+}
+
+/// Collect every `*.jsonl` path under `root` (recursively, ignoring unreadable dirs).
+/// Exposed separately from aggregation so a caller can learn the total up front and
+/// report progress against it.
+pub fn collect_jsonl_paths(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -107,32 +144,43 @@ pub fn aggregate_firings(root: &Path) -> HashMap<String, SkillFiring> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Ok(content) = fs::read_to_string(&path) else {
-                continue;
-            };
-            for line in content.lines() {
-                if let Some((name, ts)) = parse_skill_firings_line(line) {
-                    map.entry(name)
-                        .and_modify(|f| {
-                            f.count += 1;
-                            if ts > f.last_fired {
-                                f.last_fired = ts;
-                            }
-                        })
-                        .or_insert(SkillFiring {
-                            last_fired: ts,
-                            count: 1,
-                        });
-                }
+            } else if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                paths.push(path);
             }
         }
     }
-    map
+    paths
+}
+
+/// Fold the Skill firings in every path into a per-name aggregate, calling `on_file` once
+/// per file. Parsing runs on rayon's pool and the partial maps merge through
+/// `merge_firings`.
+pub fn aggregate_paths(
+    paths: &[std::path::PathBuf],
+    on_file: impl Fn() + Sync + Send,
+) -> HashMap<String, SkillFiring> {
+    paths
+        .par_iter()
+        .map(|path| {
+            let mut map: HashMap<String, SkillFiring> = HashMap::new();
+            let content = fs::read_to_string(path);
+            on_file();
+            let Ok(content) = content else {
+                return map;
+            };
+            for line in content.lines() {
+                if let Some((name, ts)) = parse_skill_firings_line(line) {
+                    record_firing(&mut map, name, ts);
+                }
+            }
+            map
+        })
+        .reduce(HashMap::new, merge_firings)
+}
+
+/// Walk every `*.jsonl` under `root`, folding Skill firings into a per-name aggregate.
+pub fn aggregate_firings(root: &Path) -> HashMap<String, SkillFiring> {
+    aggregate_paths(&collect_jsonl_paths(root), || {})
 }
 
 /// Aggregate firings from the default transcript root (`~/.claude/projects`).
@@ -208,5 +256,48 @@ mod tests {
         assert_eq!(f.count, 2);
         assert_eq!(f.last_fired.to_rfc3339(), "2026-03-01T00:00:00+00:00");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merging_partial_maps_sums_counts_and_keeps_the_latest_firing() {
+        let ts = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let early = ts("2026-01-01T00:00:00Z");
+        let late = ts("2026-03-01T00:00:00Z");
+
+        // Two workers each saw part of the corpus.
+        let mut a = HashMap::new();
+        record_firing(&mut a, "foo".to_string(), late);
+        let mut b = HashMap::new();
+        record_firing(&mut b, "foo".to_string(), early);
+        record_firing(&mut b, "bar".to_string(), early);
+
+        let merged = merge_firings(a, b);
+
+        // Counts add up, and the later timestamp wins regardless of merge order.
+        let foo = merged.get("foo").unwrap();
+        assert_eq!(foo.count, 2);
+        assert_eq!(foo.last_fired, late);
+        assert_eq!(merged.get("bar").unwrap().count, 1);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn merging_is_order_independent() {
+        let ts = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let early = ts("2026-01-01T00:00:00Z");
+        let late = ts("2026-03-01T00:00:00Z");
+
+        let build = |t| {
+            let mut m = HashMap::new();
+            record_firing(&mut m, "foo".to_string(), t);
+            m
+        };
+
+        let forward = merge_firings(build(early), build(late));
+        let backward = merge_firings(build(late), build(early));
+
+        assert_eq!(forward["foo"].count, backward["foo"].count);
+        assert_eq!(forward["foo"].last_fired, backward["foo"].last_fired);
+        assert_eq!(forward["foo"].last_fired, late);
     }
 }

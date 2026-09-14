@@ -33,6 +33,9 @@ libc = "0.2.180"
 # Directory walker for session history search
 walkdir = "2"
 
+# Parallel parsing of session transcripts
+rayon = "1"
+
 # Fuzzy matching for interactive session search
 fuzzy-matcher = "0.3"
 

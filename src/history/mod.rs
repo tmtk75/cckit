@@ -1,5 +1,6 @@
 pub mod format;
 pub mod loader;
+pub mod progress;
 pub mod search;
 pub mod skill_usage;
 pub mod tui;
@@ -71,6 +72,33 @@ pub struct Hit {
     pub matched_turn_indices: Vec<usize>,
 }
 
+/// Load every session transcript, drawing a progress line while the scan runs.
+/// Returns an empty vec (and no error) when the history directory does not exist.
+pub fn scan_all_sessions_with_progress() -> Vec<SessionRecord> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let paths = loader::collect_session_paths(&home.join(".claude/projects"));
+    let progress = progress::ScanProgress::start("scanning transcripts", paths.len());
+    let sessions = loader::parse_paths(&paths, || progress.tick());
+    progress.finish();
+    sessions
+}
+
+/// Aggregate Skill firings from every transcript, drawing a progress line while the scan
+/// runs. Returns an empty map when the history directory does not exist.
+pub fn scan_skill_firings_with_progress()
+-> std::collections::HashMap<String, skill_usage::SkillFiring> {
+    let Some(home) = dirs::home_dir() else {
+        return std::collections::HashMap::new();
+    };
+    let paths = skill_usage::collect_jsonl_paths(&home.join(".claude/projects"));
+    let progress = progress::ScanProgress::start("scanning transcripts", paths.len());
+    let firings = skill_usage::aggregate_paths(&paths, || progress.tick());
+    progress.finish();
+    firings
+}
+
 pub fn run_search(opts: SearchOpts) -> io::Result<i32> {
     if opts.interactive && opts.json {
         eprintln!("error: --json cannot be combined with --interactive");
@@ -84,7 +112,7 @@ pub fn run_search(opts: SearchOpts) -> io::Result<i32> {
     if opts.interactive {
         // Interactive mode: load all sessions, pass to TUI which filters live.
         let load_start = std::time::Instant::now();
-        let sessions = loader::scan_all_sessions();
+        let sessions = scan_all_sessions_with_progress();
         let load_elapsed = load_start.elapsed();
         let initial_query = opts.terms.join(" ");
         match tui::run_tui(sessions, &initial_query, opts.limit, load_elapsed)? {
@@ -96,7 +124,7 @@ pub fn run_search(opts: SearchOpts) -> io::Result<i32> {
         }
     } else {
         let start = std::time::Instant::now();
-        let sessions = loader::scan_all_sessions();
+        let sessions = scan_all_sessions_with_progress();
         let scanned = sessions.len();
         let hits = search::search_sessions(sessions, &opts.terms, opts.limit);
         let elapsed = start.elapsed();
