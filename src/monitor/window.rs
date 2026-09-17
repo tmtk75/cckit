@@ -167,7 +167,7 @@ const FIT_MIN_WIDTH: CGFloat = 640.0;
 const FIT_MAX_WIDTH: CGFloat = 840.0;
 const FIT_PATH_CHAR_WIDTH: CGFloat = 6.0;
 const FIT_PATH_BASE_CHARS: usize = 18;
-const FIT_PATH_MAX_CHARS: usize = 34;
+const FIT_PATH_MAX_CHARS: usize = 56;
 
 // --- Colors (theme-based) ---
 
@@ -368,6 +368,18 @@ fn format_session_stats(session: &Session) -> String {
         String::new()
     } else {
         parts.join("/")
+    }
+}
+
+/// Stats and last-tool summary for the hover popover. The classic row gave
+/// these columns up so PATH could use the width, so the popover carries them.
+fn hover_detail_header(session: &Session) -> String {
+    let stats = format_session_stats(session);
+    let tool = session.last_tool.as_deref().unwrap_or("-");
+    if stats.is_empty() {
+        format!("tool: {}", tool)
+    } else {
+        format!("{}   tool: {}", stats, tool)
     }
 }
 
@@ -870,13 +882,19 @@ fn on_hover_timer_fired(view: &NSView) {
         sessions.get(idx).cloned()
     };
     let Some(session) = session else { return };
-    let Some(transcript_path) = session.transcript_path.as_ref() else {
-        return;
-    };
-    let path = std::path::PathBuf::from(transcript_path);
 
-    let text = with_hover_runtime(|rt| rt.cache.get_or_load(&path, 10));
-    let Some(text) = text else { return };
+    // Lead with the stats/tool line the classic row no longer shows, then the
+    // transcript preview when the session has one.
+    let header = hover_detail_header(&session);
+    let transcript = session
+        .transcript_path
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .and_then(|path| with_hover_runtime(|rt| rt.cache.get_or_load(&path, 10)));
+    let text = match transcript {
+        Some(body) => format!("{}\n\n{}", header, body),
+        None => header,
+    };
 
     with_hover_runtime(|rt| {
         // Re-check that the hover is still on the same row before showing.
@@ -1510,6 +1528,9 @@ fn rebuild_view_classic(view: &NSView) {
     const CL_TEXT_LEFT: CGFloat = 24.0;
     const CL_PROJECT_COL_WIDTH: CGFloat = 220.0;
     const CL_PROJECT_COL_WIDTH_WIDE: CGFloat = 300.0;
+    /// AGE + AF only. The stats and last-tool columns that used to share this
+    /// block moved to the hover popover so PATH can use the width.
+    const CL_AGE_COL_WIDTH: CGFloat = 64.0;
 
     // v0.1.0 colors
     fn cl_color_text() -> Retained<NSColor> {
@@ -1617,11 +1638,11 @@ fn rebuild_view_classic(view: &NSView) {
     ));
 
     let hdr_ctx_w: CGFloat = if any_has_context { 70.0 } else { 0.0 };
-    let hdr_stats_w: CGFloat = 230.0;
-    let hdr_right = format!("{:>12} {:>6}  {:>5}  {:<2}", "STAT", "TOOL", "AGE", "AF");
+    let hdr_age_w: CGFloat = CL_AGE_COL_WIDTH;
+    let hdr_right = format!("{:>5}  {:<2}", "AGE", "AF");
     let hdr_right_rect = NSRect::new(
-        NSPoint::new(view_width - hdr_stats_w - hdr_ctx_w - CL_LEFT_PAD, 2.0),
-        NSSize::new(hdr_stats_w, CL_HEADER_HEIGHT - 2.0),
+        NSPoint::new(view_width - hdr_age_w - hdr_ctx_w - CL_LEFT_PAD, 2.0),
+        NSSize::new(hdr_age_w, CL_HEADER_HEIGHT - 2.0),
     );
     let hdr_right_label = create_mono_label(
         mtm,
@@ -1636,7 +1657,7 @@ fn rebuild_view_classic(view: &NSView) {
     if any_has_model {
         let hdr_model_rect = NSRect::new(
             NSPoint::new(
-                view_width - hdr_stats_w - hdr_ctx_w - model_col_w - CL_LEFT_PAD,
+                view_width - hdr_age_w - hdr_ctx_w - model_col_w - CL_LEFT_PAD,
                 2.0,
             ),
             NSSize::new(model_col_w - 6.0, CL_HEADER_HEIGHT - 2.0),
@@ -1696,7 +1717,8 @@ fn rebuild_view_classic(view: &NSView) {
         return;
     }
 
-    let right_col_w: CGFloat = 230.0 + if any_has_context { 70.0 } else { 0.0 } + model_col_w;
+    let right_col_w: CGFloat =
+        CL_AGE_COL_WIDTH + if any_has_context { 70.0 } else { 0.0 } + model_col_w;
 
     for (i, session) in sessions.iter().enumerate() {
         let y = y_start + (i as CGFloat) * CL_ROW_HEIGHT;
@@ -1750,7 +1772,6 @@ fn rebuild_view_classic(view: &NSView) {
 
         let project = session.display_name();
         let path = session.short_cwd();
-        let tool = session.last_tool.as_deref().unwrap_or("-");
         let elapsed = format_elapsed(session.updated_at);
         let unfocusable = session.tty == "unknown";
 
@@ -1791,16 +1812,15 @@ fn rebuild_view_classic(view: &NSView) {
         let _: () = unsafe { msg_send![&*path_label, setLineBreakMode: 5_isize] };
         view.addSubview(&path_label);
 
-        let stats = format_session_stats(session);
         let ctx_info = context_bar_info(session);
         let af_off = AF_DISABLED_PROJECTS.lock().unwrap().contains(&session.cwd);
         let af_col = if af_off { "\u{23F8}" } else { "\u{2713}" };
         let ctx_col_w: CGFloat = if any_has_context { 70.0 } else { 0.0 };
-        let stats_w: CGFloat = 230.0;
-        let right_text = format!("{:>12} {:>6}  {:>5}  {:<2}", stats, tool, elapsed, af_col);
+        let age_w: CGFloat = CL_AGE_COL_WIDTH;
+        let right_text = format!("{:>5}  {:<2}", elapsed, af_col);
         let right_rect = NSRect::new(
-            NSPoint::new(view_width - stats_w - ctx_col_w - CL_LEFT_PAD, y + 2.0),
-            NSSize::new(stats_w, CL_ROW_HEIGHT - 4.0),
+            NSPoint::new(view_width - age_w - ctx_col_w - CL_LEFT_PAD, y + 2.0),
+            NSSize::new(age_w, CL_ROW_HEIGHT - 4.0),
         );
         let right_label = create_mono_label(
             mtm,
@@ -1825,7 +1845,7 @@ fn rebuild_view_classic(view: &NSView) {
                 });
             let model_rect = NSRect::new(
                 NSPoint::new(
-                    view_width - stats_w - ctx_col_w - model_col_w - CL_LEFT_PAD,
+                    view_width - age_w - ctx_col_w - model_col_w - CL_LEFT_PAD,
                     y + 2.0,
                 ),
                 NSSize::new(model_col_w - 6.0, CL_ROW_HEIGHT - 4.0),
@@ -2724,6 +2744,48 @@ mod tests {
         assert_eq!(prev_index(Some(0), 0), None);
         assert_eq!(next_index(None, 0), None);
         assert_eq!(next_index(Some(0), 0), None);
+    }
+
+    fn hover_test_session() -> Session {
+        Session {
+            session_id: "test".to_string(),
+            cwd: "/tmp/test".to_string(),
+            tty: "/dev/ttys001".to_string(),
+            status: SessionStatus::WaitingInput,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_tool: None,
+            last_tool_input: None,
+            pid: None,
+            prompt_count: 0,
+            compact_count: 0,
+            transcript_path: None,
+            tool_started_at: None,
+            last_tool_duration_ms: None,
+            tool_count: 0,
+            context_used_tokens: None,
+            context_max_tokens: None,
+            model: None,
+            subagent_name: None,
+        }
+    }
+
+    #[test]
+    fn hover_header_carries_stats_and_tool() {
+        let mut session = hover_test_session();
+        session.prompt_count = 10;
+        session.tool_count = 75;
+        session.last_tool_duration_ms = Some(2000);
+        session.last_tool = Some("Bash".to_string());
+        assert_eq!(hover_detail_header(&session), "10p/75t/2.0s   tool: Bash");
+    }
+
+    /// A fresh session has no counts and no tool yet; the header must still
+    /// render something rather than a bare separator.
+    #[test]
+    fn hover_header_without_stats_shows_tool_only() {
+        let session = hover_test_session();
+        assert_eq!(hover_detail_header(&session), "tool: -");
     }
 
     /// Rows without a TTY (Claude Code / Codex desktop sessions) used to be
