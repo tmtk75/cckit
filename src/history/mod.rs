@@ -1,6 +1,8 @@
 pub mod format;
 pub mod loader;
+pub mod monitor_usage;
 pub mod progress;
+pub mod recent;
 pub mod search;
 pub mod skill_usage;
 pub mod tui;
@@ -115,6 +117,20 @@ pub fn scan_skill_firings_with_progress()
     let firings = skill_usage::aggregate_paths(&paths, || progress.tick());
     progress.finish();
     firings
+}
+
+/// Collect the Monitor launches recorded in every transcript, drawing a progress line
+/// while the scan runs. Returns the launches and how many files were read, so the caller
+/// can report the corpus it covered. Empty when the history directory does not exist.
+pub fn scan_monitor_launches_with_progress() -> (Vec<monitor_usage::MonitorLaunch>, usize) {
+    let Some(home) = dirs::home_dir() else {
+        return (Vec::new(), 0);
+    };
+    let paths = skill_usage::collect_jsonl_paths(&home.join(".claude/projects"));
+    let progress = progress::ScanProgress::start("scanning transcripts", paths.len());
+    let launches = monitor_usage::collect_paths(&paths, || progress.tick());
+    progress.finish();
+    (launches, paths.len())
 }
 
 pub fn run_search(opts: SearchOpts) -> io::Result<i32> {

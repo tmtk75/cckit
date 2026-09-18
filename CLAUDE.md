@@ -49,12 +49,43 @@ mise run build-app              # runs scripts/macos/build_app.sh
 | `search.rs` | AND-term and fuzzy search over session text |
 | `format.rs` | Plain text and JSON output formatting |
 | `progress.rs` | Determinate scan progress on stderr, drawn only on a TTY and only after a 250ms delay |
+| `recent.rs` | `session recent`: age filter, project/branch grouping, one-line-per-session text and flat JSON output |
 | `tui.rs` | Interactive ratatui browser for search results |
 | `skill_usage.rs` | Aggregate Skill tool invocations from transcripts (last-fired/count) for `skill stale` |
+| `monitor_usage.rs` | `monitor ls`: mine Monitor tool launches from transcripts, group by project and description, cross-check the process table for `--alive`, text and flat JSON output |
 
 `session search` runs the AND-term matcher first and, when it finds nothing, retries the same
 corpus with the fuzzy matcher so typos still land (`--exact` disables the retry). The notice is
 inline in text output and on stderr under `--json`, which keeps stdout a bare JSON array.
+
+`session recent` answers "where was I working lately" without a search term: it keeps sessions whose
+last activity falls inside `--days N` (default 7), nests them under working directory then git branch,
+and prints one line per session (time range, turn count, full session id, first and last user phrase).
+The phrase column comes last so the line can be cut to the terminal width without losing the id.
+`--limit` caps the session count (0 = no cap) and `--json` emits a flat array for `jq`.
+
+`monitor ls` answers "which projects run background monitors, how often, and when last": it reads the
+`Monitor` tool_use blocks out of the same transcripts, groups them by working directory then by the
+description they were launched with, and prints one line per monitor (last launch, relative age,
+launch count, description). `--days N` sizes the window (default 90, `0` = full history), `--filter`
+keeps only monitors whose description or command matches, and `--json` emits a flat array carrying
+the last command and session id. Projects whose directory is gone (a removed git worktree, usually)
+are dropped, with the count reported in the summary line; `--include-missing` keeps them, marked
+`(gone)`, and `cwd_exists` carries the same fact in `--json`. This is launch history, not liveness: a `persistent: false` launch
+expires after its timeout and a monitor stopped with `TaskStop` leaves the same trace as one still
+streaming, so only the process table can confirm a monitor is still running.
+
+`--alive` adds that process-table check. Claude Code starts every background task as
+`zsh -c source <shell snapshot> … && eval '<command>' < /dev/null && …`, so `task_command` recovers
+the launched command from the wrapper `ps` reports and matches it against the commands each monitor
+was launched with (the whole set, since a relaunch carries a new session id inside the command). A
+matched row is marked `●` inside the existing indent, so checked and unchecked runs stay aligned;
+`alive` is `None`/`null` when nobody looked and `Some(0)`/`0` when the check found nothing. MCP
+servers are children of the same `claude` process but skip the wrapper, so they never match.
+Processes whose command no listed monitor claims are printed under `running but not listed above:`
+(on stderr under `--json`) when the transcripts recorded them as a monitor launch, which keeps a
+running monitor from disappearing just because `--days`, `--filter` or a gone directory excluded
+its launch. The gone-directory drop happens before the liveness check for exactly that reason.
 
 **Marketplace module** (`src/marketplace.rs`): Plugin marketplace inspection and validation (`marketplace summary`, `marketplace doctor`).
 

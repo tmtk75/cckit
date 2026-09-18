@@ -7,6 +7,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+/// What Claude Code writes as `gitBranch` when git has no current branch.
+pub(crate) const DETACHED_HEAD: &str = "HEAD";
+
 #[derive(Debug, Deserialize)]
 struct RawLine {
     #[serde(default)]
@@ -61,8 +64,18 @@ pub fn parse_session_file(path: &Path) -> Option<SessionRecord> {
         if session_id.is_none() {
             session_id = raw.session_id.clone();
         }
-        if git_branch.is_none() {
-            git_branch = raw.git_branch.clone();
+        // A jj-colocated repo leaves git detached, so its transcript records "HEAD" as the
+        // branch. Keep the first real branch name the session ever saw and let "HEAD" stand
+        // only when no line offers anything better.
+        if let Some(branch) = raw.git_branch.as_ref() {
+            let keep = match git_branch.as_deref() {
+                None => true,
+                Some(DETACHED_HEAD) => branch != DETACHED_HEAD,
+                Some(_) => false,
+            };
+            if keep {
+                git_branch = Some(branch.clone());
+            }
         }
 
         let Some(ty) = raw.r#type.as_deref() else {
@@ -265,6 +278,18 @@ mod tests {
     }
 
     #[test]
+    fn a_real_branch_later_in_the_transcript_wins_over_a_leading_head() {
+        let rec = parse_session_file(&fixture("branch_head_then_real.jsonl")).unwrap();
+        assert_eq!(rec.git_branch.as_deref(), Some("worktree-fizzy-avalanche"));
+    }
+
+    #[test]
+    fn head_is_kept_when_the_transcript_never_records_a_real_branch() {
+        let rec = parse_session_file(&fixture("branch_head_only.jsonl")).unwrap();
+        assert_eq!(rec.git_branch.as_deref(), Some("HEAD"));
+    }
+
+    #[test]
     fn concatenates_user_text_blocks() {
         let rec = parse_session_file(&fixture("user_blocks.jsonl")).unwrap();
         assert_eq!(rec.turns.len(), 1);
@@ -317,7 +342,7 @@ mod tests {
         let mut sessions = scan_sessions_in(&dir);
         sessions.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         let ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
-        assert_eq!(ids, vec!["s1", "s2", "s3", "s4", "s5"]);
+        assert_eq!(ids, vec!["s1", "s2", "s3", "s4", "s5", "s6", "s7"]);
     }
 
     #[test]

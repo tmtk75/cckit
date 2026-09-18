@@ -1,0 +1,2 @@
+{"type":"user","cwd":"/tmp/proj","sessionId":"s7","gitBranch":"HEAD","timestamp":"2026-03-12T06:12:48.000Z","message":{"role":"user","content":"jj colocated repo"}}
+{"type":"assistant","cwd":"/tmp/proj","sessionId":"s7","gitBranch":"HEAD","timestamp":"2026-03-12T06:12:50.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}

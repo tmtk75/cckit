@@ -69,6 +69,12 @@ enum Commands {
         command: Option<SessionCommands>,
     },
 
+    /// Inspect background Monitor tasks launched by past sessions
+    Monitor {
+        #[command(subcommand)]
+        command: Option<MonitorCommands>,
+    },
+
     /// Show ~/.claude.json contents in a readable format
     Config {
         /// Key path to inspect (e.g., "projects", "tipsHistory")
@@ -259,6 +265,22 @@ enum SessionCommands {
         exact: bool,
     },
 
+    /// List past sessions from the last N days, grouped by project and git branch.
+    /// One line per session: time range, turn count, full session id, first and last user phrase.
+    Recent {
+        /// Size of the lookback window in days
+        #[arg(long, default_value = "7")]
+        days: i64,
+
+        /// Maximum number of sessions to list (0 = no cap)
+        #[arg(long, default_value = "0")]
+        limit: usize,
+
+        /// Emit results as a flat JSON array
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Handle hook events from Claude Code (internal use)
     Hook,
 
@@ -293,6 +315,38 @@ enum SessionCommands {
 
     /// Dump Ghostty UI tree for debugging (macOS only)
     DumpUi,
+}
+
+#[derive(Subcommand)]
+enum MonitorCommands {
+    /// List the Monitor tasks launched in past sessions, grouped by project.
+    /// One line per monitor: last launch, how long ago, launch count, description.
+    #[command(after_help = "\
+Launch history: without --alive a listed monitor is not necessarily still running. A
+launch with persistent=false expires after its timeout, and one stopped with TaskStop
+leaves the transcript looking the same as one still streaming. --alive cross-checks the
+process table and marks the rows a process is actually running (\x1b[32m●\x1b[0m).")]
+    Ls {
+        /// Size of the lookback window in days (0 = full history)
+        #[arg(long, default_value = "90")]
+        days: i64,
+
+        /// Keep only monitors whose description or command contains this text
+        #[arg(long)]
+        filter: Option<String>,
+
+        /// Check the process table and mark the monitors running right now
+        #[arg(long)]
+        alive: bool,
+
+        /// Keep projects whose directory no longer exists (marked "(gone)")
+        #[arg(long)]
+        include_missing: bool,
+
+        /// Emit results as a flat JSON array
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -7345,6 +7399,36 @@ pub fn run() {
         }) => {
             permissions_command(filter, audit, clean, execute);
         }
+        Some(Commands::Monitor { command }) => {
+            // Bare `cckit monitor` is the listing, the only thing there is to do here.
+            let MonitorCommands::Ls {
+                days,
+                filter,
+                alive,
+                include_missing,
+                json,
+            } = command.unwrap_or(MonitorCommands::Ls {
+                days: 90,
+                filter: None,
+                alive: false,
+                include_missing: false,
+                json: false,
+            });
+            let opts = crate::history::monitor_usage::MonitorLsOpts {
+                days,
+                filter,
+                alive,
+                include_missing,
+                json,
+            };
+            match crate::history::monitor_usage::run_monitor_ls(opts) {
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
+                    eprintln!("{}: {}", "Error listing monitors".red(), e);
+                    std::process::exit(1);
+                }
+            }
+        }
         Some(Commands::Session { command }) => {
             match command {
                 Some(SessionCommands::Ls {
@@ -7429,6 +7513,16 @@ pub fn run() {
                         Ok(code) => std::process::exit(code),
                         Err(e) => {
                             eprintln!("{}: {}", "Error running session search".red(), e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Some(SessionCommands::Recent { days, limit, json }) => {
+                    let opts = crate::history::recent::RecentOpts { days, limit, json };
+                    match crate::history::recent::run_recent(opts) {
+                        Ok(code) => std::process::exit(code),
+                        Err(e) => {
+                            eprintln!("{}: {}", "Error listing recent sessions".red(), e);
                             std::process::exit(1);
                         }
                     }

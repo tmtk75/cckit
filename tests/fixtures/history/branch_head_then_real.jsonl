@@ -1,0 +1,3 @@
+{"type":"user","cwd":"/tmp/proj","sessionId":"s6","gitBranch":"HEAD","timestamp":"2026-03-12T06:12:48.000Z","message":{"role":"user","content":"start in a detached worktree"}}
+{"type":"assistant","cwd":"/tmp/proj","sessionId":"s6","gitBranch":"HEAD","timestamp":"2026-03-12T06:12:50.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}
+{"type":"user","cwd":"/tmp/proj","sessionId":"s6","gitBranch":"worktree-fizzy-avalanche","timestamp":"2026-03-12T06:13:00.000Z","message":{"role":"user","content":"now on a branch"}}
