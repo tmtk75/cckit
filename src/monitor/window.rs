@@ -531,6 +531,40 @@ fn focus_selected() {
 
 // --- View helpers ---
 
+/// Width the MODEL column needs to show a label that measures `measured_text_w`.
+///
+/// The text width is measured by the label itself rather than derived from the character
+/// count: an earlier version assumed the monospaced system font advances 0.6 em and came
+/// up short, clipping "Gemini 3.8 Flash" down to its generation. This function only adds
+/// the room the cell needs around the glyphs and keeps the result between a floor (the
+/// width the column always had, so short Claude labels lay out as before) and a ceiling
+/// (so one long model id cannot eat the PATH column).
+///
+/// `measured_text_w` of zero means no session reports a model, and the column collapses.
+fn model_column_width(measured_text_w: CGFloat) -> CGFloat {
+    const MIN_W: CGFloat = 80.0;
+    const MAX_W: CGFloat = 160.0;
+    /// Room for the cell's own inset plus the 6pt the drawing rect gives back.
+    const CELL_PADDING: CGFloat = 12.0;
+
+    if measured_text_w <= 0.0 {
+        return 0.0;
+    }
+    (measured_text_w + CELL_PADDING).clamp(MIN_W, MAX_W)
+}
+
+/// Measure how wide `text` actually draws in the label style the MODEL column uses.
+///
+/// Building a throwaway `NSTextField` and asking for its fitting size is what removes
+/// the guesswork: the same font, the same cell, so the number matches what is drawn.
+fn measure_mono_label_width(mtm: MainThreadMarker, text: &str, font_size: CGFloat) -> CGFloat {
+    let zero = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
+    let color = NSColor::blackColor();
+    let probe = create_mono_label(mtm, text, zero, &color, font_size);
+    let size: NSSize = unsafe { msg_send![&*probe, fittingSize] };
+    size.width
+}
+
 fn cached_mono_font(size: CGFloat) -> Retained<NSFont> {
     use std::collections::HashMap;
     thread_local! {
@@ -1590,14 +1624,23 @@ fn rebuild_view_classic(view: &NSView) {
         .iter()
         .any(|s| s.context_used_tokens.is_some() && s.context_max().is_some());
 
-    let any_has_model = sessions.iter().any(|s| {
-        s.model
-            .as_deref()
-            .and_then(theme::model_short_label)
-            .is_some()
-    });
-    // Space allocated for the MODEL column (0 when no session reports one).
-    let model_col_w: CGFloat = if any_has_model { 80.0 } else { 0.0 };
+    let model_labels: Vec<String> = sessions
+        .iter()
+        .filter_map(|s| s.model.as_deref().and_then(theme::model_short_label))
+        .collect();
+    let any_has_model = !model_labels.is_empty();
+    // Space allocated for the MODEL column (0 when no session reports one). Sized to the
+    // longest label so a name like "Gemini 3.8 Flash" is not cut down to its generation.
+    let widest_model_label = model_labels
+        .iter()
+        .max_by_key(|l| l.chars().count())
+        .map(|l| l.as_str())
+        .unwrap_or("");
+    let model_col_w: CGFloat = model_column_width(measure_mono_label_width(
+        mtm,
+        widest_model_label,
+        CL_FONT_SIZE_SMALL,
+    ));
 
     let any_has_subagent_name = sessions.iter().any(|s| s.subagent_name.is_some());
     let proj_w = if any_has_subagent_name {
@@ -2799,5 +2842,31 @@ mod tests {
                 assert_eq!(prev_index(Some(i), count), Some(i.saturating_sub(1)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod model_column_tests {
+    use super::*;
+
+    #[test]
+    fn no_model_means_no_column() {
+        assert_eq!(model_column_width(0.0), 0.0);
+    }
+
+    #[test]
+    fn a_narrow_label_keeps_the_column_at_its_usual_width() {
+        // A Claude label measures well under the floor, so its layout is unchanged.
+        assert_eq!(model_column_width(48.0), 80.0);
+    }
+
+    #[test]
+    fn a_wide_label_gets_the_room_it_measured_plus_the_cells_padding() {
+        assert_eq!(model_column_width(104.0), 116.0);
+    }
+
+    #[test]
+    fn an_absurdly_wide_label_cannot_eat_the_path_column() {
+        assert_eq!(model_column_width(400.0), 160.0);
     }
 }

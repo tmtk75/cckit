@@ -11,10 +11,10 @@ Claude Code Kit - A toolkit for managing Claude Code and OpenAI Codex environmen
 
 cckit helps you manage and monitor your AI coding tool sessions:
 
-- **Session Monitoring** (`session`) - Track active Claude Code and Codex sessions in real-time with an interactive TUI
+- **Session Monitoring** (`session`) - Track active Claude Code, Codex and Antigravity sessions in real-time with an interactive TUI
 - **Session Search** (`session search`) - Search past Claude Code sessions by message text with an interactive TUI browser
 - **Session Bookmarks** (`session bookmark`) - Bookmark sessions with a name and tags so you can find them again later
-- **Multi-tool Support** - Works with both Claude Code and OpenAI Codex via hooks
+- **Multi-tool Support** - Works with Claude Code, OpenAI Codex and Antigravity (`agy`) via hooks
 - **Project Inspection** (`ls`) - View all Claude Code projects with their skills, agents, commands, plugins, and MCP servers at a glance
 - **Skill/MCP/Agent Management** (`skill`, `mcp`, `agent`) - List, copy, promote, validate, and remove skills, MCP servers, and agents across projects
 - **Permissions Audit** (`permissions`) - List, audit, and clean risky allow/deny rules across all projects
@@ -74,6 +74,9 @@ cckit session install
 # For OpenAI Codex (writes to ~/.codex/hooks.json + enables feature flag)
 # Requires codex-cli >= 0.117.0
 cckit session install --codex
+
+# For Antigravity (writes to ~/.gemini/config/hooks.json)
+cckit session install --agy
 ```
 
 ### Usage
@@ -121,16 +124,44 @@ cckit session install
 # Install hooks for OpenAI Codex
 cckit session install --codex
 
+# Install hooks for Antigravity
+cckit session install --agy
+
 # Show hook configuration status
 cckit session status
 
 # Remove hooks
 cckit session uninstall          # Claude Code
 cckit session uninstall --codex  # Codex
+cckit session uninstall --agy    # Antigravity
 
 # Clean up stale sessions
 cckit session sync --execute
 ```
+
+#### Antigravity (`agy`)
+
+Antigravity's hooks differ from the other two, so cckit tracks a little less there.
+
+**A session appears on its first prompt, not when `agy` starts.** Antigravity has no
+`SessionStart` event, and every hook cckit installs fires at or after the first model
+call. Launching `agy` and leaving it at the prompt shows nothing; type something and the
+session appears as `● run`, then settles to `○ wait`.
+
+**No `PreToolUse` hook is installed.** That event's contract requires the hook to answer
+with a permission decision (`allow` / `deny` / `ask` / `force_ask`), and a hook that says
+nothing is taken as a refusal. A session monitor must not answer that question: granting
+would rubber-stamp every tool call, refusing would block them all. Tool calls are
+therefore recorded by `PostToolUse`, after they have run, and the "awaiting approval"
+state does not appear for Antigravity sessions.
+
+Antigravity also calls the model repeatedly within one turn, so the prompt count is taken
+from the invocations that follow a `Stop` rather than from every invocation. The context
+gauge stays empty: Antigravity's transcripts do not carry the token usage cckit reads.
+
+Hooks are written to `~/.gemini/config/hooks.json` under the name `cckit`, leaving any
+other named hooks in that file untouched. A `.agents/hooks.json` inside a project is not
+read by the CLI, which is why the global file is the one cckit writes.
 
 ### Session Search
 
@@ -670,7 +701,7 @@ open dist/CCKit.app
 
 ### session command
 
-1. Uses Claude Code / Codex hooks to track session lifecycle events
+1. Uses Claude Code / Codex / Antigravity hooks to track session lifecycle events
 2. Stores session data in `~/Library/Application Support/cckit/sessions.json` (macOS)
 3. TUI/window app displays active sessions with status, working directory, and last tool info
 4. Detects subagent sessions (Claude Code teams/agents) and shows agent names

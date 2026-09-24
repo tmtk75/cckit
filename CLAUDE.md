@@ -130,8 +130,8 @@ its launch. The gone-directory drop happens before the liveness check for exactl
 |------|------|
 | `session.rs` | `Session`, `SessionStatus`, `SessionStore` data models |
 | `storage.rs` | File-based storage with `fs2` file locking, atomic writes (tmp + rename) |
-| `hook.rs` | Hook event handler for Claude Code and Codex (reads stdin JSON) |
-| `setup.rs` | Install/uninstall hooks in `~/.claude/settings.json` or `~/.codex/hooks.json` |
+| `hook.rs` | Hook event handler for Claude Code, Codex and Antigravity (reads stdin JSON) |
+| `setup.rs` | Install/uninstall hooks in `~/.claude/settings.json`, `~/.codex/hooks.json` or `~/.gemini/config/hooks.json` |
 | `tui.rs` | ratatui-based interactive TUI |
 | `menubar.rs` | macOS NSStatusBar/NSMenu via objc2 |
 | `window.rs` | macOS NSWindow session monitor app via objc2 (`run_app` unifies window + menubar) |
@@ -142,7 +142,27 @@ its launch. The gone-directory drop happens before the liveness check for exactl
 | `display.rs` | Shared display helpers (relative time, elapsed, session count formatting) |
 | `paths.rs` | Data directory path resolution |
 
-**Data flow**: Claude Code / Codex hooks → `cckit session hook` (stdin JSON) → `storage.rs` (sessions.json with file lock) → TUI/menubar/window reads and displays.
+**Data flow**: Claude Code / Codex / Antigravity hooks → `cckit session hook` (stdin JSON) → `storage.rs` (sessions.json with file lock) → TUI/menubar/window reads and displays.
+
+**Antigravity (`agy`) hooks**: a session only appears once it makes its first model call,
+because Antigravity has no `SessionStart` event and every installed hook fires at or after
+`PreInvocation`; launching `agy` and leaving it idle shows nothing. Beyond that, the third
+tool differs from the other two in four ways, all
+handled in `hook.rs`. Its payload is camelCase protojson (`conversationId`, `modelName`,
+`transcriptPath`, `workspacePaths`, nested `toolCall`), which `HookInput` absorbs through
+serde aliases plus `normalize`. The payload carries no event name, so the hooks pass it as
+`cckit session hook --event <NAME>`; that flag's presence also marks the Antigravity path,
+which must print `{}` on stdout because a silent hook is read as a refusal. `workspacePaths`
+is empty under `agy -p` (print mode) and must not overwrite a known cwd. Finally, **no
+`PreToolUse` hook is installed**: that event demands a permission decision
+(`allow`/`deny`/`ask`/`force_ask`) and treats no answer as `deny`, so a monitor there would
+either rubber-stamp or block every tool call. `PostToolUse` therefore names and counts the
+call itself, but only when `tool_started_at` is unset, which keeps Claude Code's two hooks
+per call from counting it twice. Prompt counting uses the invocation that follows a `Stop`,
+since Antigravity calls the model several times per turn. Hooks live in
+`~/.gemini/config/hooks.json` under the name `cckit` (`install_agy_entry` replaces that
+entry wholesale and leaves other named hooks alone); a project's `.agents/hooks.json` is
+not read by the CLI.
 
 **Subagent detection**: Sessions with `prompt_count == 0 && tool_count > 0` and a Claude model are detected as subagents. Agent names are extracted from the transcript's `agentName` field. Non-Claude models (Codex) are excluded from this heuristic.
 
@@ -154,6 +174,6 @@ its launch. The gone-directory drop happens before the liveness check for exactl
 - **Rust edition 2024**, targets macOS primarily (conditional deps for macOS-only features)
 - **Version**: embedded via `build.rs` running `git describe --always --dirty`
 - **Data directory**: `~/Library/Application Support/cckit/` (macOS) or `~/.local/share/cckit/` (Linux)
-- **Config**: reads `~/.claude.json` for project list, `~/.claude/settings.json` for Claude Code hooks, `~/.codex/hooks.json` for Codex hooks
+- **Config**: reads `~/.claude.json` for project list, `~/.claude/settings.json` for Claude Code hooks, `~/.codex/hooks.json` for Codex hooks, `~/.gemini/config/hooks.json` for Antigravity hooks
 - Config: `./config.toml`, `~/.config/cckit/config.toml`, or the platform config dir (read by `load_cckit_config`; first found wins, no merging). Keys: `disable_paths` (project paths to skip; glob or prefix, leading `~/` expands) and `skill_stale_exclude` (skills hidden from `skill stale`; every entry is a glob matched against both the skill name and the skill directory path, so `github.com/org/**` excludes a whole org, and a wildcard-free glob is an exact name match)
 - Uses `serde_json` with `preserve_order` feature for JSON field ordering

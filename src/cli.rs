@@ -292,8 +292,15 @@ survive the session ending. `session recent` and `session search` show them, and
         command: BookmarkCommands,
     },
 
-    /// Handle hook events from Claude Code (internal use)
-    Hook,
+    /// Handle hook events from Claude Code, Codex or Antigravity (internal use)
+    Hook {
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Lifecycle event name, for tools that leave it out of the payload (Antigravity)"
+        )]
+        event: Option<String>,
+    },
 
     /// Configure hooks (Claude Code by default, --codex for Codex)
     Install {
@@ -301,6 +308,11 @@ survive the session ending. `session recent` and `session search` show them, and
         force: bool,
         #[arg(long, help = "Install hooks for OpenAI Codex (~/.codex/hooks.json)")]
         codex: bool,
+        #[arg(
+            long,
+            help = "Install hooks for Antigravity (~/.gemini/config/hooks.json)"
+        )]
+        agy: bool,
     },
 
     /// Show hook configuration status
@@ -310,6 +322,8 @@ survive the session ending. `session recent` and `session search` show them, and
     Uninstall {
         #[arg(long, help = "Uninstall hooks for OpenAI Codex")]
         codex: bool,
+        #[arg(long, help = "Uninstall hooks for Antigravity")]
+        agy: bool,
     },
 
     /// Sync sessions.json with actual state (remove stale sessions)
@@ -7646,14 +7660,16 @@ pub fn run() {
                         }
                     }
                 }
-                Some(SessionCommands::Hook) => {
-                    if let Err(e) = monitor::hook::handle_hook() {
+                Some(SessionCommands::Hook { event }) => {
+                    if let Err(e) = monitor::hook::handle_hook(event.as_deref()) {
                         monitor::hook::log_error("hook", &e.to_string());
                         std::process::exit(1);
                     }
                 }
-                Some(SessionCommands::Install { force, codex }) => {
-                    let result = if codex {
+                Some(SessionCommands::Install { force, codex, agy }) => {
+                    let result = if agy {
+                        monitor::setup::run_install_agy(force)
+                    } else if codex {
                         monitor::setup::run_install_codex(force)
                     } else {
                         monitor::setup::run_install(force)
@@ -7669,8 +7685,10 @@ pub fn run() {
                         std::process::exit(1);
                     }
                 }
-                Some(SessionCommands::Uninstall { codex }) => {
-                    let result = if codex {
+                Some(SessionCommands::Uninstall { codex, agy }) => {
+                    let result = if agy {
+                        monitor::setup::run_uninstall_agy()
+                    } else if codex {
                         monitor::setup::run_uninstall_codex()
                     } else {
                         monitor::setup::run_uninstall()

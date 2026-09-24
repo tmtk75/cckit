@@ -805,3 +805,256 @@ mod tests {
         assert!(has_cckit_hook(&hooks_array));
     }
 }
+
+/// The name cckit registers its Antigravity hooks under. Antigravity merges named hook
+/// sets from every source, so a name of our own leaves other tools' hooks alone.
+const AGY_HOOK_NAME: &str = "cckit";
+
+/// The Antigravity lifecycle events cckit listens to.
+///
+/// `PreToolUse` is deliberately absent. Its contract requires the hook to answer with a
+/// permission decision (`allow` / `deny` / `ask` / `force_ask`) and treats a missing
+/// answer as a refusal, so a session monitor installed there would either rubber-stamp
+/// every tool call or block them all.
+const AGY_HOOK_EVENTS: &[&str] = &["PreInvocation", "PostInvocation", "PostToolUse", "Stop"];
+
+/// Events Antigravity matches per tool name, which must wrap their handlers in a group.
+const AGY_MATCHER_EVENTS: &[&str] = &["PreToolUse", "PostToolUse"];
+
+/// Build the `hooks.json` entry cckit registers under its own name.
+pub fn agy_hook_entry(command: &str) -> Value {
+    let mut entry = Map::new();
+    for event in AGY_HOOK_EVENTS {
+        let handler = json!({
+            "type": "command",
+            "command": format!("{command} session hook --event {event}"),
+        });
+        // Tool-matched events take a group with a matcher; the rest take handlers flat.
+        let handlers = if AGY_MATCHER_EVENTS.contains(event) {
+            json!([{ "matcher": "", "hooks": [handler] }])
+        } else {
+            json!([handler])
+        };
+        entry.insert((*event).to_string(), handlers);
+    }
+    Value::Object(entry)
+}
+
+/// Add or refresh cckit's entry in a `hooks.json` document. Returns whether it changed.
+///
+/// The entry is replaced wholesale rather than merged: a stale one names an old binary
+/// path or an event set cckit no longer listens to, and merging would keep both.
+pub fn install_agy_entry(root: &mut Value, command: &str) -> bool {
+    let entry = agy_hook_entry(command);
+    if !root.is_object() {
+        *root = json!({});
+    }
+    let map = root.as_object_mut().expect("just made it an object");
+    if map.get(AGY_HOOK_NAME) == Some(&entry) {
+        return false;
+    }
+    map.insert(AGY_HOOK_NAME.to_string(), entry);
+    true
+}
+
+/// Drop cckit's entry from a `hooks.json` document. Returns whether anything went.
+pub fn remove_agy_entry(root: &mut Value) -> bool {
+    root.as_object_mut()
+        .is_some_and(|map| map.remove(AGY_HOOK_NAME).is_some())
+}
+
+/// Antigravity's machine-local customization root. Workspace-level `.agents/hooks.json`
+/// files are not read by the CLI, so this is the only place a global hook can live.
+fn get_agy_hooks_path() -> PathBuf {
+    let home = dirs::home_dir().expect("Could not find home directory");
+    home.join(".gemini").join("config").join("hooks.json")
+}
+
+/// Read `hooks.json`, or start an empty document when there is none.
+fn read_agy_hooks(path: &Path) -> io::Result<Value> {
+    if !path.exists() {
+        return Ok(json!({}));
+    }
+    let content = fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    parse_settings(&content)
+}
+
+pub fn run_install_agy(force: bool) -> io::Result<()> {
+    let path = get_agy_hooks_path();
+    let cckit_cmd = get_cckit_command();
+
+    println!("{}", "cckit session install --agy".bold());
+    println!();
+
+    let existed = path.exists();
+    let mut root = read_agy_hooks(&path)?;
+    let changed = install_agy_entry(&mut root, &cckit_cmd);
+
+    if !changed && !force {
+        println!("{}", "All cckit hooks are already configured.".green());
+    } else {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_json_file(&path, &root)?;
+        if existed {
+            println!("{}:", "Adding".cyan());
+        } else {
+            println!("{}", "No ~/.gemini/config/hooks.json found.".yellow());
+            println!("Creating new hooks.json...");
+        }
+        for event in AGY_HOOK_EVENTS {
+            println!(
+                "  {} {} session hook --event {}",
+                "+".green(),
+                cckit_cmd,
+                event
+            );
+        }
+        println!();
+        println!(
+            "{} Wrote {} hook(s) under \"{}\"",
+            "✓".green(),
+            AGY_HOOK_EVENTS.len(),
+            AGY_HOOK_NAME
+        );
+    }
+
+    println!();
+    println!("Hooks file: {}", path.display().to_string().dimmed());
+    println!();
+    println!(
+        "{}",
+        "No PreToolUse hook is installed: that event requires a permission decision,".dimmed()
+    );
+    println!(
+        "{}",
+        "which a session monitor must not answer. Tool calls are recorded after they run.".dimmed()
+    );
+
+    Ok(())
+}
+
+pub fn run_uninstall_agy() -> io::Result<()> {
+    let path = get_agy_hooks_path();
+
+    println!("{}", "cckit session uninstall --agy".bold());
+    println!();
+
+    if !path.exists() {
+        println!("{}", "No ~/.gemini/config/hooks.json found.".yellow());
+        return Ok(());
+    }
+
+    let mut root = read_agy_hooks(&path)?;
+    if !remove_agy_entry(&mut root) {
+        println!("{}", "No cckit hooks found.".yellow());
+        return Ok(());
+    }
+
+    write_json_file(&path, &root)?;
+    println!(
+        "{} Removed the \"{}\" hooks from {}",
+        "✓".green(),
+        AGY_HOOK_NAME,
+        path.display().to_string().dimmed()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod agy_hooks_tests {
+    use super::*;
+
+    fn installed() -> Value {
+        let mut root = json!({});
+        install_agy_entry(&mut root, "~/bin/cckit");
+        root
+    }
+
+    #[test]
+    fn the_entry_covers_every_event_cckit_listens_to() {
+        let root = installed();
+        let entry = &root["cckit"];
+        for event in AGY_HOOK_EVENTS {
+            assert!(entry.get(event).is_some(), "{event} missing from {entry}");
+        }
+    }
+
+    #[test]
+    fn no_pre_tool_use_hook_is_ever_written() {
+        // Installing one would force cckit to answer Antigravity's permission prompt.
+        let root = installed();
+        assert!(root["cckit"].get("PreToolUse").is_none(), "got: {root}");
+    }
+
+    #[test]
+    fn a_tool_matched_event_wraps_its_handlers_in_a_matcher_group() {
+        let root = installed();
+        let post = &root["cckit"]["PostToolUse"][0];
+        assert_eq!(post["matcher"], "");
+        assert_eq!(
+            post["hooks"][0]["command"],
+            "~/bin/cckit session hook --event PostToolUse"
+        );
+    }
+
+    #[test]
+    fn an_untargeted_event_lists_its_handlers_directly() {
+        let root = installed();
+        let pre = &root["cckit"]["PreInvocation"][0];
+        assert_eq!(pre["type"], "command");
+        assert_eq!(
+            pre["command"],
+            "~/bin/cckit session hook --event PreInvocation"
+        );
+    }
+
+    #[test]
+    fn installing_leaves_another_tools_hooks_untouched() {
+        let mut root = json!({"lint-checker": {"PostToolUse": [{"matcher": "run_command"}]}});
+        install_agy_entry(&mut root, "cckit");
+        assert_eq!(
+            root["lint-checker"]["PostToolUse"][0]["matcher"],
+            "run_command"
+        );
+        assert!(root.get("cckit").is_some());
+    }
+
+    #[test]
+    fn installing_twice_changes_nothing_the_second_time() {
+        let mut root = json!({});
+        assert!(install_agy_entry(&mut root, "cckit"));
+        let after_first = root.clone();
+        assert!(!install_agy_entry(&mut root, "cckit"));
+        assert_eq!(root, after_first);
+    }
+
+    #[test]
+    fn an_outdated_entry_is_replaced_rather_than_merged() {
+        let mut root = json!({"cckit": {"Stop": [{"command": "old-path session hook"}]}});
+        assert!(install_agy_entry(&mut root, "new-path"));
+        assert_eq!(
+            root["cckit"]["Stop"][0]["command"],
+            "new-path session hook --event Stop"
+        );
+    }
+
+    #[test]
+    fn removing_takes_only_cckits_entry() {
+        let mut root = json!({"lint-checker": {"Stop": []}});
+        install_agy_entry(&mut root, "cckit");
+        assert!(remove_agy_entry(&mut root));
+        assert!(root.get("cckit").is_none());
+        assert!(root.get("lint-checker").is_some());
+    }
+
+    #[test]
+    fn removing_reports_when_there_was_nothing_to_remove() {
+        let mut root = json!({"lint-checker": {}});
+        assert!(!remove_agy_entry(&mut root));
+    }
+}

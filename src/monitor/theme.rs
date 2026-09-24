@@ -124,6 +124,11 @@ pub fn model_short_label(model: &str) -> Option<String> {
         return Some(format!("GPT-{v}"));
     }
 
+    // And for Gemini ids: "gemini-<version>[-<flavour>][-<effort>]".
+    if let Some(label) = gemini_label(m) {
+        return Some(format!("Gemini {label}"));
+    }
+
     let label = if m.contains("opus-4-8") {
         "Opus 4.8"
     } else if m.contains("opus-4-7") {
@@ -156,18 +161,44 @@ pub fn model_short_label(model: &str) -> Option<String> {
         "Codex mini"
     } else if m.starts_with("codex-") {
         "Codex"
-    } else if m.contains("gemini-2.5") {
-        "Gemini 2.5"
-    } else if m.contains("gemini-2.0") {
-        "Gemini 2.0"
-    } else if m.contains("gemini-1.5") {
-        "Gemini 1.5"
     } else if m.contains("gemini") {
         "Gemini"
     } else {
         return None;
     };
     Some(label.to_string())
+}
+
+/// Families Gemini ids name after the version, e.g. "gemini-3.8-flash-high".
+const GEMINI_FLAVOURS: [(&str, &str); 4] = [
+    ("flash", "Flash"),
+    ("pro", "Pro"),
+    ("ultra", "Ultra"),
+    ("nano", "Nano"),
+];
+
+/// Parse "gemini-<version>[-<flavour>][-<effort>]" into "3.8 Flash".
+///
+/// Like the Claude and GPT parsers, this reads the version instead of enumerating
+/// releases, so a generation newer than this code still shows its number. The trailing
+/// effort level (`-high`, `-low`) that agy appends is a setting, not part of the model.
+fn gemini_label(m: &str) -> Option<String> {
+    let rest = m.strip_prefix("gemini-")?;
+    let mut parts = rest.split('-');
+    let version = parts.next()?;
+    if !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let flavour = parts.next().and_then(|name| {
+        GEMINI_FLAVOURS
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, display)| *display)
+    });
+    Some(match flavour {
+        Some(flavour) => format!("{version} {flavour}"),
+        None => version.to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -604,15 +635,15 @@ mod tests {
     fn test_model_short_label_gemini() {
         assert_eq!(
             model_short_label("gemini-2.5-pro"),
-            Some("Gemini 2.5".to_string())
+            Some("Gemini 2.5 Pro".to_string())
         );
         assert_eq!(
             model_short_label("gemini-2.0-flash"),
-            Some("Gemini 2.0".to_string())
+            Some("Gemini 2.0 Flash".to_string())
         );
         assert_eq!(
             model_short_label("gemini-1.5-pro"),
-            Some("Gemini 1.5".to_string())
+            Some("Gemini 1.5 Pro".to_string())
         );
         assert_eq!(model_short_label("gemini-nano"), Some("Gemini".to_string()));
     }
@@ -858,5 +889,54 @@ mod tests {
         assert!(mid > INACTIVE_MIN_ALPHA && mid < 1.0);
         // Should be 1.0 - 0.5 * 0.45 = 0.775
         assert!((mid - 0.775).abs() < 1e-10);
+    }
+}
+
+#[cfg(test)]
+mod gemini_label_tests {
+    use super::*;
+
+    #[test]
+    fn a_generation_and_flavour_are_both_shown() {
+        assert_eq!(
+            model_short_label("gemini-3.8-flash-high"),
+            Some("Gemini 3.8 Flash".to_string())
+        );
+        assert_eq!(
+            model_short_label("gemini-2.5-pro"),
+            Some("Gemini 2.5 Pro".to_string())
+        );
+    }
+
+    #[test]
+    fn the_reasoning_effort_suffix_is_dropped() {
+        // agy appends the effort level to the id; it is a setting, not a model.
+        assert_eq!(
+            model_short_label("gemini-3.8-pro-low"),
+            Some("Gemini 3.8 Pro".to_string())
+        );
+    }
+
+    #[test]
+    fn a_generation_without_a_flavour_shows_just_the_generation() {
+        assert_eq!(
+            model_short_label("gemini-3.8"),
+            Some("Gemini 3.8".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unversioned_id_falls_back_to_the_bare_family() {
+        assert_eq!(model_short_label("gemini-nano"), Some("Gemini".to_string()));
+    }
+
+    #[test]
+    fn a_generation_this_code_has_never_heard_of_still_shows_its_version() {
+        // The point of parsing rather than enumerating: a model released after this
+        // code was written must not degrade to a bare "Gemini".
+        assert_eq!(
+            model_short_label("gemini-9.1-flash"),
+            Some("Gemini 9.1 Flash".to_string())
+        );
     }
 }

@@ -115,72 +115,227 @@ pub fn read_context_usage(transcript_path: &str) -> ContextUsage {
     usage
 }
 
+/// The tool call Antigravity nests instead of sending flat `tool_name` /
+/// `tool_input` fields.
+#[derive(Debug, Deserialize)]
+pub struct ToolCall {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub args: Option<serde_json::Value>,
+}
+
+/// One hook payload, in either of the two shapes cckit is sent.
+///
+/// Claude Code and Codex send snake_case with the event name inside the payload.
+/// Antigravity (`agy`) sends camelCase (protojson), nests the tool call, carries the
+/// working directory as a list, and leaves the event name out entirely, so it is passed
+/// on the command line instead. `normalize` folds the second shape onto the first.
 #[derive(Debug, Deserialize)]
 pub struct HookInput {
+    #[serde(alias = "conversationId")]
     pub session_id: String,
+    /// Absent in Antigravity payloads; taken from `workspace_paths` instead.
+    #[serde(default)]
     pub cwd: String,
+    /// Absent in Antigravity payloads; supplied by `cckit session hook --event`.
+    #[serde(default)]
     pub hook_event_name: String,
     #[serde(default)]
     pub tool_name: Option<String>,
     #[serde(default)]
     pub tool_input: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, alias = "transcriptPath")]
     pub transcript_path: Option<String>,
     /// Full model ID, e.g. "claude-opus-5[1m]". Always present in Codex hooks
     /// and sent by Claude Code too. Unlike the transcript's `message.model`,
     /// this keeps the "[1m]" suffix, so it is the source of truth for the
     /// context window size.
-    #[serde(default)]
+    #[serde(default, alias = "modelName")]
     pub model: Option<String>,
+    /// Antigravity's working directories. Empty in print mode (`agy -p`), which is
+    /// why an empty list must not overwrite anything.
+    #[serde(default, alias = "workspacePaths")]
+    pub workspace_paths: Option<Vec<String>>,
+    #[serde(default, alias = "toolCall")]
+    pub tool_call: Option<ToolCall>,
 }
 
-pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
+impl HookInput {
+    /// Fold an Antigravity payload onto the fields the event handling reads.
+    /// `event` is the name passed on the command line, absent for the other tools.
+    pub fn normalize(&mut self, event: Option<&str>) {
+        if let Some(event) = event {
+            self.hook_event_name = event.to_string();
+        }
+        if self.cwd.is_empty()
+            && let Some(first) = self
+                .workspace_paths
+                .as_ref()
+                .and_then(|paths| paths.first())
+                .filter(|p| !p.is_empty())
+        {
+            self.cwd = first.clone();
+        }
+        if let Some(call) = self.tool_call.take() {
+            if self.tool_name.is_none() {
+                self.tool_name = call.name;
+            }
+            if self.tool_input.is_none() {
+                self.tool_input = call.args;
+            }
+        }
+    }
+}
+
+/// Read one hook payload from stdin and apply it.
+///
+/// `event` is the name given on the command line. Antigravity leaves the event out of
+/// the payload, so its hooks pass it here; Claude Code and Codex pass `None` and the
+/// name is read from the payload. Its presence also marks the Antigravity path, which
+/// must answer on stdout: a hook that prints nothing is treated as a refusal.
+pub fn handle_hook(event: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
 
-    let hook_input: HookInput = match serde_json::from_str(&input) {
+    let mut hook_input: HookInput = match serde_json::from_str(&input) {
         Ok(v) => v,
         Err(e) => {
             log_error("hook", &format!("{} input={}", e, input));
             return Err(e.into());
         }
     };
-    let event = hook_input.hook_event_name.as_str();
+    hook_input.normalize(event);
 
     let storage = Storage::new();
     let tty = get_current_tty();
     let pid = get_parent_pid();
     let key = format!("{}:{}", hook_input.session_id, tty);
 
-    storage.with_lock(|store| {
-        // Remove old sessions with the same TTY but different session_id
-        store.sessions.retain(|k, s| s.tty != tty || k == &key);
+    storage.with_lock(|store| apply_event(store, key.clone(), &hook_input, tty.clone(), pid))?;
 
-        // Update transcript_path on every event if provided
-        let transcript = hook_input.transcript_path.clone();
+    // Antigravity reads the hook's stdout as its verdict. An empty object is the
+    // "nothing to say" answer: it neither grants nor denies a tool, and it lets a Stop
+    // proceed, which is exactly what a monitor should do.
+    if event.is_some() {
+        println!("{{}}");
+    }
 
-        let now = Utc::now();
+    Ok(())
+}
 
-        match event {
-            "SessionStart" => {
+/// Apply one hook event to the session store.
+///
+/// Split out of `handle_hook` so the state transitions can be tested without a
+/// terminal, a process tree or a real store on disk.
+pub fn apply_event(
+    store: &mut super::session::SessionStore,
+    key: String,
+    hook_input: &HookInput,
+    tty: String,
+    pid: Option<u32>,
+) {
+    let event = hook_input.hook_event_name.as_str();
+    // Remove old sessions with the same TTY but different session_id
+    store.sessions.retain(|k, s| s.tty != tty || k == &key);
+
+    // Update transcript_path on every event if provided
+    let transcript = hook_input.transcript_path.clone();
+
+    let now = Utc::now();
+
+    match event {
+        "SessionStart" => {
+            store.sessions.insert(
+                key.clone(),
+                Session {
+                    session_id: hook_input.session_id.clone(),
+                    cwd: hook_input.cwd.clone(),
+                    tty: tty.clone(),
+                    status: SessionStatus::WaitingInput,
+                    created_at: now,
+                    updated_at: now,
+                    last_tool: None,
+                    last_tool_input: None,
+                    pid,
+                    prompt_count: 0,
+                    compact_count: 0,
+                    transcript_path: transcript.clone(),
+                    tool_started_at: None,
+                    last_tool_duration_ms: None,
+                    tool_count: 0,
+                    context_used_tokens: None,
+                    context_max_tokens: None,
+                    model: None,
+                    subagent_name: None,
+                },
+            );
+        }
+
+        "UserPromptSubmit" => {
+            let session = store
+                .sessions
+                .entry(key.clone())
+                .or_insert_with(|| Session {
+                    session_id: hook_input.session_id.clone(),
+                    cwd: hook_input.cwd.clone(),
+                    tty: tty.clone(),
+                    status: SessionStatus::Running,
+                    created_at: now,
+                    updated_at: now,
+                    last_tool: None,
+                    last_tool_input: None,
+                    pid,
+                    prompt_count: 0,
+                    compact_count: 0,
+                    transcript_path: transcript.clone(),
+                    tool_started_at: None,
+                    last_tool_duration_ms: None,
+                    tool_count: 0,
+                    context_used_tokens: None,
+                    context_max_tokens: None,
+                    model: None,
+                    subagent_name: None,
+                });
+            session.status = SessionStatus::Running;
+            session.updated_at = now;
+            session.cwd = hook_input.cwd.clone();
+            session.prompt_count += 1;
+            if session.pid.is_none() {
+                session.pid = pid;
+            }
+        }
+
+        "PreToolUse" => {
+            if let Some(session) = store.sessions.get_mut(&key) {
+                session.status = SessionStatus::AwaitingApproval;
+                session.last_tool = hook_input.tool_name.clone();
+                session.last_tool_input = extract_tool_summary(hook_input);
+                session.updated_at = now;
+                session.tool_started_at = Some(now);
+                session.tool_count += 1;
+                if session.pid.is_none() {
+                    session.pid = pid;
+                }
+            } else {
                 store.sessions.insert(
                     key.clone(),
                     Session {
                         session_id: hook_input.session_id.clone(),
                         cwd: hook_input.cwd.clone(),
                         tty: tty.clone(),
-                        status: SessionStatus::WaitingInput,
+                        status: SessionStatus::AwaitingApproval,
                         created_at: now,
                         updated_at: now,
-                        last_tool: None,
-                        last_tool_input: None,
+                        last_tool: hook_input.tool_name.clone(),
+                        last_tool_input: extract_tool_summary(hook_input),
                         pid,
                         prompt_count: 0,
                         compact_count: 0,
                         transcript_path: transcript.clone(),
-                        tool_started_at: None,
+                        tool_started_at: Some(now),
                         last_tool_duration_ms: None,
-                        tool_count: 0,
+                        tool_count: 1,
                         context_used_tokens: None,
                         context_max_tokens: None,
                         model: None,
@@ -188,165 +343,148 @@ pub fn handle_hook() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 );
             }
+        }
 
-            "UserPromptSubmit" => {
-                let session = store
-                    .sessions
-                    .entry(key.clone())
-                    .or_insert_with(|| Session {
-                        session_id: hook_input.session_id.clone(),
-                        cwd: hook_input.cwd.clone(),
-                        tty: tty.clone(),
-                        status: SessionStatus::Running,
-                        created_at: now,
-                        updated_at: now,
-                        last_tool: None,
-                        last_tool_input: None,
-                        pid,
-                        prompt_count: 0,
-                        compact_count: 0,
-                        transcript_path: transcript.clone(),
-                        tool_started_at: None,
-                        last_tool_duration_ms: None,
-                        tool_count: 0,
-                        context_used_tokens: None,
-                        context_max_tokens: None,
-                        model: None,
-                        subagent_name: None,
-                    });
+        // Antigravity calls the model repeatedly within one turn, so only the
+        // invocation that follows a Stop is a prompt the user actually typed.
+        // cckit installs no PreToolUse hook there: that event's contract forces a
+        // permission decision, and a monitor must not answer it.
+        "PreInvocation" => {
+            let session = store
+                .sessions
+                .entry(key.clone())
+                .or_insert_with(|| Session {
+                    session_id: hook_input.session_id.clone(),
+                    cwd: hook_input.cwd.clone(),
+                    tty: tty.clone(),
+                    status: SessionStatus::WaitingInput,
+                    created_at: now,
+                    updated_at: now,
+                    last_tool: None,
+                    last_tool_input: None,
+                    pid,
+                    prompt_count: 0,
+                    compact_count: 0,
+                    transcript_path: transcript.clone(),
+                    tool_started_at: None,
+                    last_tool_duration_ms: None,
+                    tool_count: 0,
+                    context_used_tokens: None,
+                    context_max_tokens: None,
+                    model: None,
+                    subagent_name: None,
+                });
+            if session.status == SessionStatus::WaitingInput {
+                session.prompt_count += 1;
+            }
+            session.status = SessionStatus::Running;
+            session.updated_at = now;
+            if !hook_input.cwd.is_empty() {
+                session.cwd = hook_input.cwd.clone();
+            }
+            if session.pid.is_none() {
+                session.pid = pid;
+            }
+        }
+
+        "PostInvocation" => {
+            if let Some(session) = store.sessions.get_mut(&key) {
                 session.status = SessionStatus::Running;
                 session.updated_at = now;
-                session.cwd = hook_input.cwd.clone();
-                session.prompt_count += 1;
-                if session.pid.is_none() {
-                    session.pid = pid;
-                }
             }
+        }
 
-            "PreToolUse" => {
-                if let Some(session) = store.sessions.get_mut(&key) {
-                    session.status = SessionStatus::AwaitingApproval;
-                    session.last_tool = hook_input.tool_name.clone();
-                    session.last_tool_input = extract_tool_summary(&hook_input);
-                    session.updated_at = now;
-                    session.tool_started_at = Some(now);
-                    session.tool_count += 1;
-                    if session.pid.is_none() {
-                        session.pid = pid;
-                    }
-                } else {
-                    store.sessions.insert(
-                        key.clone(),
-                        Session {
-                            session_id: hook_input.session_id.clone(),
-                            cwd: hook_input.cwd.clone(),
-                            tty: tty.clone(),
-                            status: SessionStatus::AwaitingApproval,
-                            created_at: now,
-                            updated_at: now,
-                            last_tool: hook_input.tool_name.clone(),
-                            last_tool_input: extract_tool_summary(&hook_input),
-                            pid,
-                            prompt_count: 0,
-                            compact_count: 0,
-                            transcript_path: transcript.clone(),
-                            tool_started_at: Some(now),
-                            last_tool_duration_ms: None,
-                            tool_count: 1,
-                            context_used_tokens: None,
-                            context_max_tokens: None,
-                            model: None,
-                            subagent_name: None,
-                        },
-                    );
-                }
-            }
-
-            "PostToolUse" => {
-                if let Some(session) = store.sessions.get_mut(&key) {
-                    session.status = SessionStatus::Running;
-                    session.updated_at = now;
-                    if let Some(started) = session.tool_started_at.take() {
+        "PostToolUse" => {
+            if let Some(session) = store.sessions.get_mut(&key) {
+                session.status = SessionStatus::Running;
+                session.updated_at = now;
+                match session.tool_started_at.take() {
+                    Some(started) => {
                         session.last_tool_duration_ms =
                             Some(now.signed_duration_since(started).num_milliseconds());
                     }
-                }
-            }
-
-            "Stop" | "SubagentStop" => {
-                if let Some(session) = store.sessions.get_mut(&key) {
-                    session.status = SessionStatus::WaitingInput;
-                    session.updated_at = now;
-                    // Update context usage from transcript
-                    if let Some(ref tp) = session.transcript_path {
-                        let ctx = read_context_usage(tp);
-                        if ctx.used_tokens.is_some() {
-                            let hook_model =
-                                hook_input.model.clone().or_else(|| session.model.clone());
-                            let max =
-                                resolve_max_tokens(hook_model.as_deref(), ctx.model.as_deref());
-                            session.context_used_tokens = ctx.used_tokens;
-                            session.context_max_tokens = max;
-                            // Never downgrade a hook-provided ID: it carries "[1m]".
-                            if !session.model.as_deref().is_some_and(|m| m.contains("[1m]")) {
-                                session.model = ctx.model;
-                            }
+                    // No PreToolUse ran, so this hook is the only sighting of the
+                    // call and has to both name it and count it.
+                    None => {
+                        if hook_input.tool_name.is_some() {
+                            session.last_tool = hook_input.tool_name.clone();
+                            session.last_tool_input = extract_tool_summary(hook_input);
+                            session.tool_count += 1;
                         }
                     }
                 }
             }
+        }
 
-            "Notification" => {
-                if let Some(session) = store.sessions.get_mut(&key) {
-                    session.updated_at = now;
+        "Stop" | "SubagentStop" => {
+            if let Some(session) = store.sessions.get_mut(&key) {
+                session.status = SessionStatus::WaitingInput;
+                session.updated_at = now;
+                // Update context usage from transcript
+                if let Some(ref tp) = session.transcript_path {
+                    let ctx = read_context_usage(tp);
+                    if ctx.used_tokens.is_some() {
+                        let hook_model = hook_input.model.clone().or_else(|| session.model.clone());
+                        let max = resolve_max_tokens(hook_model.as_deref(), ctx.model.as_deref());
+                        session.context_used_tokens = ctx.used_tokens;
+                        session.context_max_tokens = max;
+                        // Never downgrade a hook-provided ID: it carries "[1m]".
+                        if !session.model.as_deref().is_some_and(|m| m.contains("[1m]")) {
+                            session.model = ctx.model;
+                        }
+                    }
                 }
             }
+        }
 
-            "PreCompact" => {
-                if let Some(session) = store.sessions.get_mut(&key) {
-                    session.compact_count += 1;
-                    session.updated_at = now;
-                }
-            }
-
-            "SessionEnd" => {
-                store.sessions.remove(&key);
-            }
-
-            _ => {
-                // Ignore unknown events
+        "Notification" => {
+            if let Some(session) = store.sessions.get_mut(&key) {
+                session.updated_at = now;
             }
         }
 
-        // Update transcript_path if provided (may arrive on any event)
-        if let Some(ref tp) = transcript
-            && let Some(session) = store.sessions.get_mut(&key)
-            && session.transcript_path.is_none()
-        {
-            session.transcript_path = Some(tp.clone());
+        "PreCompact" => {
+            if let Some(session) = store.sessions.get_mut(&key) {
+                session.compact_count += 1;
+                session.updated_at = now;
+            }
         }
 
-        // Set model from hook input whenever provided. This is the authoritative
-        // ID (it keeps the "[1m]" suffix), so it overrides any transcript value.
-        if let Some(ref model) = hook_input.model
-            && let Some(session) = store.sessions.get_mut(&key)
-        {
-            session.model = Some(model.clone());
+        "SessionEnd" => {
+            store.sessions.remove(&key);
         }
 
-        // Extract subagent name if this looks like a subagent and name is not yet set
-        if let Some(session) = store.sessions.get_mut(&key)
-            && session.subagent_name.is_none()
-            && session.is_subagent()
-            && let Some(ref tp) = session.transcript_path
-        {
-            session.subagent_name = extract_subagent_name(tp);
+        _ => {
+            // Ignore unknown events
         }
+    }
 
-        store.updated_at = Utc::now();
-    })?;
+    // Update transcript_path if provided (may arrive on any event)
+    if let Some(ref tp) = transcript
+        && let Some(session) = store.sessions.get_mut(&key)
+        && session.transcript_path.is_none()
+    {
+        session.transcript_path = Some(tp.clone());
+    }
 
-    Ok(())
+    // Set model from hook input whenever provided. This is the authoritative
+    // ID (it keeps the "[1m]" suffix), so it overrides any transcript value.
+    if let Some(ref model) = hook_input.model
+        && let Some(session) = store.sessions.get_mut(&key)
+    {
+        session.model = Some(model.clone());
+    }
+
+    // Extract subagent name if this looks like a subagent and name is not yet set
+    if let Some(session) = store.sessions.get_mut(&key)
+        && session.subagent_name.is_none()
+        && session.is_subagent()
+        && let Some(ref tp) = session.transcript_path
+    {
+        session.subagent_name = extract_subagent_name(tp);
+    }
+
+    store.updated_at = Utc::now();
 }
 
 pub fn log_error(event: &str, error: &str) {
@@ -534,6 +672,8 @@ mod tests {
             tool_input: Some(json!({"command": "ls -la"})),
             transcript_path: None,
             model: None,
+            workspace_paths: None,
+            tool_call: None,
         };
         assert_eq!(
             extract_tool_summary(&hook_input),
@@ -551,6 +691,8 @@ mod tests {
             tool_input: Some(json!({"file_path": "/path/to/file.rs"})),
             transcript_path: None,
             model: None,
+            workspace_paths: None,
+            tool_call: None,
         };
         assert_eq!(
             extract_tool_summary(&hook_input),
@@ -568,6 +710,8 @@ mod tests {
             tool_input: Some(json!({"file_path": "/path/to/file.rs"})),
             transcript_path: None,
             model: None,
+            workspace_paths: None,
+            tool_call: None,
         };
         assert_eq!(
             extract_tool_summary(&hook_input),
@@ -585,6 +729,8 @@ mod tests {
             tool_input: Some(json!({"pattern": "**/*.rs"})),
             transcript_path: None,
             model: None,
+            workspace_paths: None,
+            tool_call: None,
         };
         assert_eq!(
             extract_tool_summary(&hook_input),
@@ -602,6 +748,8 @@ mod tests {
             tool_input: Some(json!({"description": "Explore codebase"})),
             transcript_path: None,
             model: None,
+            workspace_paths: None,
+            tool_call: None,
         };
         assert_eq!(
             extract_tool_summary(&hook_input),
@@ -619,6 +767,8 @@ mod tests {
             tool_input: Some(json!({"foo": "bar"})),
             transcript_path: None,
             model: None,
+            workspace_paths: None,
+            tool_call: None,
         };
         assert_eq!(extract_tool_summary(&hook_input), None);
     }
@@ -633,6 +783,8 @@ mod tests {
             tool_input: None,
             transcript_path: None,
             model: None,
+            workspace_paths: None,
+            tool_call: None,
         };
         assert_eq!(extract_tool_summary(&hook_input), None);
     }
@@ -749,5 +901,244 @@ mod tests {
         );
         assert_eq!(resolve_max_tokens(Some("gpt-5.6-sol"), None), None);
         assert_eq!(resolve_max_tokens(None, None), None);
+    }
+}
+
+#[cfg(test)]
+mod agy_tests {
+    use super::*;
+
+    /// A real `PreInvocation` payload, captured from agy 1.2.7.
+    const PRE_INVOCATION: &str = r#"{
+      "artifactDirectoryPath": "/Users/t/.gemini/antigravity-cli/brain/9a0dc49d",
+      "conversationId": "9a0dc49d-2c3b-4b3c-8776-1bb1b4dee7f8",
+      "initialNumSteps": 1,
+      "invocationNum": 3,
+      "modelName": "gemini-3.8-flash-high",
+      "transcriptPath": "/Users/t/.gemini/antigravity-cli/brain/9a0dc49d/logs/transcript_full.jsonl",
+      "workspacePaths": ["/tmp/agyprobe"]
+    }"#;
+
+    /// A real `PreToolUse` payload, captured from agy 1.2.7. cckit does not install a
+    /// PreToolUse hook, but PostToolUse carries the same nested `toolCall`.
+    const TOOL_USE: &str = r#"{
+      "conversationId": "9a0dc49d-2c3b-4b3c-8776-1bb1b4dee7f8",
+      "modelName": "gemini-3.8-flash-high",
+      "stepIdx": 6,
+      "toolCall": {
+        "args": {"AbsolutePath": "/tmp/agyprobe/hello.txt", "toolSummary": "Check file"},
+        "name": "view_file"
+      },
+      "transcriptPath": "/Users/t/.gemini/antigravity-cli/brain/9a0dc49d/logs/transcript_full.jsonl",
+      "workspacePaths": ["/tmp/agyprobe"]
+    }"#;
+
+    /// Print mode (`agy -p`) sends the same payload with no workspace at all.
+    const NO_WORKSPACE: &str = r#"{
+      "conversationId": "10001348-f8db-47ea-b214-5bba48b31ca7",
+      "modelName": "gemini-3.8-flash-high",
+      "workspacePaths": []
+    }"#;
+
+    fn parse(json: &str, event: Option<&str>) -> HookInput {
+        let mut input: HookInput = serde_json::from_str(json).expect("payload parses");
+        input.normalize(event);
+        input
+    }
+
+    #[test]
+    fn the_conversation_id_is_read_as_the_session_id() {
+        let input = parse(PRE_INVOCATION, Some("PreInvocation"));
+        assert_eq!(input.session_id, "9a0dc49d-2c3b-4b3c-8776-1bb1b4dee7f8");
+    }
+
+    #[test]
+    fn the_event_name_comes_from_the_command_line() {
+        let input = parse(PRE_INVOCATION, Some("PreInvocation"));
+        assert_eq!(input.hook_event_name, "PreInvocation");
+    }
+
+    #[test]
+    fn the_first_workspace_path_becomes_the_cwd() {
+        let input = parse(PRE_INVOCATION, Some("PreInvocation"));
+        assert_eq!(input.cwd, "/tmp/agyprobe");
+    }
+
+    #[test]
+    fn an_empty_workspace_list_leaves_the_cwd_empty_rather_than_guessing() {
+        let input = parse(NO_WORKSPACE, Some("Stop"));
+        assert_eq!(input.cwd, "");
+    }
+
+    #[test]
+    fn the_model_name_is_read_as_the_model() {
+        let input = parse(PRE_INVOCATION, Some("PreInvocation"));
+        assert_eq!(input.model.as_deref(), Some("gemini-3.8-flash-high"));
+    }
+
+    #[test]
+    fn the_transcript_path_is_read_from_its_camel_case_name() {
+        let input = parse(PRE_INVOCATION, Some("PreInvocation"));
+        assert!(
+            input
+                .transcript_path
+                .as_deref()
+                .is_some_and(|p| p.ends_with("transcript_full.jsonl")),
+            "got: {:?}",
+            input.transcript_path
+        );
+    }
+
+    #[test]
+    fn the_nested_tool_call_is_flattened_onto_tool_name_and_input() {
+        let input = parse(TOOL_USE, Some("PostToolUse"));
+        assert_eq!(input.tool_name.as_deref(), Some("view_file"));
+        assert_eq!(
+            input
+                .tool_input
+                .as_ref()
+                .and_then(|v| v["AbsolutePath"].as_str()),
+            Some("/tmp/agyprobe/hello.txt")
+        );
+    }
+
+    #[test]
+    fn a_claude_code_payload_is_left_alone() {
+        let json = r#"{
+          "session_id": "abc",
+          "cwd": "/home/me/proj",
+          "hook_event_name": "PreToolUse",
+          "tool_name": "Bash",
+          "model": "claude-opus-5[1m]"
+        }"#;
+        // No --event is passed for Claude Code, so the payload's own name must stand.
+        let input = parse(json, None);
+        assert_eq!(input.hook_event_name, "PreToolUse");
+        assert_eq!(input.cwd, "/home/me/proj");
+        assert_eq!(input.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(input.model.as_deref(), Some("claude-opus-5[1m]"));
+    }
+}
+
+#[cfg(test)]
+mod agy_event_tests {
+    use super::*;
+    use crate::monitor::session::{SessionStatus, SessionStore};
+
+    const TTY: &str = "/dev/ttys001";
+    const CONV: &str = "9a0dc49d-2c3b-4b3c-8776-1bb1b4dee7f8";
+
+    fn key() -> String {
+        format!("{CONV}:{TTY}")
+    }
+
+    fn input(event: &str, json: &str) -> HookInput {
+        let mut input: HookInput = serde_json::from_str(json).expect("payload parses");
+        input.normalize(Some(event));
+        input
+    }
+
+    fn agy(event: &str) -> HookInput {
+        input(
+            event,
+            &format!(
+                r#"{{"conversationId": "{CONV}", "modelName": "gemini-3.8-flash-high",
+                    "workspacePaths": ["/tmp/proj"],
+                    "transcriptPath": "/tmp/brain/transcript_full.jsonl"}}"#
+            ),
+        )
+    }
+
+    fn apply(store: &mut SessionStore, input: &HookInput) {
+        apply_event(store, key(), input, TTY.to_string(), Some(42));
+    }
+
+    #[test]
+    fn pre_invocation_starts_a_session_that_was_not_there() {
+        let mut store = SessionStore::default();
+        apply(&mut store, &agy("PreInvocation"));
+
+        let session = store.sessions.get(&key()).expect("session created");
+        assert_eq!(session.status, SessionStatus::Running);
+        assert_eq!(session.cwd, "/tmp/proj");
+        assert_eq!(session.model.as_deref(), Some("gemini-3.8-flash-high"));
+        assert_eq!(session.prompt_count, 1);
+    }
+
+    #[test]
+    fn a_pre_invocation_after_a_stop_counts_as_a_new_prompt() {
+        let mut store = SessionStore::default();
+        apply(&mut store, &agy("PreInvocation"));
+        apply(&mut store, &agy("Stop"));
+        apply(&mut store, &agy("PreInvocation"));
+
+        assert_eq!(store.sessions[&key()].prompt_count, 2);
+    }
+
+    #[test]
+    fn a_second_invocation_within_one_turn_is_not_a_new_prompt() {
+        // agy calls the model repeatedly inside a single turn, so only the invocation
+        // that follows a Stop is one the user actually typed.
+        let mut store = SessionStore::default();
+        apply(&mut store, &agy("PreInvocation"));
+        apply(&mut store, &agy("PostInvocation"));
+        apply(&mut store, &agy("PreInvocation"));
+
+        assert_eq!(store.sessions[&key()].prompt_count, 1);
+        assert_eq!(store.sessions[&key()].status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn stop_puts_the_session_back_to_waiting_for_input() {
+        let mut store = SessionStore::default();
+        apply(&mut store, &agy("PreInvocation"));
+        apply(&mut store, &agy("Stop"));
+
+        assert_eq!(store.sessions[&key()].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn post_tool_use_records_the_tool_when_no_pre_tool_hook_ran() {
+        let mut store = SessionStore::default();
+        apply(&mut store, &agy("PreInvocation"));
+        let tool = input(
+            "PostToolUse",
+            &format!(
+                r#"{{"conversationId": "{CONV}", "workspacePaths": ["/tmp/proj"],
+                    "toolCall": {{"name": "view_file",
+                                  "args": {{"AbsolutePath": "/tmp/proj/hello.txt"}}}}}}"#
+            ),
+        );
+        apply(&mut store, &tool);
+
+        let session = &store.sessions[&key()];
+        assert_eq!(session.last_tool.as_deref(), Some("view_file"));
+        assert_eq!(session.tool_count, 1);
+        assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn a_claude_code_tool_is_not_counted_twice_across_its_two_hooks() {
+        // Claude Code fires PreToolUse and PostToolUse for one call; only the pre hook
+        // may count it, or every tool would be counted twice.
+        let mut store = SessionStore::default();
+        let start = input(
+            "SessionStart",
+            r#"{"session_id": "abc", "cwd": "/tmp/proj", "hook_event_name": "SessionStart"}"#,
+        );
+        apply_event(&mut store, "abc:tty".into(), &start, "tty".into(), None);
+
+        for event in ["PreToolUse", "PostToolUse"] {
+            let hook = input(
+                event,
+                &format!(
+                    r#"{{"session_id": "abc", "cwd": "/tmp/proj",
+                        "hook_event_name": "{event}", "tool_name": "Bash"}}"#
+                ),
+            );
+            apply_event(&mut store, "abc:tty".into(), &hook, "tty".into(), None);
+        }
+
+        assert_eq!(store.sessions["abc:tty"].tool_count, 1);
     }
 }

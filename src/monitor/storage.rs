@@ -117,16 +117,27 @@ impl Storage {
             .output()
         {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.lines().any(|line| {
-                let cmd = line.trim();
-                cmd.contains("claude")
-                    || cmd.contains("Claude")
-                    || cmd.contains("codex")
-                    || cmd.contains("Codex")
-            })
+            stdout.lines().any(Self::is_ai_tool_process)
         } else {
             true // If ps fails, assume alive to be safe
         }
+    }
+
+    /// Whether one `ps -o comm=` line names an AI coding tool cckit tracks.
+    ///
+    /// Antigravity is matched on the program name rather than anywhere in the path:
+    /// its CLI is called `agy`, three letters that turn up inside unrelated names.
+    fn is_ai_tool_process(line: &str) -> bool {
+        let cmd = line.trim();
+        if cmd.contains("claude")
+            || cmd.contains("Claude")
+            || cmd.contains("codex")
+            || cmd.contains("Codex")
+        {
+            return true;
+        }
+        let program = cmd.rsplit('/').next().unwrap_or(cmd);
+        program == "agy" || program.contains("antigravity") || program.contains("Antigravity")
     }
 
     /// Check if a session is stale (TTY gone or no AI tool process on TTY)
@@ -297,5 +308,37 @@ impl Storage {
 impl Default for Storage {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod agy_process_tests {
+    use super::*;
+
+    #[test]
+    fn the_antigravity_cli_counts_as_a_live_agent() {
+        assert!(Storage::is_ai_tool_process(
+            "/Users/t/.local/share/mise/installs/antigravity-cli/1.2.7/agy"
+        ));
+        assert!(Storage::is_ai_tool_process("agy"));
+        assert!(Storage::is_ai_tool_process(
+            "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity"
+        ));
+    }
+
+    #[test]
+    fn a_program_that_merely_contains_those_letters_does_not() {
+        // "agy" is short enough to appear inside unrelated names, so it only counts as
+        // the program being run, not as a substring of the path.
+        assert!(!Storage::is_ai_tool_process("/usr/local/bin/legacy-sync"));
+        assert!(!Storage::is_ai_tool_process("/usr/bin/node"));
+        assert!(!Storage::is_ai_tool_process(""));
+    }
+
+    #[test]
+    fn the_previously_supported_tools_still_count() {
+        assert!(Storage::is_ai_tool_process("claude"));
+        assert!(Storage::is_ai_tool_process("/opt/homebrew/bin/codex"));
+        assert!(Storage::is_ai_tool_process("Claude Code Helper"));
     }
 }
