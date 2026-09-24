@@ -130,7 +130,7 @@ its launch. The gone-directory drop happens before the liveness check for exactl
 |------|------|
 | `session.rs` | `Session`, `SessionStatus`, `SessionStore` data models |
 | `storage.rs` | File-based storage with `fs2` file locking, atomic writes (tmp + rename) |
-| `hook.rs` | Hook event handler for Claude Code, Codex and Antigravity (reads stdin JSON) |
+| `hook.rs` | Hook event handler for Claude Code, Codex, Antigravity and Grok (reads stdin JSON) |
 | `setup.rs` | Install/uninstall hooks in `~/.claude/settings.json`, `~/.codex/hooks.json` or `~/.gemini/config/hooks.json` |
 | `tui.rs` | ratatui-based interactive TUI |
 | `menubar.rs` | macOS NSStatusBar/NSMenu via objc2 |
@@ -142,7 +142,22 @@ its launch. The gone-directory drop happens before the liveness check for exactl
 | `display.rs` | Shared display helpers (relative time, elapsed, session count formatting) |
 | `paths.rs` | Data directory path resolution |
 
-**Data flow**: Claude Code / Codex / Antigravity hooks → `cckit session hook` (stdin JSON) → `storage.rs` (sessions.json with file lock) → TUI/menubar/window reads and displays.
+**Data flow**: Claude Code / Codex / Antigravity / Grok hooks → `cckit session hook` (stdin JSON) → `storage.rs` (sessions.json with file lock) → TUI/menubar/window reads and displays.
+
+**Grok hooks**: nothing is installed for grok. Its Claude Code compatibility mode reads
+`~/.claude/settings.json`, so cckit's existing hooks already fire. grok sends every field
+under **both** spellings (`sessionId` and `session_id`, `toolName` and `tool_name`,
+`transcriptPath` and `transcript_path`), which is why those camelCase keys are separate
+`*_camel` fields folded in by `normalize` rather than serde aliases: an alias makes serde
+reject the whole payload with "duplicate field". `hook_event_name` carries Claude's
+PascalCase value, so dispatch is unchanged. The one key without a twin is `hookEventName`
+(grok's own `"pre_tool_use"` spelling); its presence is how `normalize` tells a grok
+session from a Claude Code one arriving through the same hooks. The payload has no model
+id, so `normalize` records `"grok"` and `handle_hook` then upgrades it from
+`summary.json`'s `current_model_id`, which sits beside the transcript the payload points
+at (`~/.grok/sessions/<url-encoded cwd>/<session id>/`). Re-read on every event so a
+mid-session model switch is picked up. No context gauge: grok's transcript does not carry
+the token counts `read_context_usage` looks for.
 
 **Antigravity (`agy`) hooks**: a session only appears once it makes its first model call,
 because Antigravity has no `SessionStart` event and every installed hook fires at or after

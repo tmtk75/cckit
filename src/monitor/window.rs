@@ -1451,6 +1451,7 @@ fn rebuild_view_mission_control(view: &NSView) {
                     AgentType::Claude => "Claude",
                     AgentType::Codex => "Codex",
                     AgentType::Gemini => "Gemini",
+                    AgentType::Grok => "Grok",
                     AgentType::Unknown => "Agent",
                 }
                 .to_string()
@@ -1884,6 +1885,7 @@ fn rebuild_view_classic(view: &NSView) {
                     AgentType::Claude => "Claude".to_string(),
                     AgentType::Codex => "Codex".to_string(),
                     AgentType::Gemini => "Gemini".to_string(),
+                    AgentType::Grok => "Grok".to_string(),
                     AgentType::Unknown => "-".to_string(),
                 });
             let model_rect = NSRect::new(

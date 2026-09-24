@@ -11,10 +11,10 @@ Claude Code Kit - A toolkit for managing Claude Code and OpenAI Codex environmen
 
 cckit helps you manage and monitor your AI coding tool sessions:
 
-- **Session Monitoring** (`session`) - Track active Claude Code, Codex and Antigravity sessions in real-time with an interactive TUI
+- **Session Monitoring** (`session`) - Track active Claude Code, Codex, Antigravity and Grok sessions in real-time with an interactive TUI
 - **Session Search** (`session search`) - Search past Claude Code sessions by message text with an interactive TUI browser
 - **Session Bookmarks** (`session bookmark`) - Bookmark sessions with a name and tags so you can find them again later
-- **Multi-tool Support** - Works with Claude Code, OpenAI Codex and Antigravity (`agy`) via hooks
+- **Multi-tool Support** - Works with Claude Code, OpenAI Codex, Antigravity (`agy`) and Grok via hooks
 - **Project Inspection** (`ls`) - View all Claude Code projects with their skills, agents, commands, plugins, and MCP servers at a glance
 - **Skill/MCP/Agent Management** (`skill`, `mcp`, `agent`) - List, copy, promote, validate, and remove skills, MCP servers, and agents across projects
 - **Permissions Audit** (`permissions`) - List, audit, and clean risky allow/deny rules across all projects
@@ -77,6 +77,9 @@ cckit session install --codex
 
 # For Antigravity (writes to ~/.gemini/config/hooks.json)
 cckit session install --agy
+
+# Grok needs no install: it reads ~/.claude/settings.json via its Claude Code
+# compatibility mode, so the first command above already covers it.
 ```
 
 ### Usage
@@ -138,6 +141,29 @@ cckit session uninstall --agy    # Antigravity
 # Clean up stale sessions
 cckit session sync --execute
 ```
+
+#### Grok (`grok`)
+
+**Nothing to install.** Grok reads the hooks in `~/.claude/settings.json` through its
+Claude Code compatibility mode, so `cckit session install` already covers it. Grok
+sessions appear alongside the others as soon as they start.
+
+Grok sends every field twice, once in camelCase and once in snake_case
+(`sessionId` and `session_id`, `transcriptPath` and `transcript_path`, and so on), and
+`hook_event_name` carries Claude's own event names, so cckit dispatches on it unchanged.
+The one key with no snake_case twin is `hookEventName`, which holds grok's own spelling
+(`"pre_tool_use"`); that is what cckit uses to tell a Grok session from a Claude Code one,
+since both arrive through the same hooks.
+
+The payload carries no model id, but grok records one per session in
+`summary.json`, next to the transcript the payload points at. cckit reads it there on
+every event, so the MODEL column shows `Grok 4.7` and follows a mid-session model switch.
+The context gauge stays empty: grok's transcript does not carry the token counts cckit
+reads.
+
+If you would rather keep Grok's hooks separate from Claude Code's, drop a file in
+`~/.grok/hooks/` and turn the compatibility scan off with `[compat.claude] hooks = false`
+in `~/.grok/config.toml`. cckit does not need this.
 
 #### Antigravity (`agy`)
 

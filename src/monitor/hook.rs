@@ -133,20 +133,36 @@ pub struct ToolCall {
 /// on the command line instead. `normalize` folds the second shape onto the first.
 #[derive(Debug, Deserialize)]
 pub struct HookInput {
+    /// grok sends this key too, so only Antigravity's spelling needs an alias.
     #[serde(alias = "conversationId")]
     pub session_id: String,
     /// Absent in Antigravity payloads; taken from `workspace_paths` instead.
     #[serde(default)]
     pub cwd: String,
     /// Absent in Antigravity payloads; supplied by `cckit session hook --event`.
+    /// grok sends this key with Claude's PascalCase value, so it needs no translation.
     #[serde(default)]
     pub hook_event_name: String,
+    /// grok's own event name, in its own spelling (`"pre_tool_use"`). Only grok sends
+    /// it, which is how a grok session is told apart from a Claude Code one: both
+    /// arrive through the hooks in `~/.claude/settings.json`.
+    #[serde(default, rename = "hookEventName")]
+    pub grok_event_name: Option<String>,
     #[serde(default)]
     pub tool_name: Option<String>,
     #[serde(default)]
     pub tool_input: Option<serde_json::Value>,
-    #[serde(default, alias = "transcriptPath")]
+    #[serde(default)]
     pub transcript_path: Option<String>,
+    /// Antigravity's spellings of the three fields above. They cannot be serde aliases:
+    /// grok sends both the camelCase and the snake_case key in the same payload, and
+    /// serde rejects a field that arrives twice ("duplicate field").
+    #[serde(default, rename = "toolName")]
+    tool_name_camel: Option<String>,
+    #[serde(default, rename = "toolInput")]
+    tool_input_camel: Option<serde_json::Value>,
+    #[serde(default, rename = "transcriptPath")]
+    transcript_path_camel: Option<String>,
     /// Full model ID, e.g. "claude-opus-5[1m]". Always present in Codex hooks
     /// and sent by Claude Code too. Unlike the transcript's `message.model`,
     /// this keeps the "[1m]" suffix, so it is the source of truth for the
@@ -177,6 +193,15 @@ impl HookInput {
         {
             self.cwd = first.clone();
         }
+        if self.tool_name.is_none() {
+            self.tool_name = self.tool_name_camel.take();
+        }
+        if self.tool_input.is_none() {
+            self.tool_input = self.tool_input_camel.take();
+        }
+        if self.transcript_path.is_none() {
+            self.transcript_path = self.transcript_path_camel.take();
+        }
         if let Some(call) = self.tool_call.take() {
             if self.tool_name.is_none() {
                 self.tool_name = call.name;
@@ -185,7 +210,44 @@ impl HookInput {
                 self.tool_input = call.args;
             }
         }
+        // grok sends no model id at all. Record the product instead, or the session
+        // would show as an unknown agent: it reaches cckit through the same hooks as
+        // Claude Code, so nothing else in the payload would name it.
+        if self.grok_event_name.is_some() && self.model.is_none() {
+            self.model = Some("grok".to_string());
+        }
     }
+}
+
+/// Read the model out of a grok `summary.json`.
+///
+/// grok's hook payload carries no model id, but it keeps one per session on disk and
+/// rewrites it as the session goes, so this is also how a mid-session model switch is
+/// picked up. A missing or broken file is not an error: the session simply keeps the
+/// bare product name.
+fn grok_model_from_summary(content: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(content).ok()?;
+    let model = value.get("current_model_id")?.as_str()?;
+    (!model.is_empty()).then(|| model.to_string())
+}
+
+/// Where grok keeps the summary for the session whose transcript is `transcript_path`.
+///
+/// grok points the transcript at
+/// `~/.grok/sessions/<url-encoded cwd>/<session id>/updates.jsonl`, and `summary.json`
+/// sits beside it, so the session's own path is all that is needed. Deriving it this way
+/// avoids reproducing grok's url-encoding of the working directory.
+fn grok_summary_path(transcript_path: &str) -> Option<std::path::PathBuf> {
+    std::path::Path::new(transcript_path)
+        .parent()
+        .map(|dir| dir.join("summary.json"))
+}
+
+/// Read the model grok recorded next to `transcript_path`.
+fn find_grok_model(transcript_path: &str) -> Option<String> {
+    let summary = grok_summary_path(transcript_path)?;
+    let content = std::fs::read_to_string(summary).ok()?;
+    grok_model_from_summary(&content)
 }
 
 /// Read one hook payload from stdin and apply it.
@@ -206,6 +268,14 @@ pub fn handle_hook(event: Option<&str>) -> Result<(), Box<dyn std::error::Error>
         }
     };
     hook_input.normalize(event);
+    // grok names its model only on disk, so look it up once the session id is known.
+    // Re-read on every event: the model can be switched mid-session.
+    if hook_input.grok_event_name.is_some()
+        && let Some(transcript) = hook_input.transcript_path.clone()
+        && let Some(model) = find_grok_model(&transcript)
+    {
+        hook_input.model = Some(model);
+    }
 
     let storage = Storage::new();
     let tty = get_current_tty();
@@ -668,6 +738,10 @@ mod tests {
             session_id: "test".to_string(),
             cwd: "/test".to_string(),
             hook_event_name: "PreToolUse".to_string(),
+            grok_event_name: None,
+            tool_name_camel: None,
+            tool_input_camel: None,
+            transcript_path_camel: None,
             tool_name: Some("Bash".to_string()),
             tool_input: Some(json!({"command": "ls -la"})),
             transcript_path: None,
@@ -687,6 +761,10 @@ mod tests {
             session_id: "test".to_string(),
             cwd: "/test".to_string(),
             hook_event_name: "PreToolUse".to_string(),
+            grok_event_name: None,
+            tool_name_camel: None,
+            tool_input_camel: None,
+            transcript_path_camel: None,
             tool_name: Some("Read".to_string()),
             tool_input: Some(json!({"file_path": "/path/to/file.rs"})),
             transcript_path: None,
@@ -706,6 +784,10 @@ mod tests {
             session_id: "test".to_string(),
             cwd: "/test".to_string(),
             hook_event_name: "PreToolUse".to_string(),
+            grok_event_name: None,
+            tool_name_camel: None,
+            tool_input_camel: None,
+            transcript_path_camel: None,
             tool_name: Some("Write".to_string()),
             tool_input: Some(json!({"file_path": "/path/to/file.rs"})),
             transcript_path: None,
@@ -725,6 +807,10 @@ mod tests {
             session_id: "test".to_string(),
             cwd: "/test".to_string(),
             hook_event_name: "PreToolUse".to_string(),
+            grok_event_name: None,
+            tool_name_camel: None,
+            tool_input_camel: None,
+            transcript_path_camel: None,
             tool_name: Some("Glob".to_string()),
             tool_input: Some(json!({"pattern": "**/*.rs"})),
             transcript_path: None,
@@ -744,6 +830,10 @@ mod tests {
             session_id: "test".to_string(),
             cwd: "/test".to_string(),
             hook_event_name: "PreToolUse".to_string(),
+            grok_event_name: None,
+            tool_name_camel: None,
+            tool_input_camel: None,
+            transcript_path_camel: None,
             tool_name: Some("Task".to_string()),
             tool_input: Some(json!({"description": "Explore codebase"})),
             transcript_path: None,
@@ -763,6 +853,10 @@ mod tests {
             session_id: "test".to_string(),
             cwd: "/test".to_string(),
             hook_event_name: "PreToolUse".to_string(),
+            grok_event_name: None,
+            tool_name_camel: None,
+            tool_input_camel: None,
+            transcript_path_camel: None,
             tool_name: Some("UnknownTool".to_string()),
             tool_input: Some(json!({"foo": "bar"})),
             transcript_path: None,
@@ -779,6 +873,10 @@ mod tests {
             session_id: "test".to_string(),
             cwd: "/test".to_string(),
             hook_event_name: "PreToolUse".to_string(),
+            grok_event_name: None,
+            tool_name_camel: None,
+            tool_input_camel: None,
+            transcript_path_camel: None,
             tool_name: Some("Bash".to_string()),
             tool_input: None,
             transcript_path: None,
@@ -1140,5 +1238,155 @@ mod agy_event_tests {
         }
 
         assert_eq!(store.sessions["abc:tty"].tool_count, 1);
+    }
+}
+
+#[cfg(test)]
+mod grok_tests {
+    use super::*;
+
+    /// A grok payload, in the shape grok 1.0.40 actually sends: every field appears
+    /// under BOTH its camelCase and its snake_case key. Reading either one as a serde
+    /// alias would make the whole payload fail with "duplicate field".
+    const GROK_TOOL: &str = r#"{
+      "hookEventName": "pre_tool_use",
+      "hook_event_name": "PreToolUse",
+      "sessionId": "abc-123",
+      "session_id": "abc-123",
+      "cwd": "/Users/you/project",
+      "workspaceRoot": "/Users/you/project",
+      "permissionMode": "default",
+      "permission_mode": "default",
+      "toolName": "run_terminal_command",
+      "tool_name": "run_terminal_command",
+      "toolInput": { "command": "npm test" },
+      "tool_input": { "command": "npm test" },
+      "transcriptPath": "/Users/t/.grok/sessions/%2Fp/abc-123/updates.jsonl",
+      "transcript_path": "/Users/t/.grok/sessions/%2Fp/abc-123/updates.jsonl",
+      "timestamp": "2026-04-14T12:00:00Z"
+    }"#;
+
+    fn parse(json: &str) -> HookInput {
+        let mut input: HookInput = serde_json::from_str(json).expect("payload parses");
+        // grok arrives through the Claude Code hooks, so no --event is passed.
+        input.normalize(None);
+        input
+    }
+
+    #[test]
+    fn a_payload_carrying_both_spellings_of_every_field_still_parses() {
+        // The duplicate-field trap: grok sends camelCase AND snake_case together.
+        let input = parse(GROK_TOOL);
+        assert_eq!(input.session_id, "abc-123");
+        assert!(
+            input
+                .transcript_path
+                .as_deref()
+                .is_some_and(|p| p.ends_with("abc-123/updates.jsonl"))
+        );
+    }
+
+    #[test]
+    fn the_summary_sits_beside_the_transcript() {
+        let summary =
+            grok_summary_path("/Users/t/.grok/sessions/%2Fp/abc-123/updates.jsonl").unwrap();
+        assert!(
+            summary.ends_with("abc-123/summary.json"),
+            "got: {summary:?}"
+        );
+    }
+
+    #[test]
+    fn the_event_name_comes_from_the_claude_compatible_key() {
+        // grok sends both spellings; the snake_case key carries the PascalCase value
+        // cckit already dispatches on.
+        assert_eq!(parse(GROK_TOOL).hook_event_name, "PreToolUse");
+    }
+
+    #[test]
+    fn the_camel_case_tool_fields_are_read() {
+        let input = parse(GROK_TOOL);
+        assert_eq!(input.tool_name.as_deref(), Some("run_terminal_command"));
+        assert_eq!(
+            input
+                .tool_input
+                .as_ref()
+                .and_then(|v| v["command"].as_str()),
+            Some("npm test")
+        );
+    }
+
+    #[test]
+    fn a_payload_without_a_model_is_marked_as_grok() {
+        // grok sends no model id. Without this the session would show as an unknown
+        // agent, since it arrives through the same hooks as Claude Code.
+        assert_eq!(parse(GROK_TOOL).model.as_deref(), Some("grok"));
+    }
+
+    #[test]
+    fn a_claude_code_payload_is_not_mistaken_for_grok() {
+        let json = r#"{
+          "session_id": "abc",
+          "cwd": "/tmp",
+          "hook_event_name": "PreToolUse",
+          "tool_name": "Bash",
+          "model": "claude-opus-5[1m]"
+        }"#;
+        let input = parse(json);
+        assert_eq!(input.model.as_deref(), Some("claude-opus-5[1m]"));
+        assert_eq!(input.tool_name.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn a_grok_payload_that_does_carry_a_model_keeps_it() {
+        let json = r#"{
+          "hookEventName": "stop",
+          "hook_event_name": "Stop",
+          "sessionId": "abc-123",
+          "session_id": "abc-123",
+          "cwd": "/tmp",
+          "model": "grok-4.6"
+        }"#;
+        assert_eq!(parse(json).model.as_deref(), Some("grok-4.6"));
+    }
+}
+
+#[cfg(test)]
+mod grok_model_tests {
+    use super::*;
+
+    /// A real summary.json, trimmed to the fields that matter here.
+    const SUMMARY: &str = r#"{
+      "info": { "id": "01a0d3d5", "cwd": "/Users/t/proj" },
+      "created_at": "2026-09-24T14:32:37.599232Z",
+      "current_model_id": "grok-4.7",
+      "agent_name": "grok-build-plan",
+      "reasoning_effort": "high"
+    }"#;
+
+    #[test]
+    fn the_current_model_is_read_from_the_session_summary() {
+        assert_eq!(
+            grok_model_from_summary(SUMMARY).as_deref(),
+            Some("grok-4.7")
+        );
+    }
+
+    #[test]
+    fn a_summary_without_a_model_yields_nothing() {
+        let json = r#"{"info": {"id": "abc"}, "num_messages": 3}"#;
+        assert_eq!(grok_model_from_summary(json), None);
+    }
+
+    #[test]
+    fn a_broken_summary_is_ignored_rather_than_failing_the_hook() {
+        assert_eq!(grok_model_from_summary("{ not json"), None);
+        assert_eq!(grok_model_from_summary(""), None);
+    }
+
+    #[test]
+    fn an_empty_model_id_is_treated_as_absent() {
+        let json = r#"{"current_model_id": ""}"#;
+        assert_eq!(grok_model_from_summary(json), None);
     }
 }

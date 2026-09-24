@@ -125,8 +125,8 @@ impl Storage {
 
     /// Whether one `ps -o comm=` line names an AI coding tool cckit tracks.
     ///
-    /// Antigravity is matched on the program name rather than anywhere in the path:
-    /// its CLI is called `agy`, three letters that turn up inside unrelated names.
+    /// Antigravity and grok are matched on the program name rather than anywhere in the
+    /// path: `agy` and `grok` are short enough to turn up inside unrelated names.
     fn is_ai_tool_process(line: &str) -> bool {
         let cmd = line.trim();
         if cmd.contains("claude")
@@ -137,7 +137,10 @@ impl Storage {
             return true;
         }
         let program = cmd.rsplit('/').next().unwrap_or(cmd);
-        program == "agy" || program.contains("antigravity") || program.contains("Antigravity")
+        program == "agy"
+            || program == "grok"
+            || program.contains("antigravity")
+            || program.contains("Antigravity")
     }
 
     /// Check if a session is stale (TTY gone or no AI tool process on TTY)
@@ -340,5 +343,25 @@ mod agy_process_tests {
         assert!(Storage::is_ai_tool_process("claude"));
         assert!(Storage::is_ai_tool_process("/opt/homebrew/bin/codex"));
         assert!(Storage::is_ai_tool_process("Claude Code Helper"));
+    }
+}
+
+#[cfg(test)]
+mod grok_process_tests {
+    use super::*;
+
+    #[test]
+    fn the_grok_cli_counts_as_a_live_agent() {
+        assert!(Storage::is_ai_tool_process("grok"));
+        assert!(Storage::is_ai_tool_process(
+            "/Users/t/.local/share/mise/shims/grok"
+        ));
+    }
+
+    #[test]
+    fn a_program_that_merely_contains_those_letters_does_not() {
+        // Same reasoning as `agy`: match the program, not any path that spells it.
+        assert!(!Storage::is_ai_tool_process("/usr/local/bin/grokify-logs"));
+        assert!(!Storage::is_ai_tool_process("/opt/grok/share/helper"));
     }
 }

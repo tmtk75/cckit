@@ -10,6 +10,7 @@ pub enum AgentType {
     Claude,
     Codex,
     Gemini,
+    Grok,
     Unknown,
 }
 
@@ -27,6 +28,7 @@ impl AgentType {
                 Self::Codex
             }
             Some(m) if m.contains("gemini") => Self::Gemini,
+            Some(m) if m.contains("grok") => Self::Grok,
             _ => Self::Unknown,
         }
     }
@@ -37,6 +39,7 @@ impl AgentType {
             Self::Claude => (0xd9, 0x77, 0x57),  // #d97757 terracotta
             Self::Codex => (0x22, 0xc5, 0x5e),   // #22c55e green
             Self::Gemini => (0x3b, 0x82, 0xf6),  // #3b82f6 blue
+            Self::Grok => (0xe1, 0x1d, 0x48),    // #e11d48 crimson
             Self::Unknown => (0xa8, 0x55, 0xf7), // #a855f7 purple
         }
     }
@@ -47,6 +50,7 @@ impl AgentType {
             Self::Claude => "#d97757",
             Self::Codex => "#22c55e",
             Self::Gemini => "#3b82f6",
+            Self::Grok => "#e11d48",
             Self::Unknown => "#a855f7",
         }
     }
@@ -129,6 +133,15 @@ pub fn model_short_label(model: &str) -> Option<String> {
         return Some(format!("Gemini {label}"));
     }
 
+    // grok's hooks carry no model id, so cckit records the bare product name; a
+    // versioned id ("grok-4.6") is still parsed the same way as the others.
+    if m == "grok" {
+        return Some("Grok".to_string());
+    }
+    if let Some(label) = grok_label(m) {
+        return Some(format!("Grok {label}"));
+    }
+
     let label = if m.contains("opus-4-8") {
         "Opus 4.8"
     } else if m.contains("opus-4-7") {
@@ -197,6 +210,34 @@ fn gemini_label(m: &str) -> Option<String> {
     });
     Some(match flavour {
         Some(flavour) => format!("{version} {flavour}"),
+        None => version.to_string(),
+    })
+}
+
+/// Variants grok names after the version, e.g. "grok-5-fast".
+const GROK_VARIANTS: [(&str, &str); 4] = [
+    ("fast", "Fast"),
+    ("mini", "Mini"),
+    ("heavy", "Heavy"),
+    ("code", "Code"),
+];
+
+/// Parse "grok-<version>[-<variant>]" into "4.6" or "5 Fast".
+fn grok_label(m: &str) -> Option<String> {
+    let rest = m.strip_prefix("grok-")?;
+    let mut parts = rest.split('-');
+    let version = parts.next()?;
+    if !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let variant = parts.next().and_then(|name| {
+        GROK_VARIANTS
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, display)| *display)
+    });
+    Some(match variant {
+        Some(variant) => format!("{version} {variant}"),
         None => version.to_string(),
     })
 }
@@ -937,6 +978,43 @@ mod gemini_label_tests {
         assert_eq!(
             model_short_label("gemini-9.1-flash"),
             Some("Gemini 9.1 Flash".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod grok_label_tests {
+    use super::*;
+
+    #[test]
+    fn a_grok_session_is_its_own_agent_family() {
+        assert_eq!(AgentType::from_model(Some("grok")), AgentType::Grok);
+        assert_eq!(AgentType::from_model(Some("grok-4.6")), AgentType::Grok);
+    }
+
+    #[test]
+    fn grok_has_an_accent_colour_of_its_own() {
+        // Sharing a colour with another family would defeat the point of the column.
+        let others = [
+            AgentType::Claude.accent_hex(),
+            AgentType::Codex.accent_hex(),
+            AgentType::Gemini.accent_hex(),
+        ];
+        assert!(!others.contains(&AgentType::Grok.accent_hex()));
+    }
+
+    #[test]
+    fn the_bare_product_name_is_shown_when_no_version_is_known() {
+        // grok's hooks send no model id, so the product name is all cckit has.
+        assert_eq!(model_short_label("grok"), Some("Grok".to_string()));
+    }
+
+    #[test]
+    fn a_versioned_grok_id_shows_its_version() {
+        assert_eq!(model_short_label("grok-4.6"), Some("Grok 4.6".to_string()));
+        assert_eq!(
+            model_short_label("grok-5-fast"),
+            Some("Grok 5 Fast".to_string())
         );
     }
 }
