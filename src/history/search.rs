@@ -1,4 +1,4 @@
-// AND matcher over SessionRecord user turns.
+// AND matcher over SessionRecord user turns and bookmarks.
 
 use crate::history::{Hit, Role, SessionRecord};
 use fuzzy_matcher::FuzzyMatcher;
@@ -12,14 +12,19 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 /// `fuzzy_search_sessions` when this finds nothing. Only the matched sessions are cloned.
 pub fn search_sessions(sessions: &[SessionRecord], terms: &[String], limit: usize) -> Vec<Hit> {
     let lower_terms: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
-    collect_hits(sessions, limit, |session| {
-        if lower_terms.is_empty() {
-            return Vec::new();
+    let is_match = move |text: &str| {
+        let lower = text.to_lowercase();
+        lower_terms.iter().all(|t| lower.contains(t))
+    };
+    let empty_query = terms.is_empty();
+    collect_hits(sessions, limit, move |session| {
+        if empty_query {
+            return Match::default();
         }
-        user_turn_indices(session, |text| {
-            let lower = text.to_lowercase();
-            lower_terms.iter().all(|t| lower.contains(t))
-        })
+        Match {
+            turns: user_turn_indices(session, &is_match),
+            bookmark: label_text(session).is_some_and(|text| is_match(&text)),
+        }
     })
 }
 
@@ -34,9 +39,38 @@ pub fn fuzzy_search_sessions(sessions: &[SessionRecord], query: &str, limit: usi
         return Vec::new();
     }
     let matcher = SkimMatcherV2::default().ignore_case();
-    collect_hits(sessions, limit, |session| {
-        user_turn_indices(session, |text| matcher.fuzzy_match(text, query).is_some())
+    let is_match = |text: &str| matcher.fuzzy_match(text, query).is_some();
+    collect_hits(sessions, limit, |session| Match {
+        turns: user_turn_indices(session, is_match),
+        bookmark: label_text(session).is_some_and(|text| is_match(text.as_str())),
     })
+}
+
+/// The searchable rendering of a session's bookmark: its name followed by its tags.
+/// `None` when the session carries no bookmark.
+fn label_text(session: &SessionRecord) -> Option<String> {
+    let bookmark = session.bookmark.as_ref()?;
+    let mut text = bookmark.name.clone();
+    for tag in &bookmark.tags {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(tag);
+    }
+    Some(text)
+}
+
+/// What a session matched on. A session with neither is not a hit.
+#[derive(Debug, Default)]
+struct Match {
+    turns: Vec<usize>,
+    bookmark: bool,
+}
+
+impl Match {
+    fn is_empty(&self) -> bool {
+        self.turns.is_empty() && !self.bookmark
+    }
 }
 
 /// Indices of the user turns in `session` whose text satisfies `is_match`.
@@ -51,23 +85,24 @@ fn user_turn_indices(session: &SessionRecord, is_match: impl Fn(&str) -> bool) -
         .collect()
 }
 
-/// Build hits from whichever sessions `matching_turns` reports turns for, newest first,
+/// Build hits from whichever sessions `matching` reports a match for, newest first,
 /// truncated to `limit`. Cloning happens only for sessions that actually matched.
 fn collect_hits(
     sessions: &[SessionRecord],
     limit: usize,
-    matching_turns: impl Fn(&SessionRecord) -> Vec<usize>,
+    matching: impl Fn(&SessionRecord) -> Match,
 ) -> Vec<Hit> {
     let mut hits: Vec<Hit> = sessions
         .iter()
         .filter_map(|session| {
-            let matched = matching_turns(session);
+            let matched = matching(session);
             if matched.is_empty() {
                 return None;
             }
             Some(Hit {
                 session: session.clone(),
-                matched_turn_indices: matched,
+                matched_turn_indices: matched.turns,
+                bookmark_matched: matched.bookmark,
             })
         })
         .collect();
@@ -76,10 +111,10 @@ fn collect_hits(
     hits
 }
 
-/// Concatenated text of all user turns in a session, intended as the haystack
-/// for interactive fuzzy matching. Precompute once per session at load time.
+/// Concatenated text of all user turns in a session plus its bookmark, intended as the
+/// haystack for interactive fuzzy matching. Precompute once per session at load time.
 pub fn searchable_text(session: &SessionRecord) -> String {
-    let mut out = String::new();
+    let mut out = label_text(session).unwrap_or_default();
     for turn in &session.turns {
         if turn.role == Role::User {
             if !out.is_empty() {
@@ -151,6 +186,7 @@ mod tests {
             file_path: format!("/tmp/{id}.jsonl").into(),
             started_at: ts,
             ended_at: ts,
+            bookmark: None,
             turns,
         }
     }
@@ -240,6 +276,7 @@ mod tests {
             file_path: "/tmp/s.jsonl".into(),
             started_at: ts,
             ended_at: ts,
+            bookmark: None,
             turns: vec![
                 Turn {
                     role: Role::User,
@@ -326,6 +363,7 @@ mod tests {
             file_path: "/tmp/a.jsonl".into(),
             started_at: ts,
             ended_at: ts,
+            bookmark: None,
             turns: vec![Turn {
                 role: Role::Assistant,
                 timestamp: ts,
@@ -334,5 +372,90 @@ mod tests {
         };
         let hits = search_sessions(&[rec], &["osrm".into(), "jni".into()], 10);
         assert!(hits.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+    use crate::history::Turn;
+    use crate::history::bookmark::Bookmark;
+    use chrono::{TimeZone, Utc};
+
+    fn bookmarked(id: &str, turn_text: &str, name: &str, tags: &[&str]) -> SessionRecord {
+        let ts = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+        SessionRecord {
+            session_id: id.into(),
+            cwd: "/tmp".into(),
+            git_branch: None,
+            file_path: format!("/tmp/{id}.jsonl").into(),
+            started_at: ts,
+            ended_at: ts,
+            turns: vec![Turn {
+                role: Role::User,
+                timestamp: ts,
+                text: turn_text.into(),
+            }],
+            bookmark: Some(Bookmark {
+                name: name.into(),
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                cwd: None,
+                session_started_at: None,
+                bookmarked_at: ts,
+                updated_at: ts,
+            }),
+        }
+    }
+
+    #[test]
+    fn search_finds_a_session_by_its_label_name_when_no_turn_matches() {
+        let sessions = vec![bookmarked("a", "unrelated chatter", "auth refactor", &[])];
+        let hits = search_sessions(&sessions, &["auth".to_string()], 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session.session_id, "a");
+    }
+
+    #[test]
+    fn search_finds_a_session_by_its_tag() {
+        let sessions = vec![bookmarked(
+            "a",
+            "unrelated chatter",
+            "some work",
+            &["infra"],
+        )];
+        let hits = search_sessions(&sessions, &["infra".to_string()], 10);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn a_hit_found_only_through_its_label_is_flagged_as_such() {
+        let sessions = vec![bookmarked("a", "unrelated chatter", "auth refactor", &[])];
+        let hits = search_sessions(&sessions, &["auth".to_string()], 10);
+        assert!(hits[0].bookmark_matched);
+        assert!(hits[0].matched_turn_indices.is_empty());
+    }
+
+    #[test]
+    fn a_hit_found_through_its_turns_is_not_flagged_as_a_label_match() {
+        let sessions = vec![bookmarked("a", "auth in the turn", "unrelated name", &[])];
+        let hits = search_sessions(&sessions, &["auth".to_string()], 10);
+        assert!(!hits[0].bookmark_matched);
+        assert_eq!(hits[0].matched_turn_indices, vec![0]);
+    }
+
+    #[test]
+    fn fuzzy_search_finds_a_session_by_its_label_name() {
+        let sessions = vec![bookmarked("a", "unrelated chatter", "auth refactor", &[])];
+        let hits = fuzzy_search_sessions(&sessions, "authrefac", 10);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].bookmark_matched);
+    }
+
+    #[test]
+    fn searchable_text_carries_the_label_so_the_interactive_filter_finds_it() {
+        let session = bookmarked("a", "unrelated chatter", "auth refactor", &["infra"]);
+        let text = searchable_text(&session);
+        assert!(text.contains("auth refactor"), "got: {text}");
+        assert!(text.contains("infra"), "got: {text}");
     }
 }

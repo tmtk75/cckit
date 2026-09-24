@@ -23,17 +23,41 @@ pub fn format_hit(hit: &Hit) -> String {
         .map(truncate_oneline)
         .unwrap_or_else(|| "(no user text)".into());
 
+    // A bookmark-only hit has no matched turn to count, so say what it matched instead of
+    // printing a bare "matches: 0".
+    let matches = if hit.matched_turn_indices.is_empty() && hit.bookmark_matched {
+        "bookmark".to_string()
+    } else {
+        hit.matched_turn_indices.len().to_string()
+    };
+    let bookmark = session
+        .bookmark
+        .as_ref()
+        .map(|l| format!("\n  bookmark: {}", bookmark_oneline(l)))
+        .unwrap_or_default();
+
     format!(
-        "{started}  {cwd}{branch}\n  session: {sid}  turns: {n}  matches: {m}\n  first> {first}\n  last>  {last}",
+        "{started}  {cwd}{branch}\n  session: {sid}  turns: {n}  matches: {m}{bookmark}\n  first> {first}\n  last>  {last}",
         started = started,
         cwd = session.cwd.display(),
         branch = branch,
         sid = session.session_id,
         n = session.turns.len(),
-        m = hit.matched_turn_indices.len(),
+        m = matches,
+        bookmark = bookmark,
         first = first,
         last = last,
     )
+}
+
+/// `name #tag #tag`, with either half allowed to be missing.
+pub fn bookmark_oneline(bookmark: &crate::history::bookmark::Bookmark) -> String {
+    let tags = bookmark.tag_display();
+    match (bookmark.name.is_empty(), tags.is_empty()) {
+        (true, _) => tags,
+        (_, true) => bookmark.name.clone(),
+        _ => format!("{} {}", bookmark.name, tags),
+    }
 }
 
 /// The line shown when the exact search came up empty and the fuzzy retry found results.
@@ -88,6 +112,8 @@ pub fn format_json(hits: &[Hit]) -> String {
                 "ended_at": s.ended_at.to_rfc3339(),
                 "turns": s.turns.len(),
                 "matches": h.matched_turn_indices.len(),
+                "bookmark_matched": h.bookmark_matched,
+                "bookmark": s.bookmark,
                 "first_user_text": s.first_user_text(),
                 "last_user_text": s.last_user_text(),
                 "file_path": s.file_path.display().to_string(),
@@ -135,9 +161,11 @@ mod tests {
                 file_path: "/tmp/abc-1.jsonl".into(),
                 started_at: ts,
                 ended_at: ts,
+                bookmark: None,
                 turns,
             },
             matched_turn_indices: vec![0],
+            bookmark_matched: false,
         }
     }
 
@@ -237,5 +265,72 @@ mod tests {
         assert_eq!(e["last_user_text"], "last user");
         assert!(e["started_at"].is_string());
         assert!(e["ended_at"].is_string());
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+    use crate::history::bookmark::Bookmark;
+    use crate::history::{Role, SessionRecord, Turn};
+    use chrono::TimeZone;
+
+    fn labelled_hit(name: &str, tags: &[&str], bookmark_matched: bool) -> Hit {
+        let ts = chrono::Utc.with_ymd_and_hms(2026, 3, 12, 6, 12, 0).unwrap();
+        Hit {
+            session: SessionRecord {
+                session_id: "abc-1".into(),
+                cwd: "/Users/tomo/proj".into(),
+                git_branch: Some("main".into()),
+                file_path: "/tmp/abc-1.jsonl".into(),
+                started_at: ts,
+                ended_at: ts,
+                turns: vec![Turn {
+                    role: Role::User,
+                    timestamp: ts,
+                    text: "hello".into(),
+                }],
+                bookmark: Some(Bookmark {
+                    name: name.into(),
+                    tags: tags.iter().map(|t| t.to_string()).collect(),
+                    cwd: None,
+                    session_started_at: None,
+                    bookmarked_at: ts,
+                    updated_at: ts,
+                }),
+            },
+            matched_turn_indices: if bookmark_matched { vec![] } else { vec![0] },
+            bookmark_matched,
+        }
+    }
+
+    #[test]
+    fn format_hit_shows_the_label_name_and_tags() {
+        let text = format_hit(&labelled_hit("auth refactor", &["infra"], false));
+        assert!(text.contains("auth refactor"), "got:\n{text}");
+        assert!(text.contains("#infra"), "got:\n{text}");
+    }
+
+    #[test]
+    fn format_hit_reports_a_label_only_match_instead_of_zero_matches() {
+        let text = format_hit(&labelled_hit("auth refactor", &[], true));
+        assert!(text.contains("matches: bookmark"), "got:\n{text}");
+    }
+
+    #[test]
+    fn json_carries_the_label_name_and_tags() {
+        let json = format_json(&[labelled_hit("auth refactor", &["infra"], false)]);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0]["bookmark"]["name"], "auth refactor");
+        assert_eq!(parsed[0]["bookmark"]["tags"][0], "infra");
+    }
+
+    #[test]
+    fn json_leaves_the_label_null_for_an_unlabelled_session() {
+        let mut hit = labelled_hit("x", &[], false);
+        hit.session.bookmark = None;
+        let json = format_json(&[hit]);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed[0]["bookmark"].is_null());
     }
 }

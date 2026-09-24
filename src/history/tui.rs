@@ -423,6 +423,7 @@ mod tests {
             file_path: format!("/tmp/{id}.jsonl").into(),
             started_at: ts,
             ended_at: ts,
+            bookmark: None,
             turns,
         }
     }
@@ -479,6 +480,7 @@ mod tests {
             file_path: "/tmp/a.jsonl".into(),
             started_at: chrono::Utc.with_ymd_and_hms(2026, 3, 12, 0, 0, 0).unwrap(),
             ended_at: chrono::Utc.with_ymd_and_hms(2026, 3, 12, 0, 0, 0).unwrap(),
+            bookmark: None,
             turns: vec![Turn {
                 role: Role::User,
                 timestamp: chrono::Utc.with_ymd_and_hms(2026, 3, 12, 0, 0, 0).unwrap(),
@@ -492,6 +494,7 @@ mod tests {
             file_path: "/tmp/b.jsonl".into(),
             started_at: chrono::Utc.with_ymd_and_hms(2026, 3, 11, 0, 0, 0).unwrap(),
             ended_at: chrono::Utc.with_ymd_and_hms(2026, 3, 11, 0, 0, 0).unwrap(),
+            bookmark: None,
             turns: vec![Turn {
                 role: Role::User,
                 timestamp: chrono::Utc.with_ymd_and_hms(2026, 3, 11, 0, 0, 0).unwrap(),

@@ -13,6 +13,7 @@ cckit helps you manage and monitor your AI coding tool sessions:
 
 - **Session Monitoring** (`session`) - Track active Claude Code and Codex sessions in real-time with an interactive TUI
 - **Session Search** (`session search`) - Search past Claude Code sessions by message text with an interactive TUI browser
+- **Session Bookmarks** (`session bookmark`) - Bookmark sessions with a name and tags so you can find them again later
 - **Multi-tool Support** - Works with both Claude Code and OpenAI Codex via hooks
 - **Project Inspection** (`ls`) - View all Claude Code projects with their skills, agents, commands, plugins, and MCP servers at a glance
 - **Skill/MCP/Agent Management** (`skill`, `mcp`, `agent`) - List, copy, promote, validate, and remove skills, MCP servers, and agents across projects
@@ -162,6 +163,92 @@ No exact match for "skll stale". Showing fuzzy matches.
 The fallback only runs when the exact search came up empty, so a query that matches keeps
 behaving exactly as before. `--exact` turns the fallback off. With `--json` the notice goes
 to stderr, leaving stdout a bare JSON array.
+
+### Session Bookmarks
+
+A session id tells you nothing three weeks later. Find the session, bookmark it with a
+name and some tags, and it stays findable:
+
+```bash
+# 1. Find it
+cckit session search terraform plan
+
+# 2. Bookmark it by id (a leading fragment is enough)
+cckit session bookmark set 7568e813 "auth refactor" --tag auth --tag infra
+
+# Or bookmark the session running in this terminal
+cckit session bookmark set --current "auth refactor" --tag auth
+
+# List what you have bookmarked, newest first
+cckit session bookmark ls
+cckit session bookmark ls --tag auth
+cckit session bookmark ls --json
+
+# Add or remove tags later, without retyping the name
+cckit session bookmark tag 7568e813 urgent
+cckit session bookmark tag 7568e813 --rm infra
+
+# Print just the id, for use in another command
+cckit session bookmark id auth
+
+# Forget one
+cckit session bookmark rm 7568e813
+```
+
+`bookmark id` exists for the case this whole feature is aimed at: you start a session
+loosely with `claude -w`, decide it deserves a proper workspace, and want to pick it up
+there.
+
+```bash
+# In the session you started loosely, mark it (! runs a shell command from inside Claude Code)
+!cckit session bookmark set --current "auth refactor"
+
+# Later, in a worktree of its own
+claude -w feat/auth --resume $(cckit session bookmark id auth)
+```
+
+The query matches a bookmark name, then a tag, then a leading fragment of a session id,
+and the first net that catches anything decides. Only the id goes to stdout, so it
+substitutes cleanly. Several matches print the candidates on stderr and exit 2 rather
+than guessing: a `$(...)` that quietly resumes the wrong session is worse than one that
+fails.
+
+`set` replaces everything it is given, which is why `tag` exists: adding one tag through
+`set` would mean retyping the name and every tag already there, and forgetting one would
+drop it silently. `tag` leaves the name alone and reports tags that were already set (or
+were not there to remove), so a typo does not pass for success.
+
+`bookmark ls` ends with where the file lives, so "nothing bookmarked yet" is never
+confused with "cckit is reading a different file than you think":
+
+```
+4 bookmarks in ~/Library/Application Support/cckit/bookmarks.json
+```
+
+Overwriting an existing bookmark says what it replaced, so a `--current` that landed on
+the wrong terminal is visible rather than silent:
+
+```
+$ cckit session bookmark set --current "BCPの改善"
+renamed 7568e813-… from "auth refactor #auth" to "BCPの改善"
+```
+
+Bookmarks are stored in `bookmarks.json` beside `sessions.json`, so they outlive the
+session they name. `bookmark ls` reads only that file, so it answers instantly even with
+thousands of transcripts on disk.
+
+Bookmarked sessions are marked with `★` in `session recent`, and `session search` matches
+names and tags as well as message text:
+
+```
+$ cckit session search auth
+2026-09-24 06:30  ~/src/app (main)
+  session: 7568e813-f23e-466a-96f5-ee06bb8f6955  turns: 42  matches: bookmark
+  bookmark: auth refactor #auth #infra
+```
+
+Bookmarks are keyed by session id, so a session resumed with `--resume` (which starts a new
+id) does not inherit the name of the one it continues.
 
 ## ls Command
 

@@ -133,6 +133,7 @@ pub fn parse_session_file(path: &Path) -> Option<SessionRecord> {
         started_at,
         ended_at,
         turns,
+        bookmark: None,
     })
 }
 

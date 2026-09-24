@@ -1,3 +1,4 @@
+pub mod bookmark;
 pub mod format;
 pub mod loader;
 pub mod monitor_usage;
@@ -59,6 +60,8 @@ pub struct SessionRecord {
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
     pub turns: Vec<Turn>,
+    /// Name and tags the user attached to this session, when it has any.
+    pub bookmark: Option<bookmark::Bookmark>,
 }
 
 impl SessionRecord {
@@ -90,6 +93,8 @@ impl SessionRecord {
 pub struct Hit {
     pub session: SessionRecord,
     pub matched_turn_indices: Vec<usize>,
+    /// True when the session was found through its bookmark rather than through its turns.
+    pub bookmark_matched: bool,
 }
 
 /// Load every session transcript, drawing a progress line while the scan runs.
@@ -100,8 +105,14 @@ pub fn scan_all_sessions_with_progress() -> Vec<SessionRecord> {
     };
     let paths = loader::collect_session_paths(&home.join(".claude/projects"));
     let progress = progress::ScanProgress::start("scanning transcripts", paths.len());
-    let sessions = loader::parse_paths(&paths, || progress.tick());
+    let mut sessions = loader::parse_paths(&paths, || progress.tick());
     progress.finish();
+    // Every reader of this list (search, recent, the interactive browser) wants the
+    // bookmarks, so they are attached here rather than at each call site.
+    bookmark::attach_bookmarks(
+        &mut sessions,
+        &bookmark::BookmarkStore::new().load_or_warn(),
+    );
     sessions
 }
 
@@ -221,6 +232,7 @@ mod tests {
             file_path: "/tmp/foo.jsonl".into(),
             started_at: ts,
             ended_at: ts,
+            bookmark: None,
             turns,
         };
         assert_eq!(rec.turns.len(), 2);
@@ -260,6 +272,7 @@ mod tests {
             file_path: "/tmp/x.jsonl".into(),
             started_at: ts,
             ended_at: ts,
+            bookmark: None,
             turns,
         };
         assert_eq!(rec.last_assistant_text(), Some("a2"));
@@ -275,6 +288,7 @@ mod tests {
             file_path: "/tmp/x.jsonl".into(),
             started_at: ts,
             ended_at: ts,
+            bookmark: None,
             turns: vec![Turn {
                 role: Role::User,
                 timestamp: ts,

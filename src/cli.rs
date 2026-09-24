@@ -281,6 +281,17 @@ enum SessionCommands {
         json: bool,
     },
 
+    /// Bookmark a session with a name and tags so it can be found again later.
+    #[command(after_help = "\
+Find the session first with `cckit session search`, then bookmark it by its id (a leading
+fragment is enough). Bookmarks are stored separately from the live session list, so they
+survive the session ending. `session recent` and `session search` show them, and
+`session search` matches them as well as the transcript text.")]
+    Bookmark {
+        #[command(subcommand)]
+        command: BookmarkCommands,
+    },
+
     /// Handle hook events from Claude Code (internal use)
     Hook,
 
@@ -315,6 +326,72 @@ enum SessionCommands {
 
     /// Dump Ghostty UI tree for debugging (macOS only)
     DumpUi,
+}
+
+#[derive(Subcommand)]
+enum BookmarkCommands {
+    /// Bookmark a session with a name and tags
+    Set {
+        /// Session id, or a leading fragment of one (omit with --current)
+        session_id: Option<String>,
+
+        /// What to call the session
+        name: Option<String>,
+
+        #[arg(long, help = "Bookmark the session running in this terminal")]
+        current: bool,
+
+        #[arg(
+            long = "tag",
+            value_name = "TAG",
+            help = "Tag to attach (repeatable, or comma-separated)"
+        )]
+        tags: Vec<String>,
+    },
+
+    /// List bookmarked sessions, most recently bookmarked first
+    Ls {
+        #[arg(
+            long,
+            value_name = "TAG",
+            help = "Keep only bookmarks carrying this tag"
+        )]
+        tag: Option<String>,
+
+        #[arg(long, help = "Emit results as a flat JSON array")]
+        json: bool,
+    },
+
+    /// Print the session id of a bookmark, for use in `$(...)`
+    #[command(after_help = "\
+Prints only the id, so it can be substituted into another command:
+
+  claude -w feat/auth --resume $(cckit session bookmark id auth)
+
+The query matches a bookmark name, a tag, or a leading fragment of a session id, in that
+order. Several matches print the candidates on stderr and exit 2 rather than guessing.")]
+    Id {
+        /// Part of a bookmark name, a tag, or a leading fragment of a session id
+        query: String,
+    },
+
+    /// Add or remove tags on an existing bookmark, leaving its name alone
+    Tag {
+        /// Session id, or a leading fragment of one
+        session_id: String,
+
+        /// Tags to add (or to remove with --rm)
+        tags: Vec<String>,
+
+        #[arg(long, help = "Remove the given tags instead of adding them")]
+        rm: bool,
+    },
+
+    /// Remove the bookmark on a session
+    Rm {
+        /// Session id, or a leading fragment of one
+        session_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -7523,6 +7600,48 @@ pub fn run() {
                         Ok(code) => std::process::exit(code),
                         Err(e) => {
                             eprintln!("{}: {}", "Error listing recent sessions".red(), e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Some(SessionCommands::Bookmark { command }) => {
+                    use crate::history::bookmark;
+                    let result = match command {
+                        BookmarkCommands::Set {
+                            session_id,
+                            name,
+                            current,
+                            tags,
+                        } => {
+                            // `set <NAME>` with a single argument reads as a name, not an id,
+                            // when --current says which session is meant.
+                            let (target, name) = match (current, session_id, name) {
+                                (true, first, second) => {
+                                    (bookmark::Target::Current, second.or(first))
+                                }
+                                (false, Some(id), name) => (bookmark::Target::Id(id), name),
+                                (false, None, _) => {
+                                    eprintln!(
+                                        "error: give a session id (from `cckit session search`) or --current."
+                                    );
+                                    std::process::exit(2);
+                                }
+                            };
+                            bookmark::run_set(target, name, tags)
+                        }
+                        BookmarkCommands::Ls { tag, json } => bookmark::run_ls(tag, json),
+                        BookmarkCommands::Id { query } => bookmark::run_id(&query),
+                        BookmarkCommands::Tag {
+                            session_id,
+                            tags,
+                            rm,
+                        } => bookmark::run_tag(&session_id, tags, rm),
+                        BookmarkCommands::Rm { session_id } => bookmark::run_rm(&session_id),
+                    };
+                    match result {
+                        Ok(code) => std::process::exit(code),
+                        Err(e) => {
+                            eprintln!("{}: {}", "Error bookmarking session".red(), e);
                             std::process::exit(1);
                         }
                     }

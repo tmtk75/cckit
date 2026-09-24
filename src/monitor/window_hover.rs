@@ -552,6 +552,7 @@ mod tests {
             file_path: "/tmp/x.jsonl".into(),
             started_at: ts,
             ended_at: ts,
+            bookmark: None,
             turns: turns
                 .into_iter()
                 .map(|(r, s)| Turn {

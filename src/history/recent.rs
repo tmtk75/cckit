@@ -175,6 +175,7 @@ pub fn format_json(groups: &[ProjectGroup]) -> String {
                     "started_at": s.started_at.to_rfc3339(),
                     "ended_at": s.ended_at.to_rfc3339(),
                     "turns": s.turns.len(),
+                    "bookmark": s.bookmark,
                     "first_user_text": s.first_user_text(),
                     "last_user_text": s.last_user_text(),
                     "file_path": s.file_path.display().to_string(),
@@ -235,12 +236,39 @@ fn session_line(session: &SessionRecord, tz: &FixedOffset, width: usize, color: 
         format!("{started}→{ended}").yellow(),
         format!("{turns:>5}").dimmed(),
         session.session_id.blue(),
-        phrases,
+        paint_label_prefix(&phrases, session),
     )
 }
 
-/// "first › last", collapsed to one phrase when the session has a single user turn.
+/// Colour only the leading bookmark so it stands out from the phrases sharing its column.
+/// A bookmark cut short by the width budget is left alone rather than half-painted.
+fn paint_label_prefix(phrases: &str, session: &SessionRecord) -> String {
+    let Some(bookmark) = session.bookmark.as_ref() else {
+        return phrases.to_string();
+    };
+    let prefix = format!("★{}", crate::history::format::bookmark_oneline(bookmark));
+    match phrases.strip_prefix(&prefix) {
+        Some(rest) => format!("{}{}", prefix.magenta(), rest),
+        None => phrases.to_string(),
+    }
+}
+
+/// The bookmark, then "first › last". The bookmark leads because it is what the user chose to
+/// remember the session by; it shares the phrase column so no column is added.
 fn phrases(session: &SessionRecord) -> String {
+    let said = spoken_phrases(session);
+    match session.bookmark.as_ref() {
+        Some(bookmark) => format!(
+            "★{} {}",
+            crate::history::format::bookmark_oneline(bookmark),
+            said
+        ),
+        None => said,
+    }
+}
+
+/// "first › last", collapsed to one phrase when the session has a single user turn.
+fn spoken_phrases(session: &SessionRecord) -> String {
     let Some(first) = session.first_user_text() else {
         return "(no user text)".into();
     };
@@ -349,6 +377,7 @@ mod tests {
             file_path: PathBuf::from(format!("/tmp/{id}.jsonl")),
             started_at: started,
             ended_at: ended,
+            bookmark: None,
             turns: vec![Turn {
                 role: Role::User,
                 timestamp: started,
@@ -626,5 +655,81 @@ mod tests {
                 "/b|-|other",
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+    use crate::history::bookmark::Bookmark;
+    use crate::history::{Role, SessionRecord, Turn};
+    use chrono::TimeZone;
+    use std::path::PathBuf;
+
+    fn tz() -> FixedOffset {
+        FixedOffset::east_opt(9 * 3600).unwrap()
+    }
+
+    fn bookmarked(name: &str, tags: &[&str]) -> SessionRecord {
+        let ts = Utc.with_ymd_and_hms(2026, 9, 18, 3, 0, 0).unwrap();
+        SessionRecord {
+            session_id: "abc-1".into(),
+            cwd: PathBuf::from("/tmp/proj"),
+            git_branch: None,
+            file_path: PathBuf::from("/tmp/abc-1.jsonl"),
+            started_at: ts,
+            ended_at: ts,
+            turns: vec![Turn {
+                role: Role::User,
+                timestamp: ts,
+                text: "hello".into(),
+            }],
+            bookmark: Some(Bookmark {
+                name: name.into(),
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                cwd: None,
+                session_started_at: None,
+                bookmarked_at: ts,
+                updated_at: ts,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_labelled_session_leads_its_phrase_column_with_the_name_and_tags() {
+        let line = session_line(&bookmarked("auth refactor", &["infra"]), &tz(), 200, false);
+        let phrases = line.split("abc-1").nth(1).unwrap();
+        assert!(
+            phrases.trim_start().starts_with("★auth refactor #infra"),
+            "got: {line}"
+        );
+        assert!(phrases.contains("hello"), "got: {line}");
+    }
+
+    #[test]
+    fn an_unlabelled_session_line_is_unchanged() {
+        let mut session = bookmarked("x", &[]);
+        session.bookmark = None;
+        let line = session_line(&session, &tz(), 200, false);
+        let phrases = line.split("abc-1").nth(1).unwrap();
+        assert_eq!(phrases.trim(), "hello");
+    }
+
+    #[test]
+    fn the_coloured_line_paints_the_label_apart_from_the_phrases() {
+        colored::control::set_override(true);
+        let line = session_line(&bookmarked("auth refactor", &["infra"]), &tz(), 200, true);
+        assert!(line.contains("auth refactor"), "got: {line}");
+        // The bookmark carries its own colour sequence, distinct from the uncoloured phrase.
+        let painted = "★auth refactor #infra".magenta().to_string();
+        assert!(line.contains(&painted), "got: {line}");
+    }
+
+    #[test]
+    fn json_carries_the_label() {
+        let groups = group_sessions(vec![bookmarked("auth refactor", &["infra"])]);
+        let parsed: serde_json::Value = serde_json::from_str(&format_json(&groups)).unwrap();
+        assert_eq!(parsed[0]["bookmark"]["name"], "auth refactor");
+        assert_eq!(parsed[0]["bookmark"]["tags"][0], "infra");
     }
 }

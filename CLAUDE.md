@@ -45,6 +45,7 @@ mise run build-app              # runs scripts/macos/build_app.sh
 | File | Role |
 |------|------|
 | `mod.rs` | `SearchOpts`, `SessionRecord`, `Turn`, `Hit`, `MatchMode` data models; `run_search` and the progress-reporting scan entry points |
+| `bookmark.rs` | `session bookmark`: the `bookmarks.json` store (`Bookmark`, `BookmarkBook`, `BookmarkStore`), id-prefix resolution, `--current` terminal lookup, and the `set`/`ls`/`id`/`tag`/`rm` entry points |
 | `loader.rs` | Scan and parse session JSONL transcript files (`collect_session_paths` + `parse_paths`, parsed in parallel via rayon) |
 | `search.rs` | AND-term and fuzzy search over session text |
 | `format.rs` | Plain text and JSON output formatting |
@@ -63,6 +64,40 @@ last activity falls inside `--days N` (default 7), nests them under working dire
 and prints one line per session (time range, turn count, full session id, first and last user phrase).
 The phrase column comes last so the line can be cut to the terminal width without losing the id.
 `--limit` caps the session count (0 = no cap) and `--json` emits a flat array for `jq`.
+
+`session bookmark` answers "what was that session about": a name and tags keyed by session
+id, kept in `<data_dir>/bookmarks.json` rather than on the `Session` records in
+`sessions.json`, which `sync_sessions` wipes once the TTY or process is gone.
+
+**Writing is CLI-only, by design.** A first version opened a picker over every transcript
+and it was unusable: this corpus is thousands of files, and a list of them all is not
+something a person reads. The workflow is `session search` to find the session, then
+`bookmark set <ID>` with a leading fragment of the id. Do not reintroduce a picker, and do
+not put bookmark editing inside the search TUI either: the point is that writing a
+bookmark costs one command, not a session in an interactive app.
+
+`attach_bookmarks` is applied inside `scan_all_sessions_with_progress`, so every reader
+(`search`, `recent`, the interactive browser) sees bookmarks without its own call.
+`recent` prints the bookmark at the head of the phrase column (`★name #tag`, magenta) so
+no column is added; `search` matches name and tags as well as turn text and reports a
+bookmark-only hit as `matches: bookmark`. The bookmark is also folded into
+`searchable_text`, which is what the interactive fuzzy filter reads. `--current` finds the
+session by terminal: `current_tty` walks up to five levels of the process tree because a
+command run from a tool call sits in a shell with no controlling terminal, and a `tty` of
+`unknown` matches nothing (Codex Desktop sessions record `unknown` too, so matching on it
+would bookmark an unrelated session). `bookmark ls` and `bookmark id` read only `bookmarks.json`, which is why `cwd` and
+`session_started_at` are copied into each bookmark when it is written. `lookup` casts
+three nets in order (name substring, tag, id prefix) and the first that catches anything
+decides; name beats tag because a tag is the broader net and would turn a unique answer
+ambiguous. Several matches are never narrowed to one: `bookmark id` is built for `$(...)`,
+where resuming the wrong session silently is worse than failing. `upsert` returns what it
+displaced so `set` can print `renamed … from … to …`, which is what makes a `--current`
+fired in the wrong terminal visible. `set` replaces the whole bookmark, so `edit_tags`
+(`bookmark tag`) exists for adding or dropping one tag without retyping the name; it
+reports tags that were already set or were not there to remove, and refuses an edit that
+would leave a nameless bookmark with no tags (`rm` is how you delete one). The listing
+ends with the store path so an empty result is not mistaken for cckit reading a different
+file.
 
 `monitor ls` answers "which projects run background monitors, how often, and when last": it reads the
 `Monitor` tool_use blocks out of the same transcripts, groups them by working directory then by the
