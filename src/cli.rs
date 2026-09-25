@@ -21,6 +21,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// List Claude Code projects with their skills, agents, and MCP servers
+    #[command(visible_alias = "l")]
     Ls {
         #[arg(
             short,
@@ -64,12 +65,14 @@ enum Commands {
     },
 
     /// Manage Claude Code sessions
+    #[command(visible_alias = "s")]
     Session {
         #[command(subcommand)]
         command: Option<SessionCommands>,
     },
 
     /// Inspect background Monitor tasks launched by past sessions
+    #[command(visible_alias = "mon")]
     Monitor {
         #[command(subcommand)]
         command: Option<MonitorCommands>,
@@ -86,24 +89,28 @@ enum Commands {
     },
 
     /// Manage skills across projects
+    #[command(visible_alias = "sk")]
     Skill {
         #[command(subcommand)]
         command: SkillCommands,
     },
 
     /// Manage MCP servers across projects
+    #[command(visible_alias = "mc")]
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
     },
 
     /// Manage agents across projects
+    #[command(visible_alias = "a")]
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
     },
 
     /// Inspect and validate a custom plugin marketplace
+    #[command(visible_alias = "mk")]
     Marketplace {
         #[command(subcommand)]
         command: MarketplaceCommands,
@@ -215,6 +222,7 @@ enum Commands {
 #[derive(Subcommand)]
 enum SessionCommands {
     /// List active sessions (TUI, default)
+    #[command(visible_alias = "l")]
     Ls {
         #[arg(short, long, help = "Show as text instead of TUI")]
         text: bool,
@@ -243,6 +251,7 @@ enum SessionCommands {
 
     /// Search past Claude Code sessions by user-message text (AND terms).
     /// Required unless --interactive is used (in which case it seeds the TUI query).
+    #[command(visible_alias = "s")]
     Search {
         /// Search terms (AND-matched in non-interactive mode; joined as fuzzy query in -i)
         #[arg(num_args = 0..)]
@@ -267,6 +276,7 @@ enum SessionCommands {
 
     /// List past sessions from the last N days, grouped by project and git branch.
     /// One line per session: time range, turn count, full session id, first and last user phrase.
+    #[command(visible_alias = "r")]
     Recent {
         /// Size of the lookback window in days
         #[arg(long, default_value = "7")]
@@ -287,6 +297,7 @@ Find the session first with `cckit session search`, then bookmark it by its id (
 fragment is enough). Bookmarks are stored separately from the live session list, so they
 survive the session ending. `session recent` and `session search` show them, and
 `session search` matches them as well as the transcript text.")]
+    #[command(visible_alias = "b")]
     Bookmark {
         #[command(subcommand)]
         command: BookmarkCommands,
@@ -361,6 +372,7 @@ impl From<GroupByArg> for crate::history::bookmark::GroupBy {
 #[derive(Subcommand)]
 enum BookmarkCommands {
     /// Bookmark a session with a name and tags
+    #[command(visible_alias = "s")]
     Set {
         /// Session id, or a leading fragment of one (omit with --current)
         session_id: Option<String>,
@@ -368,7 +380,7 @@ enum BookmarkCommands {
         /// What to call the session
         name: Option<String>,
 
-        #[arg(long, help = "Bookmark the session running in this terminal")]
+        #[arg(short, long, help = "Bookmark the session running in this terminal")]
         current: bool,
 
         #[arg(
@@ -380,6 +392,7 @@ enum BookmarkCommands {
     },
 
     /// List bookmarked sessions, most recently bookmarked first
+    #[command(visible_alias = "l")]
     Ls {
         #[arg(
             long,
@@ -413,12 +426,14 @@ Prints only the id, so it can be substituted into another command:
 
 The query matches a bookmark name, a tag, or a leading fragment of a session id, in that
 order. Several matches print the candidates on stderr and exit 2 rather than guessing.")]
+    #[command(visible_alias = "i")]
     Id {
         /// Part of a bookmark name, a tag, or a leading fragment of a session id
         query: String,
     },
 
     /// Add or remove tags on an existing bookmark, leaving its name alone
+    #[command(visible_alias = "t")]
     Tag {
         /// Session id, or a leading fragment of one
         session_id: String,
@@ -446,6 +461,7 @@ Launch history: without --alive a listed monitor is not necessarily still runnin
 launch with persistent=false expires after its timeout, and one stopped with TaskStop
 leaves the transcript looking the same as one still streaming. --alive cross-checks the
 process table and marks the rows a process is actually running (\x1b[32m●\x1b[0m).")]
+    #[command(visible_alias = "l")]
     Ls {
         /// Size of the lookback window in days (0 = full history)
         #[arg(long, default_value = "90")]
@@ -480,6 +496,7 @@ Origins:
   \x1b[35mplugin\x1b[0m       bundled inside an installed plugin
   \x1b[33m<author>\x1b[0m     author field value from frontmatter
   \x1b[2mno author\x1b[0m    no author field in frontmatter")]
+    #[command(visible_alias = "l")]
     Ls {
         /// Focus on a specific project's skills (e.g. `.` for current dir). Excludes global/plugin skills.
         project_path: Option<String>,
@@ -579,6 +596,7 @@ Examples:
 #[derive(Subcommand)]
 enum McpCommands {
     /// List all MCP servers with their origin
+    #[command(visible_alias = "l")]
     Ls {
         #[arg(short, long, help = "Filter MCP servers by name pattern")]
         filter: Option<String>,
@@ -633,6 +651,7 @@ enum McpCommands {
 #[derive(Subcommand)]
 enum AgentCommands {
     /// List all agents with their origin
+    #[command(visible_alias = "l")]
     Ls {
         #[arg(short, long, help = "Filter agents by name pattern")]
         filter: Option<String>,
@@ -8299,5 +8318,190 @@ name: agent-name
                 &["~/.ghq/proj".to_string()]
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn parse(argv: &[&str]) -> Cli {
+        Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?} did not parse: {e}"))
+    }
+
+    #[test]
+    fn the_command_tree_has_no_conflicting_names_or_aliases() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn bookmarking_the_current_session_fits_in_four_words() {
+        // `cckit s b s -c "something"` is the whole point of the aliases: the command
+        // typed most often should not also be the longest one to type.
+        let cli = parse(&["cckit", "s", "b", "s", "-c", "something"]);
+        let Some(Commands::Session {
+            command:
+                Some(SessionCommands::Bookmark {
+                    command:
+                        BookmarkCommands::Set {
+                            session_id,
+                            name,
+                            current,
+                            tags,
+                        },
+                }),
+        }) = cli.command
+        else {
+            panic!("the short form did not reach `session bookmark set`");
+        };
+        assert!(current);
+        // With --current the lone positional reads as a name, which `run_set` sorts out.
+        assert_eq!(session_id.as_deref(), Some("something"));
+        assert_eq!(name, None);
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn the_top_level_aliases_land_on_the_commands_they_abbreviate() {
+        assert!(matches!(
+            parse(&["cckit", "s"]).command,
+            Some(Commands::Session { .. })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "sk", "ls"]).command,
+            Some(Commands::Skill { .. })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "mc", "ls"]).command,
+            Some(Commands::Mcp { .. })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "mon"]).command,
+            Some(Commands::Monitor { .. })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "a", "ls"]).command,
+            Some(Commands::Agent { .. })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "mk", "summary", "."]).command,
+            Some(Commands::Marketplace { .. })
+        ));
+    }
+
+    #[test]
+    fn the_session_aliases_land_on_the_commands_they_abbreviate() {
+        let session = |argv: &[&str]| match parse(argv).command {
+            Some(Commands::Session { command }) => command,
+            _ => panic!("{argv:?} is not a session command"),
+        };
+        assert!(matches!(
+            session(&["cckit", "s", "l"]),
+            Some(SessionCommands::Ls { .. })
+        ));
+        assert!(matches!(
+            session(&["cckit", "s", "s"]),
+            Some(SessionCommands::Search { .. })
+        ));
+        assert!(matches!(
+            session(&["cckit", "s", "r"]),
+            Some(SessionCommands::Recent { .. })
+        ));
+        assert!(matches!(
+            session(&["cckit", "s", "b", "l"]),
+            Some(SessionCommands::Bookmark { .. })
+        ));
+    }
+
+    #[test]
+    fn the_bookmark_aliases_land_on_the_commands_they_abbreviate() {
+        let bookmark = |argv: &[&str]| match parse(argv).command {
+            Some(Commands::Session {
+                command: Some(SessionCommands::Bookmark { command }),
+            }) => command,
+            _ => panic!("{argv:?} is not a bookmark command"),
+        };
+        assert!(matches!(
+            bookmark(&["cckit", "s", "b", "l"]),
+            BookmarkCommands::Ls { .. }
+        ));
+        assert!(matches!(
+            bookmark(&["cckit", "s", "b", "i", "auth"]),
+            BookmarkCommands::Id { .. }
+        ));
+        assert!(matches!(
+            bookmark(&["cckit", "s", "b", "t", "7568", "cckit"]),
+            BookmarkCommands::Tag { .. }
+        ));
+    }
+
+    #[test]
+    fn listing_is_spelled_l_wherever_a_command_lists_things() {
+        assert!(matches!(
+            parse(&["cckit", "l"]).command,
+            Some(Commands::Ls { .. })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "sk", "l"]).command,
+            Some(Commands::Skill {
+                command: SkillCommands::Ls { .. }
+            })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "mc", "l"]).command,
+            Some(Commands::Mcp {
+                command: McpCommands::Ls { .. }
+            })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "a", "l"]).command,
+            Some(Commands::Agent {
+                command: AgentCommands::Ls { .. }
+            })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "mon", "l"]).command,
+            Some(Commands::Monitor {
+                command: Some(MonitorCommands::Ls { .. })
+            })
+        ));
+    }
+
+    #[test]
+    fn commands_that_change_the_machine_keep_their_full_name() {
+        // A mistyped `session i` must not install hooks, and a mistyped `session u` must
+        // not tear them out. These are rare enough that spelling them costs nothing.
+        for argv in [
+            ["cckit", "s", "i"],
+            ["cckit", "s", "u"],
+            ["cckit", "s", "h"],
+            ["cckit", "s", "f"],
+        ] {
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{argv:?} should not be a valid short form"
+            );
+        }
+    }
+
+    #[test]
+    fn the_full_names_still_work() {
+        assert!(matches!(
+            parse(&["cckit", "session", "bookmark", "set", "--current", "x"]).command,
+            Some(Commands::Session {
+                command: Some(SessionCommands::Bookmark {
+                    command: BookmarkCommands::Set { current: true, .. }
+                })
+            })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "marketplace", "doctor", "."]).command,
+            Some(Commands::Marketplace { .. })
+        ));
+        assert!(matches!(
+            parse(&["cckit", "status"]).command,
+            Some(Commands::Status)
+        ));
     }
 }

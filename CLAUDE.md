@@ -40,6 +40,16 @@ mise run build-app              # runs scripts/macos/build_app.sh
 
 **CLI layer** (`src/cli.rs`, ~7900 lines): All subcommand definitions (clap derive), project scanning logic (`ls`, `prune`, `config`, `doctor`, `status`, `tidy-up`, `permissions`), YAML frontmatter parsing for skills/agents/commands, and dedicated `skill`/`mcp`/`agent` management subcommands (`ls`, `copy`, `promote`, `prune`, `remove`, `stale`, `how-to-remove`, `validate`). `mcp prune` removes stale MCP residue (orphaned `enabledMcpjsonServers`/`disabledMcpjsonServers` approvals and empty `.mcp.json` files); `mcp remove` deletes matching MCP server definitions across project/user/global scopes (plugin entries are reported, not removed); both are dry-run by default with `--execute` to apply and `.bak` backups. `skill remove` moves matching directory skills to a reversible trash (`<data_dir>/trash/`; marketplace/plugin untouched). `skill stale` mines Skill tool invocations from `~/.claude/projects/**/*.jsonl` to flag skills not fired in `--days N` (default 90), with an origin label (`self` / `external:marketplace` / `external:installed`).
 
+**Subcommand aliases** are explicit `visible_alias` attributes, not clap's
+`infer_subcommands`: `s` is ambiguous between `session`, `skill` and `status`, so inference
+rejects the shortest form anyone actually wants to type. `ls` is `l` at every level;
+`session` `s`, `skill` `sk`, `mcp` `mc`, `monitor` `mon`, `agent` `a`, `marketplace` `mk`;
+under `session` `s`/`r`/`b` for search/recent/bookmark, and under `bookmark` `s`/`l`/`i`/`t`.
+`install`, `uninstall`, `hook`, `sync` and `focus` are deliberately left unabbreviated, and
+`alias_tests` asserts they stay that way: those rewrite hook configuration, and a one-letter
+slip should not reach them. `Cli::command().debug_assert()` runs as a test so a new alias
+that collides fails the suite rather than a user's first invocation.
+
 **History module** (`src/history/`): Session search and browsing across past Claude Code transcripts.
 
 | File | Role |

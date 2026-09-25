@@ -51,6 +51,24 @@ cckit status       # Show cckit status and file paths
 cckit doctor       # Check cckit configuration health
 ```
 
+### Short forms
+
+The commands typed daily carry a one- or two-letter alias, listed by `--help` as
+`[aliases: ...]`:
+
+```bash
+cckit s b s -c "something"   # = cckit session bookmark set --current "something"
+cckit s r                    # = cckit session recent
+cckit s s auth               # = cckit session search auth
+cckit sk l                   # = cckit skill ls
+```
+
+`ls` is `l` wherever a command lists things. `session` is `s`, `skill` is `sk`, `mcp` is
+`mc`, `monitor` is `mon`, `agent` is `a`, `marketplace` is `mk`. Under `session`: `l`, `s`
+(search), `r` (recent), `b` (bookmark); under `bookmark`: `s` (set), `l`, `i` (id), `t`
+(tag). `install`, `uninstall`, `hook`, `sync` and `focus` keep their full names on purpose,
+so a slip of the finger cannot rewrite a hook configuration.
+
 ## session Command
 
 Track active Claude Code sessions in real-time via hooks.
