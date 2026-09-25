@@ -239,6 +239,9 @@ cckit session bookmark set --current "auth refactor" --tag auth
 # List what you have bookmarked, newest first
 cckit session bookmark ls
 cckit session bookmark ls --tag auth
+cckit session bookmark ls --here            # only what ran in this directory or below
+cckit session bookmark ls --group-by path   # bucket by directory
+cckit session bookmark ls --group-by tag    # bucket by tag
 cckit session bookmark ls --json
 
 # Add or remove tags later, without retyping the name
@@ -281,6 +284,28 @@ confused with "cckit is reading a different file than you think":
 ```
 4 bookmarks in ~/Library/Application Support/cckit/bookmarks.json
 ```
+
+`--here` keeps the sessions that ran in the current directory **or below it**, so a repo
+root finds work started deep inside it. Paths are compared segment by segment, so a
+worktree sitting next to the repo (`proj-wt` beside `proj`) is not swept in.
+
+`--group-by tag` lists a bookmark under **every** tag it carries, rather than picking one.
+Collapsing it would mean searching `#design` and not finding something tagged `#design`.
+Untagged bookmarks collect under `(no tag)` at the end, and the footer counts rows rather
+than bookmarks, since one bookmark with two tags is two rows.
+
+```
+$ cckit session bookmark ls --group-by tag
+#jch
+  2026-09-25 17:12  jch-338. TLS version #jch #tls  066f035c-…  ~/src/team-server-jp/…
+
+#tls
+  2026-09-25 17:12  jch-338. TLS version #jch #tls  066f035c-…  ~/src/team-server-jp/…
+```
+
+Under `--group-by path` the row stops at the session id, because the heading already
+names the directory. `--json` stays flat whatever the grouping, so `jq` consumers do not
+have to follow a shape that changes with a display flag.
 
 Overwriting an existing bookmark says what it replaced, so a `--current` that landed on
 the wrong terminal is visible rather than silent:

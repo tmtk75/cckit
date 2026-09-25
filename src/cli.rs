@@ -342,6 +342,22 @@ survive the session ending. `session recent` and `session search` show them, and
     DumpUi,
 }
 
+/// What `bookmark ls --group-by` accepts.
+#[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+enum GroupByArg {
+    Path,
+    Tag,
+}
+
+impl From<GroupByArg> for crate::history::bookmark::GroupBy {
+    fn from(arg: GroupByArg) -> Self {
+        match arg {
+            GroupByArg::Path => Self::Path,
+            GroupByArg::Tag => Self::Tag,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum BookmarkCommands {
     /// Bookmark a session with a name and tags
@@ -371,6 +387,19 @@ enum BookmarkCommands {
             help = "Keep only bookmarks carrying this tag"
         )]
         tag: Option<String>,
+
+        #[arg(
+            long,
+            help = "Keep only sessions that ran in this directory or below it"
+        )]
+        here: bool,
+
+        #[arg(
+            long = "group-by",
+            value_name = "WHAT",
+            help = "Group the listing under headings: path or tag"
+        )]
+        group_by: Option<GroupByArg>,
 
         #[arg(long, help = "Emit results as a flat JSON array")]
         json: bool,
@@ -7643,7 +7672,12 @@ pub fn run() {
                             };
                             bookmark::run_set(target, name, tags)
                         }
-                        BookmarkCommands::Ls { tag, json } => bookmark::run_ls(tag, json),
+                        BookmarkCommands::Ls {
+                            tag,
+                            here,
+                            group_by,
+                            json,
+                        } => bookmark::run_ls(tag, here, group_by.map(Into::into), json),
                         BookmarkCommands::Id { query } => bookmark::run_id(&query),
                         BookmarkCommands::Tag {
                             session_id,

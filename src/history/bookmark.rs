@@ -568,19 +568,42 @@ pub fn run_tag(prefix: &str, tags: Vec<String>, remove: bool) -> io::Result<i32>
 }
 
 /// `cckit session bookmark ls`.
-pub fn run_ls(tag: Option<String>, json: bool) -> io::Result<i32> {
+pub fn run_ls(
+    tag: Option<String>,
+    here: bool,
+    group_by: Option<GroupBy>,
+    json: bool,
+) -> io::Result<i32> {
     let store = BookmarkStore::new();
     let book = store.load()?;
-    let entries = match tag.as_deref() {
+    let mut entries = match tag.as_deref() {
         Some(tag) => book.with_tag(tag),
         None => book.entries_newest_first(),
     };
+    if here {
+        let root = std::env::current_dir()?;
+        entries.retain(|(_, bookmark)| is_under(bookmark, &root));
+    }
+
     if json {
+        // The JSON stays flat whatever the grouping: a `jq` consumer can bucket it however
+        // it likes, and a shape that changes with a display flag is harder to depend on.
         println!("{}", format_list_json(&entries));
-    } else {
-        let tz = chrono::Local::now().offset().fix();
-        let color = colored::control::SHOULD_COLORIZE.should_colorize();
-        print!("{}", format_list(&entries, &tz, color, store.path()));
+        return Ok(0);
+    }
+
+    let tz = chrono::Local::now().offset().fix();
+    let color = colored::control::SHOULD_COLORIZE.should_colorize();
+    match group_by {
+        Some(GroupBy::Path) => print!(
+            "{}",
+            format_groups(&group_by_path(&entries), &tz, color, store.path())
+        ),
+        Some(GroupBy::Tag) => print!(
+            "{}",
+            format_groups(&group_by_tag(&entries), &tz, color, store.path())
+        ),
+        None => print!("{}", format_list(&entries, &tz, color, store.path())),
     }
     Ok(0)
 }
@@ -626,6 +649,192 @@ fn transcript_paths() -> Vec<PathBuf> {
     crate::history::loader::collect_session_paths(&home.join(".claude/projects"))
 }
 
+/// Whether a bookmark's session ran in `root` or anywhere below it.
+///
+/// Compared segment by segment rather than as text, so a sibling that merely shares a
+/// prefix (`/proj-wt` next to `/proj`, which is what a worktree looks like) is not taken
+/// for a child. A bookmark written before cckit recorded the cwd matches nothing.
+pub fn is_under(bookmark: &Bookmark, root: &Path) -> bool {
+    bookmark
+        .cwd
+        .as_deref()
+        .is_some_and(|cwd| Path::new(cwd).starts_with(root))
+}
+
+/// One heading and the bookmarks under it.
+pub struct Group<'a> {
+    pub heading: String,
+    pub entries: Vec<(&'a str, &'a Bookmark)>,
+    /// False when the heading already names the directory, so the rows need not repeat it.
+    pub rows_show_cwd: bool,
+}
+
+/// Sort newest first so grouping does not depend on how the caller happened to order
+/// its input: the first group, and the first row inside it, are then the most recent.
+fn newest_first<'a>(entries: &[(&'a str, &'a Bookmark)]) -> Vec<(&'a str, &'a Bookmark)> {
+    let mut sorted = entries.to_vec();
+    sorted.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at).then(a.0.cmp(b.0)));
+    sorted
+}
+
+/// Bucket by the directory the session ran in, newest group first.
+pub fn group_by_path<'a>(entries: &[(&'a str, &'a Bookmark)]) -> Vec<Group<'a>> {
+    let heading_of = |b: &Bookmark| b.cwd.clone().unwrap_or_else(|| UNKNOWN_HEADING.to_string());
+    let mut groups: Vec<Group<'a>> = Vec::new();
+    for (id, bookmark) in &newest_first(entries) {
+        let heading = heading_of(bookmark);
+        match groups.iter_mut().find(|g| g.heading == heading) {
+            Some(group) => group.entries.push((id, bookmark)),
+            None => groups.push(Group {
+                heading,
+                entries: vec![(id, bookmark)],
+                rows_show_cwd: false,
+            }),
+        }
+    }
+    groups
+}
+
+/// Bucket by tag, newest group first, with the untagged ones last.
+///
+/// A bookmark appears under every tag it carries. Collapsing it to one would mean
+/// searching `#design` and not finding something that is tagged `#design`.
+pub fn group_by_tag<'a>(entries: &[(&'a str, &'a Bookmark)]) -> Vec<Group<'a>> {
+    let mut groups: Vec<Group<'a>> = Vec::new();
+    let mut untagged: Vec<(&'a str, &'a Bookmark)> = Vec::new();
+
+    for (id, bookmark) in &newest_first(entries) {
+        if bookmark.tags.is_empty() {
+            untagged.push((id, bookmark));
+            continue;
+        }
+        for tag in &bookmark.tags {
+            let heading = format!("#{tag}");
+            match groups.iter_mut().find(|g| g.heading == heading) {
+                Some(group) => group.entries.push((id, bookmark)),
+                None => groups.push(Group {
+                    heading,
+                    entries: vec![(id, bookmark)],
+                    rows_show_cwd: true,
+                }),
+            }
+        }
+    }
+    if !untagged.is_empty() {
+        groups.push(Group {
+            heading: NO_TAG_HEADING.to_string(),
+            entries: untagged,
+            rows_show_cwd: true,
+        });
+    }
+    groups
+}
+
+/// One bookmark as a row: when it was last edited, what it says, its session id, and the
+/// directory it ran in. Shared so the flat and grouped listings cannot drift apart.
+fn bookmark_row(
+    session_id: &str,
+    bookmark: &Bookmark,
+    tz: &chrono::FixedOffset,
+    color: bool,
+    show_cwd: bool,
+) -> String {
+    use colored::Colorize;
+
+    let home = dirs::home_dir();
+    let when = bookmark
+        .updated_at
+        .with_timezone(tz)
+        .format("%Y-%m-%d %H:%M");
+    let text = crate::history::format::bookmark_oneline(bookmark);
+    let cwd = bookmark
+        .cwd
+        .as_deref()
+        .filter(|_| show_cwd)
+        .map(|c| shorten_home(c, home.as_deref()))
+        .unwrap_or_default();
+    let head = if color {
+        format!(
+            "{}  {}  {}",
+            when.to_string().dimmed(),
+            text.magenta(),
+            session_id.blue(),
+        )
+    } else {
+        format!("{when}  {text}  {session_id}")
+    };
+    // Under `--group-by path` the heading already names the directory, so the row ends
+    // at the session id rather than trailing an empty column.
+    if cwd.is_empty() {
+        return head;
+    }
+    if color {
+        format!("{head}  {}", cwd.dimmed())
+    } else {
+        format!("{head}  {cwd}")
+    }
+}
+
+/// The grouping `bookmark ls` was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupBy {
+    Path,
+    Tag,
+}
+
+/// Headings with their bookmarks indented underneath, laid out like `session recent`
+/// so both listings read the same way.
+pub fn format_groups(
+    groups: &[Group<'_>],
+    tz: &chrono::FixedOffset,
+    color: bool,
+    store_path: &Path,
+) -> String {
+    use colored::Colorize;
+
+    let home = dirs::home_dir();
+    let where_kept = shorten_home(&store_path.display().to_string(), home.as_deref());
+    if groups.is_empty() {
+        return format!("No bookmarks matched.\n\nBookmarks are kept in {where_kept}\n");
+    }
+
+    let mut out = String::new();
+    let mut shown = 0usize;
+    for (i, group) in groups.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let heading = shorten_home(&group.heading, home.as_deref());
+        out.push_str(&if color {
+            format!("{}\n", heading.cyan().bold())
+        } else {
+            format!("{heading}\n")
+        });
+        for (session_id, bookmark) in &group.entries {
+            out.push_str(&format!(
+                "  {}\n",
+                bookmark_row(session_id, bookmark, tz, color, group.rows_show_cwd)
+            ));
+            shown += 1;
+        }
+    }
+    let unit = if shown == 1 { "row" } else { "rows" };
+    // A bookmark with two tags is two rows under `--group-by tag`, so this counts rows
+    // rather than claiming a bookmark count the listing does not show.
+    let footer = format!("\n{shown} {unit} in {where_kept}\n");
+    out.push_str(&if color {
+        footer.dimmed().to_string()
+    } else {
+        footer
+    });
+    out
+}
+
+/// Heading for bookmarks written before cckit recorded the working directory.
+const UNKNOWN_HEADING: &str = "(unknown)";
+/// Heading for the bookmarks carrying no tag at all.
+const NO_TAG_HEADING: &str = "(no tag)";
+
 /// One line per bookmark: when it was last edited, what it says, which session it names,
 /// and where that session ran. The project comes last so a narrow terminal cuts it
 /// rather than the id.
@@ -651,27 +860,10 @@ pub fn format_list(
     }
     let mut out = String::new();
     for (session_id, bookmark) in entries {
-        let when = bookmark
-            .updated_at
-            .with_timezone(tz)
-            .format("%Y-%m-%d %H:%M");
-        let text = crate::history::format::bookmark_oneline(bookmark);
-        let cwd = bookmark
-            .cwd
-            .as_deref()
-            .map(|c| shorten_home(c, home.as_deref()))
-            .unwrap_or_default();
-        if color {
-            out.push_str(&format!(
-                "{}  {}  {}  {}\n",
-                when.to_string().dimmed(),
-                text.magenta(),
-                session_id.blue(),
-                cwd.dimmed(),
-            ));
-        } else {
-            out.push_str(&format!("{when}  {text}  {session_id}  {cwd}\n"));
-        }
+        out.push_str(&format!(
+            "{}\n",
+            bookmark_row(session_id, bookmark, tz, color, true)
+        ));
     }
     let count = entries.len();
     let unit = if count == 1 { "bookmark" } else { "bookmarks" };
@@ -1612,5 +1804,190 @@ mod listing_footer_tests {
         // the path is what tells them apart.
         let out = format_list(&[], &tz(), false, Path::new("/data/bookmarks.json"));
         assert!(out.contains("/data/bookmarks.json"), "got: {out}");
+    }
+}
+
+#[cfg(test)]
+mod ls_filter_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    fn bookmark(name: &str, tags: &[&str], cwd: Option<&str>) -> Bookmark {
+        Bookmark {
+            name: name.into(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            cwd: cwd.map(|c| c.to_string()),
+            session_started_at: None,
+            bookmarked_at: at(0),
+            updated_at: at(0),
+        }
+    }
+
+    #[test]
+    fn under_keeps_the_directory_itself() {
+        let b = bookmark("x", &[], Some("/home/me/proj"));
+        assert!(is_under(&b, Path::new("/home/me/proj")));
+    }
+
+    #[test]
+    fn under_keeps_a_subdirectory() {
+        // A repo root should find work started deep inside it.
+        let b = bookmark("x", &[], Some("/home/me/proj/a/b"));
+        assert!(is_under(&b, Path::new("/home/me/proj")));
+    }
+
+    #[test]
+    fn under_drops_a_parent_directory() {
+        // Standing in a subdirectory does not make the parent's sessions yours.
+        let b = bookmark("x", &[], Some("/home/me"));
+        assert!(!is_under(&b, Path::new("/home/me/proj")));
+    }
+
+    #[test]
+    fn under_does_not_match_a_sibling_that_merely_shares_a_prefix() {
+        // A worktree is a sibling path, not a child: /proj must not catch /proj-wt.
+        let b = bookmark("x", &[], Some("/home/me/proj-wt"));
+        assert!(!is_under(&b, Path::new("/home/me/proj")));
+    }
+
+    #[test]
+    fn a_bookmark_with_no_recorded_cwd_is_not_under_anything() {
+        let b = bookmark("x", &[], None);
+        assert!(!is_under(&b, Path::new("/home/me/proj")));
+    }
+}
+
+#[cfg(test)]
+mod ls_grouping_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    fn bookmark(name: &str, tags: &[&str], cwd: Option<&str>, updated: i64) -> Bookmark {
+        Bookmark {
+            name: name.into(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            cwd: cwd.map(|c| c.to_string()),
+            session_started_at: None,
+            bookmarked_at: at(0),
+            updated_at: at(updated),
+        }
+    }
+
+    #[test]
+    fn grouping_by_path_puts_each_directory_under_its_own_heading() {
+        let a = bookmark("a", &[], Some("/p/one"), 10);
+        let b = bookmark("b", &[], Some("/p/two"), 20);
+        let groups = group_by_path(&[("a", &a), ("b", &b)]);
+
+        let headings: Vec<&str> = groups.iter().map(|g| g.heading.as_str()).collect();
+        // Newest group first, like every other listing in cckit.
+        assert_eq!(headings, vec!["/p/two", "/p/one"]);
+    }
+
+    #[test]
+    fn a_bookmark_without_a_cwd_lands_in_a_named_bucket() {
+        let a = bookmark("a", &[], None, 10);
+        let groups = group_by_path(&[("a", &a)]);
+        assert_eq!(groups[0].heading, "(unknown)");
+    }
+
+    #[test]
+    fn grouping_by_tag_lists_a_bookmark_under_each_of_its_tags() {
+        // Dropping the duplicate would make "I searched #design and it wasn't there".
+        let a = bookmark("a", &["cckit", "design"], None, 10);
+        let groups = group_by_tag(&[("a", &a)]);
+
+        let headings: Vec<&str> = groups.iter().map(|g| g.heading.as_str()).collect();
+        assert_eq!(headings, vec!["#cckit", "#design"]);
+        assert_eq!(groups[0].entries.len(), 1);
+        assert_eq!(groups[1].entries.len(), 1);
+    }
+
+    #[test]
+    fn untagged_bookmarks_collect_at_the_end() {
+        let a = bookmark("a", &["cckit"], None, 10);
+        let b = bookmark("b", &[], None, 20);
+        let groups = group_by_tag(&[("b", &b), ("a", &a)]);
+
+        let headings: Vec<&str> = groups.iter().map(|g| g.heading.as_str()).collect();
+        assert_eq!(headings, vec!["#cckit", "(no tag)"]);
+    }
+
+    #[test]
+    fn tag_groups_are_ordered_by_their_newest_member() {
+        let old = bookmark("old", &["alpha"], None, 10);
+        let new = bookmark("new", &["zulu"], None, 20);
+        let groups = group_by_tag(&[("old", &old), ("new", &new)]);
+
+        let headings: Vec<&str> = groups.iter().map(|g| g.heading.as_str()).collect();
+        assert_eq!(headings, vec!["#zulu", "#alpha"]);
+    }
+}
+
+#[cfg(test)]
+mod group_render_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn bookmark(name: &str, tags: &[&str], cwd: Option<&str>) -> Bookmark {
+        let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        Bookmark {
+            name: name.into(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            cwd: cwd.map(|c| c.to_string()),
+            session_started_at: None,
+            bookmarked_at: ts,
+            updated_at: ts,
+        }
+    }
+
+    fn tz() -> chrono::FixedOffset {
+        chrono::FixedOffset::east_opt(9 * 3600).unwrap()
+    }
+
+    #[test]
+    fn grouping_by_path_does_not_repeat_the_directory_on_every_row() {
+        // The heading already says where it ran; saying it again doubles the line length.
+        let b = bookmark("work", &[], Some("/p/one"));
+        let out = format_groups(
+            &group_by_path(&[("abc", &b)]),
+            &tz(),
+            false,
+            Path::new("/d/bookmarks.json"),
+        );
+        assert_eq!(out.matches("/p/one").count(), 1, "got:\n{out}");
+    }
+
+    #[test]
+    fn grouping_by_tag_keeps_the_directory_on_each_row() {
+        // Here the heading is a tag, so the row is the only place the path can appear.
+        let b = bookmark("work", &["cckit"], Some("/p/one"));
+        let out = format_groups(
+            &group_by_tag(&[("abc", &b)]),
+            &tz(),
+            false,
+            Path::new("/d/bookmarks.json"),
+        );
+        assert!(out.contains("/p/one"), "got:\n{out}");
+    }
+
+    #[test]
+    fn the_footer_counts_rows_not_bookmarks_when_a_tag_repeats_one() {
+        let b = bookmark("work", &["cckit", "design"], None);
+        let out = format_groups(
+            &group_by_tag(&[("abc", &b)]),
+            &tz(),
+            false,
+            Path::new("/d/bookmarks.json"),
+        );
+        assert!(out.contains("2 rows"), "got:\n{out}");
     }
 }

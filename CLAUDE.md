@@ -97,7 +97,14 @@ fired in the wrong terminal visible. `set` replaces the whole bookmark, so `edit
 reports tags that were already set or were not there to remove, and refuses an edit that
 would leave a nameless bookmark with no tags (`rm` is how you delete one). The listing
 ends with the store path so an empty result is not mistaken for cckit reading a different
-file.
+file. `--here` filters with `is_under`, which compares path segments rather than text so
+a worktree beside the repo (`proj-wt` next to `proj`) is not swept in; `--group-by`
+buckets with `group_by_path` / `group_by_tag`, both of which sort newest-first themselves
+rather than trusting the caller order. A bookmark appears under every tag it carries
+(collapsing it would make `#design` fail to find something tagged `#design`), so the
+grouped footer counts rows, not bookmarks. Under `--group-by path` the rows drop the cwd
+column because the heading already carries it, and `--json` stays flat under every
+grouping so consumers do not track a shape that moves with a display flag.
 
 `monitor ls` answers "which projects run background monitors, how often, and when last": it reads the
 `Monitor` tool_use blocks out of the same transcripts, groups them by working directory then by the
