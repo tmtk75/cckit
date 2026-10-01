@@ -353,10 +353,12 @@ survive the session ending. `session recent` and `session search` show them, and
     DumpUi,
 }
 
-/// What `bookmark ls --group-by` accepts.
-#[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+/// What `bookmark ls --group-by` accepts. `p` and `t` keep `ls -g t` short.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum GroupByArg {
+    #[value(alias = "p")]
     Path,
+    #[value(alias = "t")]
     Tag,
 }
 
@@ -411,9 +413,10 @@ enum BookmarkCommands {
         all: bool,
 
         #[arg(
+            short = 'g',
             long = "group-by",
             value_name = "WHAT",
-            help = "Group the listing under headings: path or tag"
+            help = "Group the listing under headings: path (p) or tag (t)"
         )]
         group_by: Option<GroupByArg>,
 
@@ -8438,6 +8441,32 @@ mod alias_tests {
             session(&["cckit", "s", "b", "l"]),
             Some(SessionCommands::Bookmark { .. })
         ));
+    }
+
+    #[test]
+    fn group_by_has_a_short_flag_and_one_letter_values() {
+        let group_by = |argv: &[&str]| match parse(argv).command {
+            Some(Commands::Session {
+                command:
+                    Some(SessionCommands::Bookmark {
+                        command: BookmarkCommands::Ls { group_by, .. },
+                    }),
+            }) => group_by,
+            _ => panic!("{argv:?} is not bookmark ls"),
+        };
+        assert_eq!(
+            group_by(&["cckit", "s", "b", "l", "-g", "t"]),
+            Some(GroupByArg::Tag)
+        );
+        assert_eq!(
+            group_by(&["cckit", "s", "b", "l", "-g", "p"]),
+            Some(GroupByArg::Path)
+        );
+        assert_eq!(
+            group_by(&["cckit", "s", "b", "l", "--group-by", "tag"]),
+            Some(GroupByArg::Tag)
+        );
+        assert_eq!(group_by(&["cckit", "s", "b", "l"]), None);
     }
 
     #[test]

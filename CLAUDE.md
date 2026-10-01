@@ -45,6 +45,7 @@ mise run build-app              # runs scripts/macos/build_app.sh
 rejects the shortest form anyone actually wants to type. `ls` is `l` at every level;
 `session` `s`, `skill` `sk`, `mcp` `mc`, `monitor` `mon`, `agent` `a`, `marketplace` `mk`;
 under `session` `s`/`r`/`b` for search/recent/bookmark, and under `bookmark` `s`/`l`/`i`/`t`.
+`bookmark ls --group-by` is `-g`, and its values take `p`/`t` aliases (`s b l -g t`).
 `install`, `uninstall`, `hook`, `sync` and `focus` are deliberately left unabbreviated, and
 `alias_tests` asserts they stay that way: those rewrite hook configuration, and a one-letter
 slip should not reach them. `Cli::command().debug_assert()` runs as a test so a new alias

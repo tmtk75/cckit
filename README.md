@@ -66,7 +66,7 @@ cckit sk l                   # = cckit skill ls
 `ls` is `l` wherever a command lists things. `session` is `s`, `skill` is `sk`, `mcp` is
 `mc`, `monitor` is `mon`, `agent` is `a`, `marketplace` is `mk`. Under `session`: `l`, `s`
 (search), `r` (recent), `b` (bookmark); under `bookmark`: `s` (set), `l`, `i` (id), `t`
-(tag). `install`, `uninstall`, `hook`, `sync` and `focus` keep their full names on purpose,
+(tag). `bookmark ls --group-by tag` is `cckit s b l -g t` (`-g p` for path). `install`, `uninstall`, `hook`, `sync` and `focus` keep their full names on purpose,
 so a slip of the finger cannot rewrite a hook configuration.
 
 ## session Command
@@ -258,8 +258,8 @@ cckit session bookmark set --current "auth refactor" --tag auth
 cckit session bookmark ls
 cckit session bookmark ls --tag auth
 cckit session bookmark ls --here            # only what ran in this directory or below
-cckit session bookmark ls --group-by path   # bucket by directory
-cckit session bookmark ls --group-by tag    # bucket by tag
+cckit session bookmark ls --group-by path   # bucket by directory (short: -g p)
+cckit session bookmark ls --group-by tag    # bucket by tag (short: -g t)
 cckit session bookmark ls --json
 
 # Add or remove tags later, without retyping the name
