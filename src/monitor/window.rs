@@ -12,8 +12,8 @@ use objc2::{AnyThread, ClassType, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
     NSBezierPath, NSColor, NSCursor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSMenu,
-    NSMenuItem, NSScreen, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSMenuItem, NSScreen, NSSearchField, NSTextField, NSTrackingArea, NSTrackingAreaOptions,
+    NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
@@ -319,7 +319,14 @@ fn agent_accent_color_alpha(agent: AgentType, alpha: f64) -> Retained<NSColor> {
 
 // --- Data ---
 
+/// The sessions on screen: every live session, narrowed by the Cmd+F filter.
 static SESSION_LIST: Mutex<Vec<Session>> = Mutex::new(Vec::new());
+/// Every live session before the filter. State transitions (approval, finished) are read
+/// from this one, so a session the filter hides still brings the window forward.
+static ALL_SESSIONS: Mutex<Vec<Session>> = Mutex::new(Vec::new());
+/// Cmd+F filter text; empty shows every session.
+static FILTER_QUERY: Mutex<String> = Mutex::new(String::new());
+static FILTER_FIELD_PTR: Mutex<Option<usize>> = Mutex::new(None);
 static SELECTED_INDEX: Mutex<Option<usize>> = Mutex::new(None);
 static CONTENT_VIEW_PTR: Mutex<Option<usize>> = Mutex::new(None);
 static WINDOW_PTR: Mutex<Option<usize>> = Mutex::new(None);
@@ -447,12 +454,15 @@ fn load_sessions() {
     }
     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
     let labels = load_bookmark_labels();
+    let query = FILTER_QUERY.lock().unwrap().clone();
+    let shown = filtered_sessions(&sessions, &labels, &query);
 
     // Compute a fingerprint to detect meaningful changes
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    sessions.len().hash(&mut hasher);
-    for s in &sessions {
+    query.hash(&mut hasher);
+    shown.len().hash(&mut hasher);
+    for s in &shown {
         s.session_id.hash(&mut hasher);
         std::mem::discriminant(&s.status).hash(&mut hasher);
         s.updated_at.timestamp().hash(&mut hasher);
@@ -469,7 +479,173 @@ fn load_sessions() {
     }
 
     *BOOKMARK_LABELS.lock().unwrap() = labels;
-    *SESSION_LIST.lock().unwrap() = sessions;
+    *ALL_SESSIONS.lock().unwrap() = sessions;
+    *SESSION_LIST.lock().unwrap() = shown;
+}
+
+/// What the Cmd+F filter matches a session against: the name the row shows, the full
+/// path, the bookmark and the model label.
+fn filter_haystack(session: &Session, bookmark: Option<&str>) -> String {
+    let model = session
+        .model
+        .as_deref()
+        .and_then(theme::model_short_label)
+        .unwrap_or_default();
+    format!(
+        "{} {} {} {}",
+        session.display_name(),
+        session.cwd,
+        bookmark.unwrap_or(""),
+        model
+    )
+    .to_lowercase()
+}
+
+/// Every whitespace-separated term must appear, ignoring case.
+fn matches_filter(haystack_lower: &str, query: &str) -> bool {
+    query
+        .split_whitespace()
+        .all(|term| haystack_lower.contains(&term.to_lowercase()))
+}
+
+fn filtered_sessions(
+    all: &[Session],
+    labels: &std::collections::HashMap<String, String>,
+    query: &str,
+) -> Vec<Session> {
+    if query.trim().is_empty() {
+        return all.to_vec();
+    }
+    all.iter()
+        .filter(|s| {
+            let bookmark = labels.get(&s.session_id).map(String::as_str);
+            matches_filter(&filter_haystack(s, bookmark), query)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Narrow the list to `query` at once rather than at the next 2s refresh, and select the
+/// top match so Enter goes straight to it.
+fn apply_filter(query: &str) {
+    *FILTER_QUERY.lock().unwrap() = query.to_string();
+    let shown = {
+        let all = ALL_SESSIONS.lock().unwrap();
+        let labels = BOOKMARK_LABELS.lock().unwrap();
+        filtered_sessions(&all, &labels, query)
+    };
+    *SELECTED_INDEX.lock().unwrap() = if query.trim().is_empty() || shown.is_empty() {
+        None
+    } else {
+        Some(0)
+    };
+    *SESSION_LIST.lock().unwrap() = shown;
+    request_redraw();
+}
+
+/// The line an empty list shows, which must not claim nothing is running when the
+/// filter is what emptied it.
+fn empty_list_text() -> String {
+    let query = FILTER_QUERY.lock().unwrap();
+    if query.trim().is_empty() {
+        "no active sessions".to_string()
+    } else {
+        format!("no sessions match \"{}\"", query.trim())
+    }
+}
+
+/// Drop the filter, from the list or from the field: empties the field and shows every
+/// session again.
+fn clear_filter() {
+    if let Some(field) = *FILTER_FIELD_PTR.lock().unwrap() {
+        let empty = NSString::from_str("");
+        let _: () = unsafe { msg_send![field as *mut AnyObject, setStringValue: &*empty] };
+    }
+    apply_filter("");
+}
+
+fn focus_filter_field() {
+    let (Some(field), Some(window)) = (
+        *FILTER_FIELD_PTR.lock().unwrap(),
+        *WINDOW_PTR.lock().unwrap(),
+    ) else {
+        return;
+    };
+    let field = field as *mut AnyObject;
+    let window = unsafe { &*(window as *const NSWindow) };
+    let _: Bool = unsafe { msg_send![window, makeFirstResponder: field] };
+    let _: () = unsafe { msg_send![field, selectText: std::ptr::null_mut::<AnyObject>()] };
+}
+
+fn focus_session_list() {
+    let (Some(view), Some(window)) = (
+        *CONTENT_VIEW_PTR.lock().unwrap(),
+        *WINDOW_PTR.lock().unwrap(),
+    ) else {
+        return;
+    };
+    let window = unsafe { &*(window as *const NSWindow) };
+    let _: Bool = unsafe { msg_send![window, makeFirstResponder: view as *mut AnyObject] };
+}
+
+// --- Filter field delegate (wired into the window delegate class) ---
+
+extern "C" fn control_text_did_change(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    notification: *mut AnyObject,
+) {
+    let field: *mut AnyObject = unsafe { msg_send![notification, object] };
+    if field.is_null() {
+        return;
+    }
+    let value: Retained<NSString> = unsafe { msg_send![field, stringValue] };
+    apply_filter(&value.to_string());
+}
+
+/// Keys pressed while typing in the filter: the arrows move the selection in the list,
+/// Enter focuses the selected session, Esc returns to the list with the filter kept, and
+/// Cmd+Backspace drops the filter.
+extern "C" fn control_do_command(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    _control: *mut AnyObject,
+    _text_view: *mut AnyObject,
+    command: Sel,
+) -> Bool {
+    let count = SESSION_LIST.lock().unwrap().len();
+    let current = *SELECTED_INDEX.lock().unwrap();
+    if command == sel!(moveUp:) || command == sel!(moveDown:) {
+        let next = if command == sel!(moveUp:) {
+            prev_index(current, count)
+        } else {
+            next_index(current, count)
+        };
+        if let Some(idx) = next {
+            *SELECTED_INDEX.lock().unwrap() = Some(idx);
+        }
+        request_redraw();
+        return Bool::YES;
+    }
+    if command == sel!(insertNewline:) {
+        if current.is_none() && count > 0 {
+            *SELECTED_INDEX.lock().unwrap() = Some(0);
+        }
+        focus_selected();
+        return Bool::YES;
+    }
+    // Cmd+Backspace arrives as this command. It would delete only up to the caret; clear
+    // the whole filter instead, the same as Cmd+Backspace in the list.
+    if command == sel!(deleteToBeginningOfLine:) {
+        clear_filter();
+        return Bool::YES;
+    }
+    // Answering YES also stops NSSearchField's default Esc, which would clear the text.
+    if command == sel!(cancelOperation:) {
+        focus_session_list();
+        return Bool::YES;
+    }
+    Bool::NO
 }
 
 /// A broken `bookmarks.json` shows no bookmarks rather than failing the refresh; the CLI
@@ -803,6 +979,16 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
     // Cmd+, → open config file
     if cmd && key_code == 43 {
         open_config_file();
+        return;
+    }
+    // Cmd+F → filter (checked before plain "f", which toggles auto-focus)
+    if cmd && char_str == "f" {
+        focus_filter_field();
+        return;
+    }
+    // Cmd+Backspace → clear the filter
+    if cmd && key_code == 51 {
+        clear_filter();
         return;
     }
     // Cmd+0 → fit window height to content
@@ -1557,7 +1743,7 @@ fn rebuild_view_mission_control(view: &NSView) {
 
     if sessions.is_empty() {
         cg_draw_text(
-            "no active sessions",
+            &empty_list_text(),
             NSPoint::new(LEFT_PAD + CARD_CONTENT_LEFT, y_start + 20.0),
             &color_dim(),
             &normal_font,
@@ -1987,7 +2173,7 @@ fn rebuild_view_classic(view: &NSView) {
         );
         view.addSubview(&create_mono_label(
             mtm,
-            "  no active sessions",
+            &format!("  {}", empty_list_text()),
             rect,
             &cl_color_dim(),
             CL_FONT_SIZE,
@@ -2332,6 +2518,21 @@ fn get_delegate_class() -> &'static AnyClass {
                 sel!(windowDidResize:),
                 window_did_resize as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
+            builder.add_method(
+                sel!(controlTextDidChange:),
+                control_text_did_change as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(control:textView:doCommandBySelector:),
+                control_do_command
+                    as extern "C" fn(
+                        *mut AnyObject,
+                        Sel,
+                        *mut AnyObject,
+                        *mut AnyObject,
+                        Sel,
+                    ) -> Bool,
+            );
         }
 
         let cls = builder.register();
@@ -2348,7 +2549,7 @@ fn get_delegate_class() -> &'static AnyClass {
 fn update_sessions_and_redraw() {
     // Snapshot previous statuses before loading new data
     let prev = {
-        let sessions = SESSION_LIST.lock().unwrap();
+        let sessions = ALL_SESSIONS.lock().unwrap();
         let mut map = std::collections::HashMap::new();
         for s in sessions.iter() {
             map.insert(s.key(), s.status.clone());
@@ -2360,7 +2561,7 @@ fn update_sessions_and_redraw() {
 
     // Detect state transitions
     let (needs_approval, finished) = {
-        let sessions = SESSION_LIST.lock().unwrap();
+        let sessions = ALL_SESSIONS.lock().unwrap();
         let now = chrono::Utc::now();
         let mut notified = NOTIFIED_APPROVALS.lock().unwrap();
         let mut approval = false;
@@ -2872,6 +3073,23 @@ fn setup_window(
     *AF_LABEL_PTR.lock().unwrap() = Some(&*af_label as *const NSTextField as usize);
     footer.addSubview(&af_label);
 
+    // Footer center: Cmd+F filter, between the auto-focus and theme labels
+    let filter_x = LEFT_PAD + 120.0 + 8.0;
+    let filter_w = (content_w - filter_x - 140.0 - LEFT_PAD - 8.0).max(80.0);
+    let filter_field = NSSearchField::initWithFrame(
+        NSSearchField::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(filter_x, 3.0),
+            NSSize::new(filter_w, FOOTER_HEIGHT - 6.0),
+        ),
+    );
+    filter_field.setPlaceholderString(Some(&NSString::from_str("filter (\u{2318}F)")));
+    filter_field.setFont(Some(&cached_mono_font(FONT_SIZE_SMALL)));
+    filter_field.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+    let _: () = unsafe { msg_send![&*filter_field, setDelegate: &*delegate] };
+    *FILTER_FIELD_PTR.lock().unwrap() = Some(&*filter_field as *const NSSearchField as usize);
+    footer.addSubview(&filter_field);
+
     // Footer right: theme name
     let theme = *CURRENT_THEME.lock().unwrap();
     let theme_text = match theme {
@@ -3134,6 +3352,42 @@ mod tests {
             classic_fit_width(&columns(220.0), 2000.0),
             classic_fit_width(&columns(220.0), CL_FIT_PATH_MAX)
         );
+    }
+
+    #[test]
+    fn the_filter_needs_every_term_and_ignores_case() {
+        let hay = "cckit /users/me/.ghq/github.com/tmtk75/cckit hide work #cli opus 5.5";
+        assert!(matches_filter(hay, ""));
+        assert!(matches_filter(hay, "CCKIT"));
+        assert!(matches_filter(hay, "tmtk75 opus"));
+        assert!(!matches_filter(hay, "tmtk75 gpt"));
+    }
+
+    #[test]
+    fn the_filter_reaches_path_bookmark_and_model() {
+        let mut a = hover_test_session();
+        a.session_id = "a".into();
+        a.cwd = "/work/cckit".into();
+        a.model = Some("claude-opus-4-7".into());
+        let mut b = hover_test_session();
+        b.session_id = "b".into();
+        b.cwd = "/work/isms".into();
+        let all = vec![a, b];
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("b".to_string(), "BCP review #infra".to_string());
+
+        let ids = |q: &str| -> Vec<String> {
+            filtered_sessions(&all, &labels, q)
+                .into_iter()
+                .map(|s| s.session_id)
+                .collect()
+        };
+        assert_eq!(ids(""), vec!["a", "b"]);
+        assert_eq!(ids("work/cckit"), vec!["a"]);
+        assert_eq!(ids("#infra"), vec!["b"]);
+        assert_eq!(ids("bcp"), vec!["b"]);
+        assert_eq!(ids("opus"), vec!["a"]);
+        assert!(ids("nothing-like-this").is_empty());
     }
 
     #[test]
