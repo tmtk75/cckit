@@ -272,6 +272,11 @@ static NOTIFIED_APPROVALS: std::sync::LazyLock<Mutex<std::collections::HashSet<S
 pub static AF_DISABLED_PROJECTS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
+/// Bookmark text (`name #tag`) per session id, re-read with the session list so a
+/// `bookmark set` run in a terminal shows on the next refresh. Hidden bookmarks are left out.
+static BOOKMARK_LABELS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
 static LAST_SYNC: Mutex<Option<Instant>> = Mutex::new(None);
 static REDRAW_NEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static SESSION_FINGERPRINT: Mutex<u64> = Mutex::new(0);
@@ -331,6 +336,7 @@ fn load_sessions() {
         }
     }
     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+    let labels = load_bookmark_labels();
 
     // Compute a fingerprint to detect meaningful changes
     use std::hash::{Hash, Hasher};
@@ -343,6 +349,7 @@ fn load_sessions() {
         s.prompt_count.hash(&mut hasher);
         s.tool_count.hash(&mut hasher);
         s.context_used_tokens.hash(&mut hasher);
+        labels.get(&s.session_id).hash(&mut hasher);
     }
     let new_fp = hasher.finish();
     let mut fp = SESSION_FINGERPRINT.lock().unwrap();
@@ -351,7 +358,41 @@ fn load_sessions() {
         REDRAW_NEEDED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    *BOOKMARK_LABELS.lock().unwrap() = labels;
     *SESSION_LIST.lock().unwrap() = sessions;
+}
+
+/// A broken `bookmarks.json` shows no bookmarks rather than failing the refresh; the CLI
+/// is where that error gets reported.
+fn load_bookmark_labels() -> std::collections::HashMap<String, String> {
+    let book = crate::history::bookmark::BookmarkStore::new()
+        .load()
+        .unwrap_or_default();
+    book.entries_newest_first()
+        .into_iter()
+        .filter(|(_, b)| !b.hidden)
+        .map(|(id, b)| (id.to_string(), crate::history::format::bookmark_oneline(b)))
+        .collect()
+}
+
+/// The name a session row shows: `[name #tag]` first when the session is bookmarked, since
+/// that says more about the session than the project does, then the project.
+fn row_display_name(session: &Session) -> String {
+    with_bookmark(
+        session.display_name(),
+        BOOKMARK_LABELS
+            .lock()
+            .unwrap()
+            .get(&session.session_id)
+            .map(String::as_str),
+    )
+}
+
+fn with_bookmark(name: String, bookmark: Option<&str>) -> String {
+    match bookmark {
+        Some(label) if !label.is_empty() => format!("[{label}] {name}"),
+        _ => name,
+    }
 }
 
 fn format_elapsed(dt: chrono::DateTime<chrono::Utc>) -> String {
@@ -1424,7 +1465,7 @@ fn rebuild_view_mission_control(view: &NSView) {
         // Suppress unused variable warning
         let _ = dot_color;
 
-        let project = session.display_name();
+        let project = row_display_name(session);
         let elapsed = format_elapsed(session.updated_at);
         let unfocusable = session.tty == "unknown";
         let text_color_effective = if is_stopped {
@@ -1644,7 +1685,11 @@ fn rebuild_view_classic(view: &NSView) {
     ));
 
     let any_has_subagent_name = sessions.iter().any(|s| s.subagent_name.is_some());
-    let proj_w = if any_has_subagent_name {
+    let any_bookmarked = {
+        let labels = BOOKMARK_LABELS.lock().unwrap();
+        sessions.iter().any(|s| labels.contains_key(&s.session_id))
+    };
+    let proj_w = if any_has_subagent_name || any_bookmarked {
         CL_PROJECT_COL_WIDTH_WIDE
     } else {
         CL_PROJECT_COL_WIDTH
@@ -1814,7 +1859,7 @@ fn rebuild_view_classic(view: &NSView) {
             dot / 2.0,
         ));
 
-        let project = session.display_name();
+        let project = row_display_name(session);
         let path = session.short_cwd();
         let elapsed = format_elapsed(session.updated_at);
         let unfocusable = session.tty == "unknown";
@@ -1838,13 +1883,10 @@ fn rebuild_view_classic(view: &NSView) {
             NSPoint::new(CL_TEXT_LEFT, y + 2.0),
             NSSize::new(proj_w, CL_ROW_HEIGHT - 4.0),
         );
-        view.addSubview(&create_mono_label(
-            mtm,
-            &left_text,
-            left_rect,
-            &text_color,
-            CL_FONT_SIZE,
-        ));
+        let left_label = create_mono_label(mtm, &left_text, left_rect, &text_color, CL_FONT_SIZE);
+        // A bookmark name can outrun the column; end it with "…" rather than a hard clip.
+        let _: () = unsafe { msg_send![&*left_label, setLineBreakMode: 4_isize] };
+        view.addSubview(&left_label);
 
         let path_x = CL_TEXT_LEFT + proj_w;
         let path_w = (view_width - path_x - right_col_w - CL_LEFT_PAD).max(40.0);
@@ -2823,6 +2865,16 @@ mod tests {
         session.last_tool_duration_ms = Some(2000);
         session.last_tool = Some("Bash".to_string());
         assert_eq!(hover_detail_header(&session), "10p/75t/2.0s   tool: Bash");
+    }
+
+    #[test]
+    fn a_bookmarked_row_leads_with_the_bookmark() {
+        assert_eq!(
+            with_bookmark("cckit".into(), Some("hide work #cli")),
+            "[hide work #cli] cckit"
+        );
+        assert_eq!(with_bookmark("cckit".into(), None), "cckit");
+        assert_eq!(with_bookmark("cckit".into(), Some("")), "cckit");
     }
 
     /// A fresh session has no counts and no tool yet; the header must still
