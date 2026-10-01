@@ -428,18 +428,33 @@ pub enum Target {
 pub fn run_set(target: Target, name: Option<String>, tags: Vec<String>) -> io::Result<i32> {
     let (session_id, cwd, started_at) = match target {
         Target::Current => {
-            let tty = current_tty();
             let store = crate::monitor::storage::Storage::new().load();
-            let Some(session) = current_session(&store, &tty) else {
-                eprintln!("error: no live session found on this terminal ({tty}).");
-                eprintln!("hint: `cckit session bookmark` picks one from the transcripts instead.");
-                return Ok(1);
-            };
-            (
-                session.session_id.clone(),
-                Some(session.cwd.clone()),
-                Some(session.created_at),
-            )
+            let codex_thread = std::env::var(CODEX_THREAD_ENV).ok();
+            let tty = current_tty();
+            match resolve_current(&store, codex_thread.as_deref(), &tty) {
+                CurrentTarget::Live(session) => (
+                    session.session_id.clone(),
+                    Some(session.cwd.clone()),
+                    Some(session.created_at),
+                ),
+                // No hook has recorded the thread yet; the id is still exact, and the
+                // command runs in the session's working directory.
+                CurrentTarget::CodexThread(id) => (
+                    id,
+                    std::env::current_dir()
+                        .ok()
+                        .map(|d| d.display().to_string()),
+                    None,
+                ),
+                CurrentTarget::NotFound => {
+                    eprintln!("error: no live session found on this terminal ({tty}).");
+                    eprintln!(
+                        "hint: run it from inside the session (`!cckit ...`), or give the id: \
+                         `cckit session bookmark set <ID> <NAME>`."
+                    );
+                    return Ok(1);
+                }
+            }
         }
         Target::Id(prefix) => {
             let paths = transcript_paths();
@@ -1064,6 +1079,39 @@ fn ps_field(pid: &str, field: &str) -> Option<String> {
 
 /// The live session running on `tty`, as `--current` means it: the newest one, skipping
 /// subagents, which share their parent's terminal but are not what the user is in.
+/// Set by Codex in the environment of every command it runs, `!cmd` included. Those run
+/// under its app-server daemon, which has no terminal, so this is the only way such a
+/// command can tell which session it belongs to.
+const CODEX_THREAD_ENV: &str = "CODEX_THREAD_ID";
+
+/// Which session `--current` means.
+#[derive(Debug)]
+pub enum CurrentTarget<'a> {
+    Live(&'a crate::monitor::session::Session),
+    /// A Codex thread id from the environment that no hook has recorded.
+    CodexThread(String),
+    NotFound,
+}
+
+/// The Codex thread id wins when present: it names the session exactly, whereas the
+/// terminal is `unknown` for a command Codex runs.
+pub fn resolve_current<'a>(
+    store: &'a crate::monitor::session::SessionStore,
+    codex_thread: Option<&str>,
+    tty: &str,
+) -> CurrentTarget<'a> {
+    if let Some(id) = codex_thread.map(str::trim).filter(|id| !id.is_empty()) {
+        return store
+            .sessions
+            .values()
+            .filter(|s| s.session_id == id)
+            .max_by_key(|s| s.updated_at)
+            .map(CurrentTarget::Live)
+            .unwrap_or_else(|| CurrentTarget::CodexThread(id.to_string()));
+    }
+    current_session(store, tty).map_or(CurrentTarget::NotFound, CurrentTarget::Live)
+}
+
 pub fn current_session<'a>(
     store: &'a crate::monitor::session::SessionStore,
     tty: &str,
@@ -1547,6 +1595,60 @@ mod current_tests {
         assert_eq!(
             current_session(&store, "/dev/ttys001").map(|s| s.session_id.clone()),
             Some("here".to_string())
+        );
+    }
+
+    fn resolved(target: CurrentTarget<'_>) -> String {
+        match target {
+            CurrentTarget::Live(s) => format!("live:{}", s.session_id),
+            CurrentTarget::CodexThread(id) => format!("thread:{id}"),
+            CurrentTarget::NotFound => "none".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_codex_thread_id_finds_its_session_without_a_terminal() {
+        let store = store(vec![
+            session("01a0f528", "unknown", 0, 0, 1),
+            session("other", "/dev/ttys001", 10, 0, 1),
+        ]);
+        assert_eq!(
+            resolved(resolve_current(&store, Some("01a0f528"), "unknown")),
+            "live:01a0f528"
+        );
+    }
+
+    #[test]
+    fn a_codex_thread_id_beats_the_terminal() {
+        let store = store(vec![
+            session("codex", "/dev/ttys001", 0, 0, 1),
+            session("claude", "/dev/ttys001", 10, 0, 1),
+        ]);
+        assert_eq!(
+            resolved(resolve_current(&store, Some("codex"), "/dev/ttys001")),
+            "live:codex"
+        );
+    }
+
+    #[test]
+    fn an_unrecorded_codex_thread_is_still_named_by_its_id() {
+        let store = store(vec![]);
+        assert_eq!(
+            resolved(resolve_current(&store, Some(" 01a0f528 "), "unknown")),
+            "thread:01a0f528"
+        );
+    }
+
+    #[test]
+    fn without_a_codex_thread_the_terminal_decides() {
+        let store = store(vec![session("here", "/dev/ttys001", 0, 0, 1)]);
+        assert_eq!(
+            resolved(resolve_current(&store, None, "/dev/ttys001")),
+            "live:here"
+        );
+        assert_eq!(
+            resolved(resolve_current(&store, Some(""), "unknown")),
+            "none"
         );
     }
 
