@@ -11,8 +11,8 @@ use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{AnyThread, ClassType, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
-    NSBezierPath, NSColor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSMenu, NSMenuItem,
-    NSScreen, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSBezierPath, NSColor, NSCursor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSMenu,
+    NSMenuItem, NSScreen, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
     NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
@@ -276,6 +276,29 @@ pub static AF_DISABLED_PROJECTS: std::sync::LazyLock<Mutex<std::collections::Has
 /// `bookmark set` run in a terminal shows on the next refresh. Hidden bookmarks are left out.
 static BOOKMARK_LABELS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// PROJECT column width in the classic theme once the user has dragged it; `None` keeps the
+/// automatic width. Persisted so a restart keeps it.
+static PROJECT_COL_WIDTH: Mutex<Option<f64>> = Mutex::new(None);
+/// Where the classic theme last drew its PROJECT|PATH divider: (text left, divider x,
+/// view height). `None` under the other themes, which have no columns to resize.
+static CLASSIC_DIVIDER: Mutex<Option<(f64, f64, f64)>> = Mutex::new(None);
+static DRAGGING_DIVIDER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How far either side of the divider still grabs it.
+const DIVIDER_GRAB: f64 = 4.0;
+const MIN_PROJECT_COL: f64 = 100.0;
+/// Kept free to the right of the PROJECT column for PATH, MODEL, AGE and CONTEXT.
+const MIN_RIGHT_OF_PROJECT: f64 = 280.0;
+
+fn near_divider(x: f64, divider_x: f64) -> bool {
+    (x - divider_x).abs() <= DIVIDER_GRAB
+}
+
+fn dragged_project_width(x: f64, text_left: f64, view_width: f64) -> f64 {
+    let max = (view_width - text_left - MIN_RIGHT_OF_PROJECT).max(MIN_PROJECT_COL);
+    (x - text_left).clamp(MIN_PROJECT_COL, max)
+}
 
 static LAST_SYNC: Mutex<Option<Instant>> = Mutex::new(None);
 static REDRAW_NEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -800,6 +823,93 @@ extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) 
     request_redraw();
 }
 
+// --- Column divider dragging (classic theme) ---
+
+fn event_point(view_ptr: *mut AnyObject, event_ptr: *mut AnyObject) -> (NSPoint, f64) {
+    let view: &NSView = unsafe { &*(view_ptr as *const NSView) };
+    let event: &NSEvent = unsafe { &*(event_ptr as *const NSEvent) };
+    let point = view.convertPoint_fromView(event.locationInWindow(), None);
+    (point, view.bounds().size.width)
+}
+
+extern "C" fn mouse_down(this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) {
+    let (point, _) = event_point(this, event);
+    let divider = *CLASSIC_DIVIDER.lock().unwrap();
+    if let Some((_, divider_x, _)) = divider
+        && near_divider(point.x, divider_x)
+    {
+        let clicks = unsafe { (*(event as *const NSEvent)).clickCount() };
+        if clicks >= 2 {
+            // Double-click hands the width back to the automatic choice.
+            *PROJECT_COL_WIDTH.lock().unwrap() = None;
+            let _ = Storage::new().save_project_column_width(None);
+            request_redraw();
+        } else {
+            DRAGGING_DIVIDER.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        return;
+    }
+    let _: () = unsafe { msg_send![super(&*this, NSView::class()), mouseDown: event] };
+}
+
+extern "C" fn mouse_dragged(this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) {
+    if !DRAGGING_DIVIDER.load(std::sync::atomic::Ordering::Relaxed) {
+        let _: () = unsafe { msg_send![super(&*this, NSView::class()), mouseDragged: event] };
+        return;
+    }
+    let (point, view_width) = event_point(this, event);
+    let Some((text_left, _, _)) = *CLASSIC_DIVIDER.lock().unwrap() else {
+        return;
+    };
+    *PROJECT_COL_WIDTH.lock().unwrap() =
+        Some(dragged_project_width(point.x, text_left, view_width));
+    request_redraw();
+}
+
+extern "C" fn mouse_up(this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) {
+    if DRAGGING_DIVIDER.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        let width = *PROJECT_COL_WIDTH.lock().unwrap();
+        let _ = Storage::new().save_project_column_width(width);
+        return;
+    }
+    let _: () = unsafe { msg_send![super(&*this, NSView::class()), mouseUp: event] };
+}
+
+/// Claim clicks on the divider before the labels under it do. The PROJECT and PATH labels
+/// meet exactly at the divider, so without this the label takes the mouseDown, and the
+/// drag dies as soon as the rebuild removes that label.
+extern "C" fn hit_test(this: *mut AnyObject, _sel: Sel, point: NSPoint) -> *mut AnyObject {
+    let divider = *CLASSIC_DIVIDER.lock().unwrap();
+    if let Some((_, divider_x, height)) = divider {
+        let view: &NSView = unsafe { &*(this as *const NSView) };
+        // `point` arrives in the superview's coordinates.
+        let local = match unsafe { view.superview() } {
+            Some(sv) => view.convertPoint_fromView(point, Some(&sv)),
+            None => point,
+        };
+        if near_divider(local.x, divider_x) && (0.0..=height).contains(&local.y) {
+            return this;
+        }
+    }
+    unsafe { msg_send![super(&*this, NSView::class()), hitTest: point] }
+}
+
+extern "C" fn reset_cursor_rects(this: *mut AnyObject, _sel: Sel) {
+    let Some((_, divider_x, height)) = *CLASSIC_DIVIDER.lock().unwrap() else {
+        return;
+    };
+    let view: &NSView = unsafe { &*(this as *const NSView) };
+    let rect = NSRect::new(
+        NSPoint::new(divider_x - DIVIDER_GRAB, 0.0),
+        NSSize::new(DIVIDER_GRAB * 2.0, height),
+    );
+    // `columnResizeCursor` replaces this but only exists from macOS 15, where calling it
+    // on an older system would be an unrecognized selector.
+    #[allow(deprecated)]
+    let cursor = NSCursor::resizeLeftRightCursor();
+    view.addCursorRect_cursor(rect, &cursor);
+}
+
 // --- Hover event handlers (wired into VIEW_CLASS) ---
 
 extern "C" fn mouse_moved(this: *mut AnyObject, _sel: Sel, event: *mut AnyObject) {
@@ -1039,6 +1149,13 @@ fn update_af_label() {
 }
 
 fn rebuild_view_for_theme(view: &NSView, theme: WindowThemeId) {
+    // Leaving the classic theme drops its divider, and the resize cursor with it.
+    if theme != WindowThemeId::Classic
+        && CLASSIC_DIVIDER.lock().unwrap().take().is_some()
+        && let Some(window) = view.window()
+    {
+        window.invalidateCursorRectsForView(view);
+    }
     match theme {
         WindowThemeId::Classic => rebuild_view_classic(view),
         WindowThemeId::MissionControl => rebuild_view_mission_control(view),
@@ -1689,15 +1806,20 @@ fn rebuild_view_classic(view: &NSView) {
         let labels = BOOKMARK_LABELS.lock().unwrap();
         sessions.iter().any(|s| labels.contains_key(&s.session_id))
     };
-    let proj_w = if any_has_subagent_name || any_bookmarked {
+    let auto_proj_w = if any_has_subagent_name || any_bookmarked {
         CL_PROJECT_COL_WIDTH_WIDE
     } else {
         CL_PROJECT_COL_WIDTH
     };
+    let proj_w = PROJECT_COL_WIDTH.lock().unwrap().unwrap_or(auto_proj_w);
 
     let row_count = sessions.len().max(1) as CGFloat;
     let total_height = CL_HEADER_HEIGHT + 1.0 + row_count * CL_ROW_HEIGHT;
     view.setFrameSize(NSSize::new(view_width, total_height));
+    *CLASSIC_DIVIDER.lock().unwrap() = Some((CL_TEXT_LEFT, CL_TEXT_LEFT + proj_w, total_height));
+    if let Some(window) = view.window() {
+        window.invalidateCursorRectsForView(view);
+    }
 
     // Header
     let hdr_left = format!("{:>2}  {:<4}  {}", "#", "STAT", "PROJECT");
@@ -2060,6 +2182,26 @@ fn get_view_class() -> &'static AnyClass {
                 sel!(cckitHoverTimerFired:),
                 hover_timer_fired as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
+            builder.add_method(
+                sel!(mouseDown:),
+                mouse_down as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(mouseDragged:),
+                mouse_dragged as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(mouseUp:),
+                mouse_up as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(resetCursorRects),
+                reset_cursor_rects as extern "C" fn(*mut AnyObject, Sel),
+            );
+            builder.add_method(
+                sel!(hitTest:),
+                hit_test as extern "C" fn(*mut AnyObject, Sel, NSPoint) -> *mut AnyObject,
+            );
         }
 
         let cls = builder.register();
@@ -2088,6 +2230,9 @@ extern "C" fn window_did_move(_this: *mut AnyObject, _sel: Sel, _notification: *
 
 extern "C" fn window_did_resize(_this: *mut AnyObject, _sel: Sel, _notification: *mut AnyObject) {
     save_window_frame();
+    // The classic theme places its labels at fixed frames, so without a rebuild here the
+    // columns kept the old width until the next session change happened to redraw.
+    request_redraw();
 }
 
 fn save_window_frame() {
@@ -2401,6 +2546,7 @@ pub fn run_app(menubar_only: bool, window_only: bool) -> Result<(), Box<dyn std:
         let storage = Storage::new();
         let loaded = storage.load_af_disabled();
         *AF_DISABLED_PROJECTS.lock().unwrap() = loaded;
+        *PROJECT_COL_WIDTH.lock().unwrap() = storage.load_project_column_width();
     }
 
     let mtm = MainThreadMarker::new().ok_or("Must run on main thread")?;
@@ -2865,6 +3011,30 @@ mod tests {
         session.last_tool_duration_ms = Some(2000);
         session.last_tool = Some("Bash".to_string());
         assert_eq!(hover_detail_header(&session), "10p/75t/2.0s   tool: Bash");
+    }
+
+    #[test]
+    fn the_divider_grabs_only_a_few_points_either_side() {
+        assert!(near_divider(244.0, 244.0));
+        assert!(near_divider(240.0, 244.0));
+        assert!(near_divider(248.0, 244.0));
+        assert!(!near_divider(249.0, 244.0));
+        assert!(!near_divider(239.0, 244.0));
+    }
+
+    #[test]
+    fn a_dragged_project_column_stays_within_bounds() {
+        // Follows the pointer inside the bounds.
+        assert_eq!(dragged_project_width(324.0, 24.0, 1200.0), 300.0);
+        // Never narrower than the minimum.
+        assert_eq!(dragged_project_width(30.0, 24.0, 1200.0), MIN_PROJECT_COL);
+        // Leaves room for the columns to its right.
+        assert_eq!(
+            dragged_project_width(1190.0, 24.0, 1200.0),
+            1200.0 - 24.0 - MIN_RIGHT_OF_PROJECT
+        );
+        // A window too narrow for both still yields the minimum rather than panicking.
+        assert_eq!(dragged_project_width(300.0, 24.0, 200.0), MIN_PROJECT_COL);
     }
 
     #[test]

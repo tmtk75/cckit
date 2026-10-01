@@ -55,6 +55,8 @@ objc2-app-kit = { version = "0.3", features = [
     "NSWindow", "NSPanel", "NSScreen", "NSTextField", "NSColor", "NSFont",
     "NSVisualEffectView", "NSAnimationContext", "NSGraphics", "NSLayoutConstraint",
     "NSStackView", "NSScrollView", "NSClipView", "NSEvent",
+    # Resize cursor over the classic theme's column divider
+    "NSCursor",
     # For CG direct drawing (mission control theme)
     "NSBezierPath", "NSGraphicsContext"
 ] }

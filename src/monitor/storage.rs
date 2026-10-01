@@ -11,6 +11,7 @@ const LOCK_FILE: &str = "sessions.lock";
 const TUI_STATE_FILE: &str = "tui_state.json";
 const AF_CONFIG_FILE: &str = "af_disabled.json";
 const WINDOW_FRAME_FILE: &str = "window_frame.json";
+const PROJECT_COLUMN_FILE: &str = "project_column_width.json";
 
 pub struct Storage {
     path: std::path::PathBuf,
@@ -282,6 +283,38 @@ impl Storage {
         serde_json::from_str(&content).ok()
     }
 
+    /// The classic theme's PROJECT column width as dragged by the user; `None` when it
+    /// was never dragged or was reset, which means the automatic width.
+    pub fn load_project_column_width(&self) -> Option<f64> {
+        let path = self.path.parent()?.join(PROJECT_COLUMN_FILE);
+        let content = fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// Save (or with `None`, forget) the dragged PROJECT column width.
+    pub fn save_project_column_width(&self, width: Option<f64>) -> io::Result<()> {
+        self.ensure_dir()?;
+        let dir = self
+            .path
+            .parent()
+            .ok_or_else(|| io::Error::other("Invalid data path"))?;
+        let path = dir.join(PROJECT_COLUMN_FILE);
+        let Some(width) = width else {
+            return match fs::remove_file(&path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            };
+        };
+        let tmp_path = dir.join(format!(
+            "{}.tmp.{}",
+            PROJECT_COLUMN_FILE,
+            std::process::id()
+        ));
+        fs::write(&tmp_path, serde_json::to_string(&width)?)?;
+        fs::rename(&tmp_path, &path)?;
+        Ok(())
+    }
+
     /// Save window frame (atomic write via tmp + rename)
     pub fn save_window_frame(&self, frame: (f64, f64, f64, f64)) -> io::Result<()> {
         self.ensure_dir()?;
@@ -363,5 +396,21 @@ mod grok_process_tests {
         // Same reasoning as `agy`: match the program, not any path that spells it.
         assert!(!Storage::is_ai_tool_process("/usr/local/bin/grokify-logs"));
         assert!(!Storage::is_ai_tool_process("/opt/grok/share/helper"));
+    }
+
+    #[test]
+    fn project_column_width_round_trips_and_resets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = Storage {
+            path: dir.path().join(SESSIONS_FILE),
+            lock_path: dir.path().join(LOCK_FILE),
+        };
+        assert_eq!(storage.load_project_column_width(), None);
+        storage.save_project_column_width(Some(312.5)).unwrap();
+        assert_eq!(storage.load_project_column_width(), Some(312.5));
+        storage.save_project_column_width(None).unwrap();
+        assert_eq!(storage.load_project_column_width(), None);
+        // Resetting with nothing saved is not an error.
+        storage.save_project_column_width(None).unwrap();
     }
 }
