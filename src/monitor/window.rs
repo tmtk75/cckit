@@ -169,6 +169,93 @@ const FIT_PATH_CHAR_WIDTH: CGFloat = 6.0;
 const FIT_PATH_BASE_CHARS: usize = 18;
 const FIT_PATH_MAX_CHARS: usize = 56;
 
+// Classic theme column geometry. Shared by its rebuild and by Cmd+0's fit, so the two
+// cannot disagree about how wide a row is.
+const CL_FONT_SIZE_SMALL: CGFloat = 10.0;
+const CL_PATH_FONT_SIZE: CGFloat = 9.5;
+const CL_LEFT_PAD: CGFloat = 10.0;
+const CL_TEXT_LEFT: CGFloat = 24.0;
+const CL_PROJECT_COL_WIDTH: CGFloat = 220.0;
+const CL_PROJECT_COL_WIDTH_WIDE: CGFloat = 300.0;
+/// AGE + AF only. The stats and last-tool columns that used to share this
+/// block moved to the hover popover so PATH can use the width.
+const CL_AGE_COL_WIDTH: CGFloat = 64.0;
+const CL_CONTEXT_COL_WIDTH: CGFloat = 70.0;
+/// Widest PATH that Cmd+0 makes room for; anything longer is middle-truncated as before.
+const CL_FIT_PATH_MAX: CGFloat = 420.0;
+/// Slack beside the measured PATH so the label does not truncate a path that just fits.
+const CL_FIT_PATH_SLACK: CGFloat = 8.0;
+
+/// Column widths of the classic theme for a given set of sessions.
+struct ClassicColumns {
+    proj_w: CGFloat,
+    model_col_w: CGFloat,
+    any_has_model: bool,
+    any_has_context: bool,
+    /// MODEL + AGE/AF + CONTEXT, everything right of PATH.
+    right_col_w: CGFloat,
+}
+
+fn classic_columns(mtm: MainThreadMarker, sessions: &[Session]) -> ClassicColumns {
+    let any_has_context = sessions
+        .iter()
+        .any(|s| s.context_used_tokens.is_some() && s.context_max().is_some());
+
+    let model_labels: Vec<String> = sessions
+        .iter()
+        .filter_map(|s| s.model.as_deref().and_then(theme::model_short_label))
+        .collect();
+    let any_has_model = !model_labels.is_empty();
+    // Space allocated for the MODEL column (0 when no session reports one). Sized to the
+    // longest label so a name like "Gemini 3.8 Flash" is not cut down to its generation.
+    let widest_model_label = model_labels
+        .iter()
+        .max_by_key(|l| l.chars().count())
+        .map(|l| l.as_str())
+        .unwrap_or("");
+    let model_col_w: CGFloat = model_column_width(measure_mono_label_width(
+        mtm,
+        widest_model_label,
+        CL_FONT_SIZE_SMALL,
+    ));
+
+    let any_has_subagent_name = sessions.iter().any(|s| s.subagent_name.is_some());
+    let any_bookmarked = {
+        let labels = BOOKMARK_LABELS.lock().unwrap();
+        sessions.iter().any(|s| labels.contains_key(&s.session_id))
+    };
+    let auto_proj_w = if any_has_subagent_name || any_bookmarked {
+        CL_PROJECT_COL_WIDTH_WIDE
+    } else {
+        CL_PROJECT_COL_WIDTH
+    };
+    let proj_w = PROJECT_COL_WIDTH.lock().unwrap().unwrap_or(auto_proj_w);
+
+    let ctx_col_w = if any_has_context {
+        CL_CONTEXT_COL_WIDTH
+    } else {
+        0.0
+    };
+    ClassicColumns {
+        proj_w,
+        model_col_w,
+        any_has_model,
+        any_has_context,
+        right_col_w: CL_AGE_COL_WIDTH + ctx_col_w + model_col_w,
+    }
+}
+
+/// Window content width that shows every classic column, with PATH as wide as the
+/// longest path (up to `CL_FIT_PATH_MAX`).
+fn classic_fit_width(columns: &ClassicColumns, longest_path_w: CGFloat) -> CGFloat {
+    CL_TEXT_LEFT
+        + columns.proj_w
+        + longest_path_w.min(CL_FIT_PATH_MAX)
+        + CL_FIT_PATH_SLACK
+        + columns.right_col_w
+        + CL_LEFT_PAD
+}
+
 // --- Colors (theme-based) ---
 
 fn rgb_to_f64(c: (u8, u8, u8)) -> (f64, f64, f64) {
@@ -509,7 +596,7 @@ fn format_duration_ms(ms: i64) -> String {
     }
 }
 
-fn calculate_fit_window_width() -> CGFloat {
+fn calculate_fit_window_width(mtm: MainThreadMarker) -> CGFloat {
     let sessions = SESSION_LIST.lock().unwrap();
     let longest_path_chars = sessions
         .iter()
@@ -526,7 +613,17 @@ fn calculate_fit_window_width() -> CGFloat {
             let count = sessions.len().max(1) as CGFloat;
             (count * 80.0 + 40.0).clamp(300.0, FIT_MAX_WIDTH)
         }
-        _ => {
+        // Measured from the same columns the rows are drawn with: the estimate below
+        // knew nothing of a widened or dragged PROJECT column, MODEL or CONTEXT.
+        WindowThemeId::Classic => {
+            let columns = classic_columns(mtm, &sessions);
+            let longest_path_w = sessions
+                .iter()
+                .map(|s| measure_mono_label_width(mtm, &s.short_cwd(), CL_PATH_FONT_SIZE))
+                .fold(0.0, CGFloat::max);
+            classic_fit_width(&columns, longest_path_w).max(FIT_MIN_WIDTH)
+        }
+        WindowThemeId::MissionControl => {
             (FIT_MIN_WIDTH + extra_chars * FIT_PATH_CHAR_WIDTH).clamp(FIT_MIN_WIDTH, FIT_MAX_WIDTH)
         }
     }
@@ -1715,15 +1812,7 @@ fn rebuild_view_classic(view: &NSView) {
     const CL_ROW_HEIGHT: CGFloat = 22.0;
     const CL_HEADER_HEIGHT: CGFloat = 20.0;
     const CL_FONT_SIZE: CGFloat = 11.5;
-    const CL_FONT_SIZE_SMALL: CGFloat = 10.0;
     const CL_DOT_SIZE: CGFloat = 6.0;
-    const CL_LEFT_PAD: CGFloat = 10.0;
-    const CL_TEXT_LEFT: CGFloat = 24.0;
-    const CL_PROJECT_COL_WIDTH: CGFloat = 220.0;
-    const CL_PROJECT_COL_WIDTH_WIDE: CGFloat = 300.0;
-    /// AGE + AF only. The stats and last-tool columns that used to share this
-    /// block moved to the hover popover so PATH can use the width.
-    const CL_AGE_COL_WIDTH: CGFloat = 64.0;
 
     // v0.1.0 colors
     fn cl_color_text() -> Retained<NSColor> {
@@ -1779,39 +1868,13 @@ fn rebuild_view_classic(view: &NSView) {
         .map(|sv| sv.bounds().size.width)
         .unwrap_or(640.0);
 
-    let any_has_context = sessions
-        .iter()
-        .any(|s| s.context_used_tokens.is_some() && s.context_max().is_some());
-
-    let model_labels: Vec<String> = sessions
-        .iter()
-        .filter_map(|s| s.model.as_deref().and_then(theme::model_short_label))
-        .collect();
-    let any_has_model = !model_labels.is_empty();
-    // Space allocated for the MODEL column (0 when no session reports one). Sized to the
-    // longest label so a name like "Gemini 3.8 Flash" is not cut down to its generation.
-    let widest_model_label = model_labels
-        .iter()
-        .max_by_key(|l| l.chars().count())
-        .map(|l| l.as_str())
-        .unwrap_or("");
-    let model_col_w: CGFloat = model_column_width(measure_mono_label_width(
-        mtm,
-        widest_model_label,
-        CL_FONT_SIZE_SMALL,
-    ));
-
-    let any_has_subagent_name = sessions.iter().any(|s| s.subagent_name.is_some());
-    let any_bookmarked = {
-        let labels = BOOKMARK_LABELS.lock().unwrap();
-        sessions.iter().any(|s| labels.contains_key(&s.session_id))
-    };
-    let auto_proj_w = if any_has_subagent_name || any_bookmarked {
-        CL_PROJECT_COL_WIDTH_WIDE
-    } else {
-        CL_PROJECT_COL_WIDTH
-    };
-    let proj_w = PROJECT_COL_WIDTH.lock().unwrap().unwrap_or(auto_proj_w);
+    let ClassicColumns {
+        proj_w,
+        model_col_w,
+        any_has_model,
+        any_has_context,
+        right_col_w,
+    } = classic_columns(mtm, &sessions);
 
     let row_count = sessions.len().max(1) as CGFloat;
     let total_height = CL_HEADER_HEIGHT + 1.0 + row_count * CL_ROW_HEIGHT;
@@ -1848,7 +1911,11 @@ fn rebuild_view_classic(view: &NSView) {
         CL_FONT_SIZE,
     ));
 
-    let hdr_ctx_w: CGFloat = if any_has_context { 70.0 } else { 0.0 };
+    let hdr_ctx_w: CGFloat = if any_has_context {
+        CL_CONTEXT_COL_WIDTH
+    } else {
+        0.0
+    };
     let hdr_age_w: CGFloat = CL_AGE_COL_WIDTH;
     let hdr_right = format!("{:>5}  {:<2}", "AGE", "AF");
     let hdr_right_rect = NSRect::new(
@@ -1927,9 +1994,6 @@ fn rebuild_view_classic(view: &NSView) {
         ));
         return;
     }
-
-    let right_col_w: CGFloat =
-        CL_AGE_COL_WIDTH + if any_has_context { 70.0 } else { 0.0 } + model_col_w;
 
     for (i, session) in sessions.iter().enumerate() {
         let y = y_start + (i as CGFloat) * CL_ROW_HEIGHT;
@@ -2016,14 +2080,19 @@ fn rebuild_view_classic(view: &NSView) {
             NSPoint::new(path_x, y + 2.0),
             NSSize::new(path_w, CL_ROW_HEIGHT - 4.0),
         );
-        let path_label = create_mono_label(mtm, &path, path_rect, &cl_color_dim(), 9.5);
+        let path_label =
+            create_mono_label(mtm, &path, path_rect, &cl_color_dim(), CL_PATH_FONT_SIZE);
         let _: () = unsafe { msg_send![&*path_label, setLineBreakMode: 5_isize] };
         view.addSubview(&path_label);
 
         let ctx_info = context_bar_info(session);
         let af_off = AF_DISABLED_PROJECTS.lock().unwrap().contains(&session.cwd);
         let af_col = if af_off { "\u{23F8}" } else { "\u{2713}" };
-        let ctx_col_w: CGFloat = if any_has_context { 70.0 } else { 0.0 };
+        let ctx_col_w: CGFloat = if any_has_context {
+            CL_CONTEXT_COL_WIDTH
+        } else {
+            0.0
+        };
         let age_w: CGFloat = CL_AGE_COL_WIDTH;
         let right_text = format!("{:>5}  {:<2}", elapsed, af_col);
         let right_rect = NSRect::new(
@@ -2446,7 +2515,7 @@ fn fit_window_to_content() {
     };
     let sf = screen.visibleFrame();
     let max_w = sf.size.width * 0.9;
-    let content_w = calculate_fit_window_width().min(max_w);
+    let content_w = calculate_fit_window_width(mtm).min(max_w);
     resize_window_to_layout(
         window,
         calculate_layout_height(),
@@ -3035,6 +3104,36 @@ mod tests {
         );
         // A window too narrow for both still yields the minimum rather than panicking.
         assert_eq!(dragged_project_width(300.0, 24.0, 200.0), MIN_PROJECT_COL);
+    }
+
+    #[test]
+    fn the_fit_width_follows_the_columns_actually_drawn() {
+        let columns = |proj_w| ClassicColumns {
+            proj_w,
+            model_col_w: 100.0,
+            any_has_model: true,
+            any_has_context: true,
+            right_col_w: CL_AGE_COL_WIDTH + CL_CONTEXT_COL_WIDTH + 100.0,
+        };
+        let narrow = classic_fit_width(&columns(220.0), 300.0);
+        assert_eq!(
+            narrow,
+            CL_TEXT_LEFT
+                + 220.0
+                + 300.0
+                + CL_FIT_PATH_SLACK
+                + CL_AGE_COL_WIDTH
+                + CL_CONTEXT_COL_WIDTH
+                + 100.0
+                + CL_LEFT_PAD
+        );
+        // A widened (bookmarked or dragged) PROJECT column widens the fit by as much.
+        assert_eq!(classic_fit_width(&columns(300.0), 300.0) - narrow, 80.0);
+        // A very long path is capped rather than pushing the window off screen.
+        assert_eq!(
+            classic_fit_width(&columns(220.0), 2000.0),
+            classic_fit_width(&columns(220.0), CL_FIT_PATH_MAX)
+        );
     }
 
     #[test]
