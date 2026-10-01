@@ -4,9 +4,18 @@ use crate::history::{Hit, MatchMode};
 use std::time::Duration;
 
 const MAX_TEXT_LEN: usize = 120;
+/// Matched prompts printed per session; the rest are counted, not shown.
+const MAX_HIT_LINES: usize = 3;
+/// Characters kept before a term that sits too deep in a prompt to show from its start.
+const CONTEXT_BEFORE: usize = 40;
 
-/// Format a single hit as four lines (no trailing newline).
-pub fn format_hit(hit: &Hit) -> String {
+/// Format a single hit (no trailing newline): a heading, the session line, then the
+/// first prompt, the matched prompts and the last prompt, in session order.
+///
+/// `terms` places each matched prompt's excerpt around the earliest term, so a match
+/// deep inside a long prompt is still visible. Pass none for fuzzy hits, whose query
+/// is not a substring of the text.
+pub fn format_hit(hit: &Hit, terms: &[String]) -> String {
     let session = &hit.session;
     let branch = session
         .git_branch
@@ -35,9 +44,21 @@ pub fn format_hit(hit: &Hit) -> String {
         .as_ref()
         .map(|l| format!("\n  bookmark: {}", bookmark_oneline(l)))
         .unwrap_or_default();
+    let mut hits = String::new();
+    for &idx in hit.matched_turn_indices.iter().take(MAX_HIT_LINES) {
+        if let Some(turn) = session.turns.get(idx) {
+            hits.push_str(&format!("\n  hit>   {}", excerpt(&turn.text, terms)));
+        }
+    }
+    if hit.matched_turn_indices.len() > MAX_HIT_LINES {
+        hits.push_str(&format!(
+            "\n  hit>   (+{} more)",
+            hit.matched_turn_indices.len() - MAX_HIT_LINES
+        ));
+    }
 
     format!(
-        "{started}  {cwd}{branch}\n  session: {sid}  turns: {n}  matches: {m}{bookmark}\n  first> {first}\n  last>  {last}",
+        "{started}  {cwd}{branch}\n  session: {sid}  turns: {n}  matches: {m}{bookmark}\n  first> {first}{hits}\n  last>  {last}",
         started = started,
         cwd = session.cwd.display(),
         branch = branch,
@@ -46,6 +67,7 @@ pub fn format_hit(hit: &Hit) -> String {
         m = matches,
         bookmark = bookmark,
         first = first,
+        hits = hits,
         last = last,
     )
 }
@@ -82,8 +104,10 @@ pub fn format_oneshot(
         out.push_str(&fuzzy_fallback_notice(terms));
         out.push_str("\n\n");
     }
+    // The fuzzy query is not a substring of the text, so there is no term to centre on.
+    let excerpt_terms = if mode == MatchMode::Exact { terms } else { &[] };
     for hit in hits {
-        out.push_str(&format_hit(hit));
+        out.push_str(&format_hit(hit, excerpt_terms));
         out.push_str("\n\n");
     }
     if hits.is_empty() {
@@ -116,6 +140,11 @@ pub fn format_json(hits: &[Hit]) -> String {
                 "bookmark": s.bookmark,
                 "first_user_text": s.first_user_text(),
                 "last_user_text": s.last_user_text(),
+                "matched_user_texts": h
+                    .matched_turn_indices
+                    .iter()
+                    .filter_map(|&i| s.turns.get(i).map(|t| t.text.as_str()))
+                    .collect::<Vec<_>>(),
                 "file_path": s.file_path.display().to_string(),
             })
         })
@@ -123,11 +152,37 @@ pub fn format_json(hits: &[Hit]) -> String {
     serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".into())
 }
 
-fn truncate_oneline(s: &str) -> String {
-    let flat: String = s
-        .chars()
+/// One line of a matched prompt. When the earliest term would fall past the cut, the
+/// line starts `CONTEXT_BEFORE` characters ahead of it instead of at the beginning.
+fn excerpt(text: &str, terms: &[String]) -> String {
+    let flat = flatten(text);
+    let lower = flat.to_lowercase();
+    let Some(byte) = terms
+        .iter()
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| lower.find(&t.to_lowercase()))
+        .min()
+    else {
+        return truncate_oneline(&flat);
+    };
+    // Counted on the lowercased text: close enough for placing a window, and lowercasing
+    // changes the length of almost no character.
+    let at = lower[..byte].chars().count();
+    if at + CONTEXT_BEFORE < MAX_TEXT_LEN {
+        return truncate_oneline(&flat);
+    }
+    let rest: String = flat.chars().skip(at - CONTEXT_BEFORE).collect();
+    format!("…{}", truncate_oneline(&rest))
+}
+
+fn flatten(s: &str) -> String {
+    s.chars()
         .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-        .collect();
+        .collect()
+}
+
+fn truncate_oneline(s: &str) -> String {
+    let flat = flatten(s);
     if flat.chars().count() <= MAX_TEXT_LEN {
         flat
     } else {
@@ -170,25 +225,67 @@ mod tests {
     }
 
     #[test]
-    fn format_hit_produces_four_lines_with_branch() {
+    fn format_hit_lists_first_matched_and_last_prompts_with_branch() {
         let hit = hit_with(&[("hello", Role::User), ("world", Role::User)]);
-        let text = format_hit(&hit);
+        let text = format_hit(&hit, &[]);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 5);
         assert!(lines[0].contains("/Users/tomo/proj"));
         assert!(lines[0].contains("(main)"));
         assert!(lines[1].contains("session: abc-1"));
         assert!(lines[1].contains("turns: 2"));
         assert!(lines[1].contains("matches: 1"));
         assert_eq!(lines[2], "  first> hello");
-        assert_eq!(lines[3], "  last>  world");
+        assert_eq!(lines[3], "  hit>   hello");
+        assert_eq!(lines[4], "  last>  world");
+    }
+
+    #[test]
+    fn format_hit_caps_matched_prompts_and_counts_the_rest() {
+        let texts: Vec<(String, Role)> = (0..5).map(|i| (format!("p{i}"), Role::User)).collect();
+        let refs: Vec<(&str, Role)> = texts.iter().map(|(t, r)| (t.as_str(), *r)).collect();
+        let mut hit = hit_with(&refs);
+        hit.matched_turn_indices = vec![0, 1, 2, 3, 4];
+        let text = format_hit(&hit, &[]);
+        let hit_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("  hit>")).collect();
+        assert_eq!(
+            hit_lines,
+            vec![
+                "  hit>   p0",
+                "  hit>   p1",
+                "  hit>   p2",
+                "  hit>   (+2 more)"
+            ]
+        );
+    }
+
+    #[test]
+    fn excerpt_starts_near_a_term_buried_deep_in_the_prompt() {
+        let text = format!("{}needle tail", "x".repeat(300));
+        let out = excerpt(&text, &["NEEDLE".to_string()]);
+        assert!(out.starts_with('…'), "got: {out}");
+        assert!(out.contains("needle tail"), "got: {out}");
+        assert_eq!(
+            out.chars().skip(1).take(CONTEXT_BEFORE).collect::<String>(),
+            "x".repeat(CONTEXT_BEFORE)
+        );
+    }
+
+    #[test]
+    fn excerpt_keeps_the_start_when_the_term_is_already_visible() {
+        let text = format!("needle {}", "x".repeat(300));
+        assert_eq!(
+            excerpt(&text, &["needle".to_string()]),
+            truncate_oneline(&text)
+        );
+        assert_eq!(excerpt(&text, &[]), truncate_oneline(&text));
     }
 
     #[test]
     fn format_hit_hides_branch_when_absent() {
         let mut hit = hit_with(&[("hi", Role::User)]);
         hit.session.git_branch = None;
-        let text = format_hit(&hit);
+        let text = format_hit(&hit, &[]);
         assert!(!text.contains("()"));
         assert!(!text.contains("(main)"));
     }
@@ -263,6 +360,7 @@ mod tests {
         assert_eq!(e["matches"], 1);
         assert_eq!(e["first_user_text"], "first user");
         assert_eq!(e["last_user_text"], "last user");
+        assert_eq!(e["matched_user_texts"], serde_json::json!(["first user"]));
         assert!(e["started_at"].is_string());
         assert!(e["ended_at"].is_string());
     }
@@ -306,14 +404,14 @@ mod label_tests {
 
     #[test]
     fn format_hit_shows_the_label_name_and_tags() {
-        let text = format_hit(&labelled_hit("auth refactor", &["infra"], false));
+        let text = format_hit(&labelled_hit("auth refactor", &["infra"], false), &[]);
         assert!(text.contains("auth refactor"), "got:\n{text}");
         assert!(text.contains("#infra"), "got:\n{text}");
     }
 
     #[test]
     fn format_hit_reports_a_label_only_match_instead_of_zero_matches() {
-        let text = format_hit(&labelled_hit("auth refactor", &[], true));
+        let text = format_hit(&labelled_hit("auth refactor", &[], true), &[]);
         assert!(text.contains("matches: bookmark"), "got:\n{text}");
     }
 

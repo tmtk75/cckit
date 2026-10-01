@@ -68,6 +68,11 @@ that collides fails the suite rather than a user's first invocation.
 `session search` runs the AND-term matcher first and, when it finds nothing, retries the same
 corpus with the fuzzy matcher so typos still land (`--exact` disables the retry). The notice is
 inline in text output and on stderr under `--json`, which keeps stdout a bare JSON array.
+Each hit prints the first prompt, up to three matched prompts (`hit>`, the rest counted as
+`(+N more)`) and the last prompt, in session order. Under the exact matcher a matched
+prompt is excerpted from 40 characters before its earliest term, so a term deep in a long
+prompt still shows; fuzzy hits are shown from the start. `--json` carries every matched
+prompt untruncated as `matched_user_texts`.
 
 `session recent` answers "where was I working lately" without a search term: it keeps sessions whose
 last activity falls inside `--days N` (default 7), nests them under working directory then git branch,
