@@ -161,6 +161,14 @@ its launch. The gone-directory drop happens before the liveness check for exactl
 
 **Data flow**: Claude Code / Codex / Antigravity / Grok hooks → `cckit session hook` (stdin JSON) → `storage.rs` (sessions.json with file lock) → TUI/menubar/window reads and displays.
 
+**Codex TUI terminal**: since Codex 0.159 the TUI hands its turns to a shared
+`codex app-server --managed-daemon`, so hooks run under a process with no terminal and
+`get_current_tty` yields `unknown`, which greys the row out as unfocusable. When the
+transcript's `session_meta` says `originator: "codex-tui"`, `find_codex_tui_tty` looks for
+a `codex` process on a terminal whose cwd (via `lsof`) is the session's, and uses its TTY
+only when exactly one matches. Codex Desktop threads (other originators) stay `unknown`.
+Once a real TTY is found, `apply_event` drops the session's earlier `:unknown` entry.
+
 **Grok hooks**: nothing is installed for grok. Its Claude Code compatibility mode reads
 `~/.claude/settings.json`, so cckit's existing hooks already fire. grok sends every field
 under **both** spellings (`sessionId` and `session_id`, `toolName` and `tool_name`,

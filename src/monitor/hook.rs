@@ -278,8 +278,15 @@ pub fn handle_hook(event: Option<&str>) -> Result<(), Box<dyn std::error::Error>
     }
 
     let storage = Storage::new();
-    let tty = get_current_tty();
-    let pid = get_parent_pid();
+    let mut tty = get_current_tty();
+    let mut pid = get_parent_pid();
+    if tty == "unknown"
+        && let Some(transcript) = hook_input.transcript_path.as_deref()
+        && let Some((tui_tty, tui_pid)) = find_codex_tui_tty(transcript, &hook_input.cwd)
+    {
+        tty = tui_tty;
+        pid = Some(tui_pid);
+    }
     let key = format!("{}:{}", hook_input.session_id, tty);
 
     storage.with_lock(|store| apply_event(store, key.clone(), &hook_input, tty.clone(), pid))?;
@@ -306,8 +313,12 @@ pub fn apply_event(
     pid: Option<u32>,
 ) {
     let event = hook_input.hook_event_name.as_str();
-    // Remove old sessions with the same TTY but different session_id
-    store.sessions.retain(|k, s| s.tty != tty || k == &key);
+    // Remove old sessions with the same TTY but different session_id, and the `unknown`
+    // entry of this same session once a real TTY has been found for it.
+    store.sessions.retain(|k, s| {
+        k == &key
+            || (s.tty != tty && !(s.tty == "unknown" && s.session_id == hook_input.session_id))
+    });
 
     // Update transcript_path on every event if provided
     let transcript = hook_input.transcript_path.clone();
@@ -606,6 +617,100 @@ fn get_current_tty() -> String {
     }
 
     "unknown".to_string()
+}
+
+/// The terminal of the Codex TUI that owns a session whose hook ran without one.
+///
+/// Since 0.159 the Codex TUI hands its turns to a shared `codex app-server
+/// --managed-daemon`, so hooks are children of a process with no terminal. Nothing in
+/// the payload or the daemon names the client, so the TUI is found by working
+/// directory: a `codex` process on a terminal whose cwd is the session's. Only a unique
+/// match counts; two TUIs in one directory stay `unknown` rather than risk focusing the
+/// wrong one. Codex Desktop threads are skipped by their transcript's `originator`.
+fn find_codex_tui_tty(transcript: &str, cwd: &str) -> Option<(String, u32)> {
+    if !is_codex_tui_transcript(transcript) {
+        return None;
+    }
+    let ps = Command::new("ps")
+        .args(["-axo", "pid=,tty=,comm="])
+        .output()
+        .ok()?;
+    let candidates = codex_tui_processes(&String::from_utf8_lossy(&ps.stdout));
+    if candidates.is_empty() {
+        return None;
+    }
+    let pids: Vec<String> = candidates.iter().map(|(pid, _)| pid.to_string()).collect();
+    let lsof = Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-Fn", "-p", &pids.join(",")])
+        .output()
+        .ok()?;
+    let cwds = parse_lsof_cwds(&String::from_utf8_lossy(&lsof.stdout));
+    unique_tty_in_cwd(&candidates, &cwds, cwd)
+}
+
+fn is_codex_tui_transcript(transcript: &str) -> bool {
+    let Ok(file) = std::fs::File::open(transcript) else {
+        return false;
+    };
+    let mut first = String::new();
+    if io::BufRead::read_line(&mut io::BufReader::new(file), &mut first).is_err() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&first)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/payload/originator")
+                .and_then(|o| o.as_str())
+                .map(|o| o == "codex-tui")
+        })
+        .unwrap_or(false)
+}
+
+/// `(pid, tty)` of every `codex` program running on a terminal, from `ps -o pid=,tty=,comm=`.
+fn codex_tui_processes(ps_output: &str) -> Vec<(u32, String)> {
+    ps_output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let tty = fields.next()?;
+            // comm is a path and may contain spaces, so rejoin the rest.
+            let comm = fields.collect::<Vec<_>>().join(" ");
+            let program = comm.rsplit('/').next().unwrap_or(&comm);
+            (program == "codex" && tty != "??" && tty != "-").then(|| (pid, tty.to_string()))
+        })
+        .collect()
+}
+
+/// `(pid, cwd)` pairs from `lsof -d cwd -Fn`, which prints a `p<pid>` line before each `n<path>`.
+fn parse_lsof_cwds(output: &str) -> Vec<(u32, String)> {
+    let mut pid = None;
+    let mut cwds = Vec::new();
+    for line in output.lines() {
+        if let Some(p) = line.strip_prefix('p') {
+            pid = p.parse().ok();
+        } else if let Some(path) = line.strip_prefix('n')
+            && let Some(p) = pid
+        {
+            cwds.push((p, path.to_string()));
+        }
+    }
+    cwds
+}
+
+fn unique_tty_in_cwd(
+    candidates: &[(u32, String)],
+    cwds: &[(u32, String)],
+    cwd: &str,
+) -> Option<(String, u32)> {
+    let mut matched = candidates
+        .iter()
+        .filter(|(pid, _)| cwds.iter().any(|(p, c)| p == pid && c == cwd));
+    let (pid, tty) = matched.next()?;
+    if matched.next().is_some() {
+        return None;
+    }
+    Some((format!("/dev/{tty}"), *pid))
 }
 
 fn get_parent_pid() -> Option<u32> {
@@ -1388,5 +1493,114 @@ mod grok_model_tests {
     fn an_empty_model_id_is_treated_as_absent() {
         let json = r#"{"current_model_id": ""}"#;
         assert_eq!(grok_model_from_summary(json), None);
+    }
+}
+
+#[cfg(test)]
+mod codex_tui_tests {
+    use super::*;
+    use crate::monitor::session::SessionStore;
+
+    const PS: &str = "\
+69063 ??       /Users/me/.codex/packages/app-server-daemon/bin/codex
+73342 ttys102  codex
+92203 ttys054  /opt/homebrew/bin/codex
+88001 ttys010  /Applications/Codex Helper.app/Contents/MacOS/codex-code-mode-host
+88002 ttys011  zsh
+";
+
+    #[test]
+    fn test_codex_tui_processes_keeps_codex_on_a_terminal() {
+        assert_eq!(
+            codex_tui_processes(PS),
+            vec![(73342, "ttys102".into()), (92203, "ttys054".into())]
+        );
+    }
+
+    #[test]
+    fn test_parse_lsof_cwds() {
+        let out = "p73342\nfcwd\nn/work/a\np92203\nfcwd\nn/work/b\n";
+        assert_eq!(
+            parse_lsof_cwds(out),
+            vec![(73342, "/work/a".into()), (92203, "/work/b".into())]
+        );
+    }
+
+    #[test]
+    fn test_unique_tty_in_cwd() {
+        let candidates = codex_tui_processes(PS);
+        let cwds = vec![(73342, "/work/a".into()), (92203, "/work/b".into())];
+        assert_eq!(
+            unique_tty_in_cwd(&candidates, &cwds, "/work/a"),
+            Some(("/dev/ttys102".into(), 73342))
+        );
+        assert_eq!(unique_tty_in_cwd(&candidates, &cwds, "/work/c"), None);
+    }
+
+    #[test]
+    fn test_unique_tty_in_cwd_refuses_two_tuis_in_one_directory() {
+        let candidates = codex_tui_processes(PS);
+        let cwds = vec![(73342, "/work/a".into()), (92203, "/work/a".into())];
+        assert_eq!(unique_tty_in_cwd(&candidates, &cwds, "/work/a"), None);
+    }
+
+    #[test]
+    fn test_is_codex_tui_transcript() {
+        let dir = std::env::temp_dir().join(format!("cckit-codex-tui-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tui = dir.join("tui.jsonl");
+        let desktop = dir.join("desktop.jsonl");
+        std::fs::write(
+            &tui,
+            "{\"type\":\"session_meta\",\"payload\":{\"originator\":\"codex-tui\"}}\n{}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &desktop,
+            "{\"type\":\"session_meta\",\"payload\":{\"originator\":\"Codex Desktop\"}}\n",
+        )
+        .unwrap();
+        assert!(is_codex_tui_transcript(tui.to_str().unwrap()));
+        assert!(!is_codex_tui_transcript(desktop.to_str().unwrap()));
+        assert!(!is_codex_tui_transcript(
+            dir.join("missing").to_str().unwrap()
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_real_tty_replaces_unknown_entry_of_same_session() {
+        let payload = |sid: &str| -> HookInput {
+            let mut input: HookInput = serde_json::from_str(&format!(
+                r#"{{"session_id":"{sid}","cwd":"/work/a","hook_event_name":"UserPromptSubmit"}}"#
+            ))
+            .unwrap();
+            input.normalize(None);
+            input
+        };
+        let mut store = SessionStore::default();
+        apply_event(
+            &mut store,
+            "s1:unknown".into(),
+            &payload("s1"),
+            "unknown".into(),
+            None,
+        );
+        apply_event(
+            &mut store,
+            "s2:unknown".into(),
+            &payload("s2"),
+            "unknown".into(),
+            None,
+        );
+        apply_event(
+            &mut store,
+            "s2:/dev/ttys102".into(),
+            &payload("s2"),
+            "/dev/ttys102".into(),
+            None,
+        );
+        assert!(store.sessions.contains_key("s2:/dev/ttys102"));
+        assert!(!store.sessions.contains_key("s2:unknown"));
     }
 }
