@@ -395,6 +395,7 @@ mod label_tests {
                     session_started_at: None,
                     bookmarked_at: ts,
                     updated_at: ts,
+                    hidden: false,
                 }),
             },
             matched_turn_indices: if bookmark_matched { vec![] } else { vec![0] },

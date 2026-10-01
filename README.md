@@ -269,9 +269,19 @@ cckit session bookmark tag 7568e813 --rm infra
 # Print just the id, for use in another command
 cckit session bookmark id auth
 
+# Put one out of sight without deleting it, and bring it back
+cckit session bookmark hide 7568e813
+cckit session bookmark ls --all             # hidden ones too, marked (hidden)
+cckit session bookmark unhide 7568e813
+
 # Forget one
 cckit session bookmark rm 7568e813
 ```
+
+`hide` is the reversible `rm`: the bookmark stays in the file but drops out of `ls`, `id`,
+and the bookmark shown by `session recent` and `session search`. `ls` says how many it left
+out, so a hidden bookmark never looks deleted, and `set` on a hidden one makes it visible
+again.
 
 `bookmark id` exists for the case this whole feature is aimed at: you start a session
 loosely with `claude -w`, decide it deserves a proper workspace, and want to pick it up

@@ -407,6 +407,9 @@ enum BookmarkCommands {
         )]
         here: bool,
 
+        #[arg(long, help = "Include hidden bookmarks, marked (hidden)")]
+        all: bool,
+
         #[arg(
             long = "group-by",
             value_name = "WHAT",
@@ -447,6 +450,22 @@ order. Several matches print the candidates on stderr and exit 2 rather than gue
 
     /// Remove the bookmark on a session
     Rm {
+        /// Session id, or a leading fragment of one
+        session_id: String,
+    },
+
+    /// Hide a bookmark without deleting it (undo with `unhide`)
+    #[command(after_help = "\
+A hidden bookmark stays in bookmarks.json but drops out of `bookmark ls`, `bookmark id`,
+and the bookmark shown by `session recent` and `session search`. `bookmark ls --all`
+lists it again, marked (hidden). Setting it again with `bookmark set` makes it visible.")]
+    Hide {
+        /// Session id, or a leading fragment of one
+        session_id: String,
+    },
+
+    /// Make a hidden bookmark visible again
+    Unhide {
         /// Session id, or a leading fragment of one
         session_id: String,
     },
@@ -7694,9 +7713,10 @@ pub fn run() {
                         BookmarkCommands::Ls {
                             tag,
                             here,
+                            all,
                             group_by,
                             json,
-                        } => bookmark::run_ls(tag, here, group_by.map(Into::into), json),
+                        } => bookmark::run_ls(tag, here, all, group_by.map(Into::into), json),
                         BookmarkCommands::Id { query } => bookmark::run_id(&query),
                         BookmarkCommands::Tag {
                             session_id,
@@ -7704,6 +7724,12 @@ pub fn run() {
                             rm,
                         } => bookmark::run_tag(&session_id, tags, rm),
                         BookmarkCommands::Rm { session_id } => bookmark::run_rm(&session_id),
+                        BookmarkCommands::Hide { session_id } => {
+                            bookmark::run_hide(&session_id, true)
+                        }
+                        BookmarkCommands::Unhide { session_id } => {
+                            bookmark::run_hide(&session_id, false)
+                        }
                     };
                     match result {
                         Ok(code) => std::process::exit(code),

@@ -110,7 +110,14 @@ displaced so `set` can print `renamed … from … to …`, which is what makes 
 fired in the wrong terminal visible. `set` replaces the whole bookmark, so `edit_tags`
 (`bookmark tag`) exists for adding or dropping one tag without retyping the name; it
 reports tags that were already set or were not there to remove, and refuses an edit that
-would leave a nameless bookmark with no tags (`rm` is how you delete one). The listing
+would leave a nameless bookmark with no tags (`rm` is how you delete one). `hide` /
+`unhide` set `hidden`, a reversible `rm`: a hidden bookmark stays in the file (the field is
+omitted while false, so older files read unchanged) but `lookup` skips it in every net,
+`attach_bookmarks` does not attach it, and `ls` leaves it out unless `--all`, where it is
+marked `(hidden)`. `ls` reports how many it left out, counted after `--tag`/`--here`, so a
+hidden bookmark never looks deleted. `hide`/`unhide` resolve the prefix against every
+bookmark so `unhide` can reach what `ls` no longer shows; `set` writes a fresh, visible
+bookmark. The listing
 ends with the store path so an empty result is not mistaken for cckit reading a different
 file. `--here` filters with `is_under`, which compares path segments rather than text so
 a worktree beside the repo (`proj-wt` next to `proj`) is not swept in; `--group-by`

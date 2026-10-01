@@ -30,6 +30,11 @@ pub struct Bookmark {
     pub session_started_at: Option<DateTime<Utc>>,
     pub bookmarked_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Kept on disk but left out of listings, lookups and session annotations until
+    /// `unhide`: a reversible alternative to `rm`. Omitted from the file while false, so
+    /// stores written before this field existed read unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 impl Bookmark {
@@ -228,6 +233,8 @@ impl BookmarkStore {
                 session_started_at: draft.session_started_at,
                 bookmarked_at,
                 updated_at: now,
+                // `set` replaces the whole bookmark, so naming a hidden one brings it back.
+                hidden: false,
             };
             // Only a change in what the bookmark says counts as a replacement: rerunning
             // the same command is not a loss and must not be announced as one.
@@ -306,6 +313,30 @@ impl BookmarkStore {
         })?
     }
 
+    /// Hide or unhide the bookmark for `session_id`. Returns whether anything changed;
+    /// `NotFound` when the session carries no bookmark.
+    pub fn set_hidden(
+        &self,
+        session_id: &str,
+        hidden: bool,
+        now: DateTime<Utc>,
+    ) -> io::Result<bool> {
+        self.with_lock(|book| {
+            let Some(bookmark) = book.bookmarks.get_mut(session_id) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no bookmark on session {session_id}"),
+                ));
+            };
+            if bookmark.hidden == hidden {
+                return Ok(false);
+            }
+            bookmark.hidden = hidden;
+            bookmark.updated_at = now;
+            Ok(true)
+        })?
+    }
+
     /// Drop the bookmark for `session_id`. False when there was nothing to drop.
     pub fn remove(&self, session_id: &str) -> io::Result<bool> {
         self.with_lock(|book| book.bookmarks.remove(session_id).is_some())
@@ -381,7 +412,7 @@ pub fn attach_bookmarks(sessions: &mut [crate::history::SessionRecord], book: &B
         return;
     }
     for session in sessions.iter_mut() {
-        session.bookmark = book.get(&session.session_id).cloned();
+        session.bookmark = book.get(&session.session_id).filter(|b| !b.hidden).cloned();
     }
 }
 
@@ -571,6 +602,7 @@ pub fn run_tag(prefix: &str, tags: Vec<String>, remove: bool) -> io::Result<i32>
 pub fn run_ls(
     tag: Option<String>,
     here: bool,
+    all: bool,
     group_by: Option<GroupBy>,
     json: bool,
 ) -> io::Result<i32> {
@@ -584,6 +616,11 @@ pub fn run_ls(
         let root = std::env::current_dir()?;
         entries.retain(|(_, bookmark)| is_under(bookmark, &root));
     }
+    // Counted after the other filters, so the note speaks for the same scope as the list.
+    let hidden = entries.iter().filter(|(_, b)| b.hidden).count();
+    if !all {
+        entries.retain(|(_, bookmark)| !bookmark.hidden);
+    }
 
     if json {
         // The JSON stays flat whatever the grouping: a `jq` consumer can bucket it however
@@ -594,6 +631,19 @@ pub fn run_ls(
 
     let tz = chrono::Local::now().offset().fix();
     let color = colored::control::SHOULD_COLORIZE.should_colorize();
+    if !all && hidden > 0 && entries.is_empty() {
+        // The usual empty message says nothing has been bookmarked yet, which is false here.
+        let where_kept = shorten_home(
+            &store.path().display().to_string(),
+            dirs::home_dir().as_deref(),
+        );
+        let unit = if hidden == 1 { "bookmark" } else { "bookmarks" };
+        println!(
+            "No visible bookmarks; {hidden} {unit} hidden. `cckit session bookmark ls --all` shows them."
+        );
+        println!("\nBookmarks are kept in {where_kept}");
+        return Ok(0);
+    }
     match group_by {
         Some(GroupBy::Path) => print!(
             "{}",
@@ -605,7 +655,16 @@ pub fn run_ls(
         ),
         None => print!("{}", format_list(&entries, &tz, color, store.path())),
     }
+    if !all && hidden > 0 {
+        print!("{}", hidden_note(hidden));
+    }
     Ok(0)
+}
+
+/// The line that keeps hidden bookmarks from looking deleted.
+fn hidden_note(hidden: usize) -> String {
+    let verb = if hidden == 1 { "is" } else { "are" };
+    format!("{hidden} more {verb} hidden; `cckit session bookmark ls --all` shows them\n")
 }
 
 /// `cckit session bookmark rm`. The prefix is resolved against the bookmarked sessions only,
@@ -639,6 +698,48 @@ pub fn run_rm(prefix: &str) -> io::Result<i32> {
             Ok(0)
         }
     }
+}
+
+/// `cckit session bookmark hide` and `unhide`. The prefix is resolved against every
+/// bookmark, hidden or not, so `unhide` reaches what `ls` no longer shows.
+pub fn run_hide(prefix: &str, hidden: bool) -> io::Result<i32> {
+    let store = BookmarkStore::new();
+    let book = store.load()?;
+    let ids: Vec<String> = book
+        .entries_newest_first()
+        .into_iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
+    let id = match resolve_prefix(prefix, &ids) {
+        Resolution::Unique(id) => id,
+        Resolution::None => {
+            eprintln!("error: no bookmarked session matches \"{prefix}\".");
+            return Ok(1);
+        }
+        Resolution::Ambiguous(candidates) => {
+            eprintln!(
+                "error: \"{prefix}\" matches {} bookmarks:",
+                candidates.len()
+            );
+            for id in candidates.iter().take(10) {
+                eprintln!("  {id}");
+            }
+            return Ok(2);
+        }
+    };
+
+    let name = book
+        .get(&id)
+        .map(crate::history::format::bookmark_oneline)
+        .unwrap_or_default();
+    if store.set_hidden(&id, hidden, Utc::now())? {
+        let verb = if hidden { "hid" } else { "unhid" };
+        println!("{verb} the bookmark on {id} ({name})");
+    } else {
+        let state = if hidden { "hidden" } else { "visible" };
+        eprintln!("note: the bookmark on {id} ({name}) was already {state}");
+    }
+    Ok(0)
 }
 
 /// Every transcript file, newest first is not needed here, only the paths.
@@ -753,15 +854,18 @@ fn bookmark_row(
         .filter(|_| show_cwd)
         .map(|c| shorten_home(c, home.as_deref()))
         .unwrap_or_default();
+    // Only `ls --all` lists a hidden bookmark, and there it must not pass for a live one.
+    let mark = if bookmark.hidden { " (hidden)" } else { "" };
     let head = if color {
         format!(
-            "{}  {}  {}",
+            "{}  {}{}  {}",
             when.to_string().dimmed(),
             text.magenta(),
+            mark.dimmed(),
             session_id.blue(),
         )
     } else {
-        format!("{when}  {text}  {session_id}")
+        format!("{when}  {text}{mark}  {session_id}")
     };
     // Under `--group-by path` the heading already names the directory, so the row ends
     // at the session id rather than trailing an empty column.
@@ -889,6 +993,7 @@ pub fn format_list_json(entries: &[(&str, &Bookmark)]) -> String {
                 "session_started_at": bookmark.session_started_at.map(|t| t.to_rfc3339()),
                 "bookmarked_at": bookmark.bookmarked_at.to_rfc3339(),
                 "updated_at": bookmark.updated_at.to_rfc3339(),
+                "hidden": bookmark.hidden,
             })
         })
         .collect();
@@ -1011,7 +1116,7 @@ pub fn lookup(book: &BookmarkBook, query: &str) -> Resolution {
     let by_name: Vec<String> = book
         .entries_newest_first()
         .into_iter()
-        .filter(|(_, b)| b.name.to_lowercase().contains(&needle))
+        .filter(|(_, b)| !b.hidden && b.name.to_lowercase().contains(&needle))
         .map(|(id, _)| id.to_string())
         .collect();
     if let Some(found) = decide(by_name) {
@@ -1021,6 +1126,7 @@ pub fn lookup(book: &BookmarkBook, query: &str) -> Resolution {
     let by_tag: Vec<String> = book
         .with_tag(&needle)
         .into_iter()
+        .filter(|(_, b)| !b.hidden)
         .map(|(id, _)| id.to_string())
         .collect();
     if let Some(found) = decide(by_tag) {
@@ -1030,6 +1136,7 @@ pub fn lookup(book: &BookmarkBook, query: &str) -> Resolution {
     let ids: Vec<String> = book
         .entries_newest_first()
         .into_iter()
+        .filter(|(_, b)| !b.hidden)
         .map(|(id, _)| id.to_string())
         .collect();
     resolve_prefix(query.trim(), &ids)
@@ -1330,6 +1437,7 @@ mod listing_tests {
             session_started_at: None,
             bookmarked_at: ts,
             updated_at: ts,
+            hidden: false,
         }
     }
 
@@ -1766,6 +1874,7 @@ mod listing_footer_tests {
             session_started_at: None,
             bookmarked_at: ts,
             updated_at: ts,
+            hidden: false,
         }
     }
 
@@ -1824,6 +1933,7 @@ mod ls_filter_tests {
             session_started_at: None,
             bookmarked_at: at(0),
             updated_at: at(0),
+            hidden: false,
         }
     }
 
@@ -1878,6 +1988,7 @@ mod ls_grouping_tests {
             session_started_at: None,
             bookmarked_at: at(0),
             updated_at: at(updated),
+            hidden: false,
         }
     }
 
@@ -1946,6 +2057,7 @@ mod group_render_tests {
             session_started_at: None,
             bookmarked_at: ts,
             updated_at: ts,
+            hidden: false,
         }
     }
 
@@ -1989,5 +2101,152 @@ mod group_render_tests {
             Path::new("/d/bookmarks.json"),
         );
         assert!(out.contains("2 rows"), "got:\n{out}");
+    }
+}
+
+#[cfg(test)]
+mod hide_tests {
+    use super::*;
+    use chrono::TimeZone;
+    use tempfile::TempDir;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    fn store_with(entries: &[(&str, &str, &[&str])]) -> (TempDir, BookmarkStore) {
+        let dir = TempDir::new().unwrap();
+        let store = BookmarkStore::at(dir.path());
+        for (i, (id, name, tags)) in entries.iter().enumerate() {
+            store
+                .upsert(
+                    id,
+                    BookmarkDraft {
+                        name: (*name).to_string(),
+                        tags: tags.iter().map(|t| t.to_string()).collect(),
+                        ..Default::default()
+                    },
+                    at(i as i64),
+                )
+                .unwrap();
+        }
+        (dir, store)
+    }
+
+    #[test]
+    fn hiding_keeps_the_bookmark_and_unhiding_restores_it() {
+        let (_dir, store) = store_with(&[("aaaa-1", "auth refactor", &["auth"])]);
+        assert!(store.set_hidden("aaaa-1", true, at(10)).unwrap());
+        let hidden = store.load().unwrap().get("aaaa-1").cloned().unwrap();
+        assert!(hidden.hidden);
+        assert_eq!(hidden.name, "auth refactor");
+        assert_eq!(hidden.tags, vec!["auth".to_string()]);
+
+        assert!(store.set_hidden("aaaa-1", false, at(20)).unwrap());
+        assert!(!store.load().unwrap().get("aaaa-1").unwrap().hidden);
+    }
+
+    #[test]
+    fn hiding_twice_reports_no_change() {
+        let (_dir, store) = store_with(&[("aaaa-1", "auth", &[])]);
+        assert!(store.set_hidden("aaaa-1", true, at(10)).unwrap());
+        assert!(!store.set_hidden("aaaa-1", true, at(20)).unwrap());
+        assert_eq!(
+            store.load().unwrap().get("aaaa-1").unwrap().updated_at,
+            at(10)
+        );
+    }
+
+    #[test]
+    fn hiding_an_unbookmarked_session_is_not_found() {
+        let (_dir, store) = store_with(&[]);
+        let err = store.set_hidden("nope", true, at(0)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn setting_a_hidden_bookmark_again_makes_it_visible() {
+        let (_dir, store) = store_with(&[("aaaa-1", "auth", &[])]);
+        store.set_hidden("aaaa-1", true, at(10)).unwrap();
+        store
+            .upsert(
+                "aaaa-1",
+                BookmarkDraft {
+                    name: "auth".into(),
+                    ..Default::default()
+                },
+                at(20),
+            )
+            .unwrap();
+        assert!(!store.load().unwrap().get("aaaa-1").unwrap().hidden);
+    }
+
+    #[test]
+    fn lookup_skips_hidden_bookmarks_in_every_net() {
+        let (_dir, store) = store_with(&[
+            ("aaaa-1", "auth refactor", &["infra"]),
+            ("bbbb-2", "auth review", &[]),
+        ]);
+        store.set_hidden("aaaa-1", true, at(10)).unwrap();
+        let book = store.load().unwrap();
+        // Without the hidden one the name match is no longer ambiguous.
+        assert_eq!(lookup(&book, "auth"), Resolution::Unique("bbbb-2".into()));
+        assert_eq!(lookup(&book, "infra"), Resolution::None);
+        assert_eq!(lookup(&book, "aaaa"), Resolution::None);
+    }
+
+    #[test]
+    fn hidden_bookmarks_are_not_attached_to_sessions() {
+        use crate::history::SessionRecord;
+        use std::path::PathBuf;
+
+        let (_dir, store) = store_with(&[("aaaa-1", "auth", &[])]);
+        store.set_hidden("aaaa-1", true, at(10)).unwrap();
+        let mut sessions = vec![SessionRecord {
+            session_id: "aaaa-1".into(),
+            cwd: PathBuf::from("/tmp"),
+            git_branch: None,
+            file_path: PathBuf::from("/tmp/aaaa-1.jsonl"),
+            started_at: at(0),
+            ended_at: at(0),
+            turns: Vec::new(),
+            bookmark: None,
+        }];
+        attach_bookmarks(&mut sessions, &store.load().unwrap());
+        assert!(sessions[0].bookmark.is_none());
+    }
+
+    #[test]
+    fn the_flag_is_left_out_of_the_file_until_set_and_old_files_read_as_visible() {
+        let (dir, store) = store_with(&[("aaaa-1", "auth", &[])]);
+        let raw = fs::read_to_string(dir.path().join(BOOKMARKS_FILE)).unwrap();
+        assert!(!raw.contains("hidden"), "got: {raw}");
+        assert!(!store.load().unwrap().get("aaaa-1").unwrap().hidden);
+
+        store.set_hidden("aaaa-1", true, at(10)).unwrap();
+        let raw = fs::read_to_string(dir.path().join(BOOKMARKS_FILE)).unwrap();
+        assert!(raw.contains("\"hidden\": true"), "got: {raw}");
+    }
+
+    #[test]
+    fn a_listed_hidden_bookmark_is_marked() {
+        let (_dir, store) = store_with(&[("aaaa-1", "auth", &[])]);
+        store.set_hidden("aaaa-1", true, at(10)).unwrap();
+        let book = store.load().unwrap();
+        let entries = book.entries_newest_first();
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let out = format_list(&entries, &tz, false, Path::new("/d/bookmarks.json"));
+        assert!(out.contains("auth (hidden)  aaaa-1"), "got: {out}");
+        let json: serde_json::Value = serde_json::from_str(&format_list_json(&entries)).unwrap();
+        assert_eq!(json[0]["hidden"], true);
+    }
+
+    #[test]
+    fn the_hidden_note_names_the_count_and_the_way_back() {
+        assert_eq!(
+            hidden_note(1),
+            "1 more is hidden; `cckit session bookmark ls --all` shows them\n"
+        );
+        assert!(hidden_note(3).starts_with("3 more are hidden"));
     }
 }
