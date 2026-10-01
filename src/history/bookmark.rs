@@ -869,28 +869,33 @@ fn bookmark_row(
         .filter(|_| show_cwd)
         .map(|c| shorten_home(c, home.as_deref()))
         .unwrap_or_default();
-    // Only `ls --all` lists a hidden bookmark, and there it must not pass for a live one.
+    // Only `ls --all` lists a hidden bookmark, and there it must not pass for a live one:
+    // the mark says so in plain text, and with color the whole row is dimmed.
     let mark = if bookmark.hidden { " (hidden)" } else { "" };
-    let head = if color {
-        format!(
-            "{}  {}{}  {}",
-            when.to_string().dimmed(),
-            text.magenta(),
-            mark.dimmed(),
-            session_id.blue(),
-        )
-    } else {
-        format!("{when}  {text}{mark}  {session_id}")
-    };
+    let plain = format!("{when}  {text}{mark}  {session_id}");
     // Under `--group-by path` the heading already names the directory, so the row ends
     // at the session id rather than trailing an empty column.
-    if cwd.is_empty() {
-        return head;
-    }
-    if color {
-        format!("{head}  {}", cwd.dimmed())
+    let plain = if cwd.is_empty() {
+        plain
     } else {
-        format!("{head}  {cwd}")
+        format!("{plain}  {cwd}")
+    };
+    if !color {
+        return plain;
+    }
+    if bookmark.hidden {
+        return plain.dimmed().to_string();
+    }
+    let head = format!(
+        "{}  {}  {}",
+        when.to_string().dimmed(),
+        text.magenta(),
+        session_id.blue(),
+    );
+    if cwd.is_empty() {
+        head
+    } else {
+        format!("{head}  {}", cwd.dimmed())
     }
 }
 
@@ -2341,6 +2346,22 @@ mod hide_tests {
         assert!(out.contains("auth (hidden)  aaaa-1"), "got: {out}");
         let json: serde_json::Value = serde_json::from_str(&format_list_json(&entries)).unwrap();
         assert_eq!(json[0]["hidden"], true);
+    }
+
+    #[test]
+    fn a_hidden_row_is_dimmed_whole_under_color() {
+        colored::control::set_override(true);
+        let (_dir, store) = store_with(&[("aaaa-1", "auth", &[]), ("bbbb-2", "infra", &[])]);
+        store.set_hidden("aaaa-1", true, at(10)).unwrap();
+        let book = store.load().unwrap();
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let hidden = bookmark_row("aaaa-1", book.get("aaaa-1").unwrap(), &tz, true, false);
+        let visible = bookmark_row("bbbb-2", book.get("bbbb-2").unwrap(), &tz, true, false);
+        // One dim span around the whole row, no magenta name or blue id inside it.
+        assert!(hidden.starts_with("\u{1b}[2m"), "got: {hidden:?}");
+        assert!(!hidden.contains("\u{1b}[35m") && !hidden.contains("\u{1b}[34m"));
+        assert!(hidden.contains("auth (hidden)  aaaa-1"), "got: {hidden:?}");
+        assert!(visible.contains("\u{1b}[35m"), "got: {visible:?}");
     }
 
     #[test]
