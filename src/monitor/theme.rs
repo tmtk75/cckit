@@ -90,13 +90,33 @@ fn claude_version(rest: &str) -> Option<String> {
     }
 }
 
-/// Read the version segment that follows a `gpt-` prefix.
+/// Variants OpenAI names after the version, e.g. "gpt-6.1-sol". Unlike Gemini's and
+/// Grok's, most GPT suffixes ("codex", "mini", "turbo", ...) are noise rather than a
+/// distinct tier, so only names recognized here are shown; an unlisted one is dropped,
+/// same as before this table existed.
+const GPT_VARIANTS: [(&str, &str); 2] = [("sol", "Sol"), ("astra", "Astra")];
+
+/// Parse "gpt-<version>[-<variant>]" into "6.1 Sol".
 ///
-/// `gpt-5.6-sol` -> `"5.6"`, `gpt-5-codex` -> `"5"`, `gpt-4o-mini` -> `"4o"`.
-/// Returns `None` when that segment is not a version, as in `gpt-oss-120b`.
-fn gpt_version(m: &str) -> Option<&str> {
-    let seg = m.strip_prefix("gpt-")?.split('-').next()?;
-    seg.starts_with(|c: char| c.is_ascii_digit()).then_some(seg)
+/// `gpt-6.1-sol` -> `"6.1 Sol"`, `gpt-5-codex` -> `"5"`, `gpt-4o-mini` -> `"4o"`.
+/// Returns `None` when the version segment is not a version, as in `gpt-oss-120b`.
+fn gpt_label(m: &str) -> Option<String> {
+    let rest = m.strip_prefix("gpt-")?;
+    let mut parts = rest.split('-');
+    let version = parts.next()?;
+    if !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let variant = parts.next().and_then(|name| {
+        GPT_VARIANTS
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, display)| *display)
+    });
+    Some(match variant {
+        Some(variant) => format!("{version} {variant}"),
+        None => version.to_string(),
+    })
 }
 
 /// Return a short, human-readable label for a model id (e.g. "Opus 4.7").
@@ -124,7 +144,7 @@ pub fn model_short_label(model: &str) -> Option<String> {
     }
 
     // Same idea for OpenAI ids: "gpt-<version>[-<variant>]".
-    if let Some(v) = gpt_version(m) {
+    if let Some(v) = gpt_label(m) {
         return Some(format!("GPT-{v}"));
     }
 
@@ -642,15 +662,37 @@ mod tests {
 
     #[test]
     fn test_model_short_label_gpt_minor_versions() {
+        // "sol" is a recognized variant and is kept; the rest are dropped as noise.
         assert_eq!(
             model_short_label("gpt-5.6-sol"),
-            Some("GPT-5.6".to_string())
+            Some("GPT-5.6 Sol".to_string())
         );
         assert_eq!(model_short_label("gpt-5-codex"), Some("GPT-5".to_string()));
         assert_eq!(model_short_label("gpt-4o-mini"), Some("GPT-4o".to_string()));
         assert_eq!(
             model_short_label("gpt-3.5-turbo"),
             Some("GPT-3.5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_gpt_sol_variant() {
+        assert_eq!(
+            model_short_label("gpt-6.1-sol"),
+            Some("GPT-6.1 Sol".to_string())
+        );
+        // Case-insensitive, like every other family.
+        assert_eq!(
+            model_short_label("GPT-6.1-SOL"),
+            Some("GPT-6.1 Sol".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_short_label_gpt_astra_variant() {
+        assert_eq!(
+            model_short_label("gpt-6-astra"),
+            Some("GPT-6 Astra".to_string())
         );
     }
 
