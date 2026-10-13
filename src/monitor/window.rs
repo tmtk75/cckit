@@ -67,11 +67,24 @@ fn config_path() -> PathBuf {
         .join("cckit/window.toml")
 }
 
+/// Parse `window.toml`'s content. Split out of `load_config` so the parse itself can be
+/// tested on a string, without a real file or `log_error`'s write to disk.
+fn parse_config(content: &str) -> Result<WindowConfig, toml::de::Error> {
+    toml::from_str(content)
+}
+
 fn load_config() -> WindowConfig {
     let path = config_path();
     if path.exists() {
         let content = std::fs::read_to_string(&path).unwrap_or_default();
-        toml::from_str(&content).unwrap_or_default()
+        parse_config(&content).unwrap_or_else(|e| {
+            // A typo (bad opacity, misspelled theme, ...) must not silently fall back to
+            // defaults with no sign anything was wrong — that's how "classic" in the file
+            // kept showing as mission control. The window app has no visible stderr, so
+            // this goes to the same error.log the hooks use.
+            crate::monitor::hook::log_error("window_config", &format!("{}: {e}", path.display()));
+            WindowConfig::default()
+        })
     } else {
         // Create default config file
         let dir = path.parent().unwrap();
@@ -3298,6 +3311,21 @@ mod tests {
         session.last_tool_duration_ms = Some(2000);
         session.last_tool = Some("Bash".to_string());
         assert_eq!(hover_detail_header(&session), "10p/75t/2.0s   tool: Bash");
+    }
+
+    #[test]
+    fn parse_config_reads_a_well_formed_file() {
+        let config = parse_config("theme = \"classic\"\nbackground_opacity = 0.66\n").unwrap();
+        assert_eq!(config.theme, WindowThemeId::Classic);
+        assert_eq!(config.background_opacity, 0.66);
+    }
+
+    #[test]
+    fn parse_config_errors_on_a_syntax_mistake_instead_of_silently_defaulting() {
+        // The typo that prompted this: a stray letter inside a float. `load_config` is
+        // what turns this `Err` into defaults, logging it on the way so "classic" in the
+        // file does not silently show as mission control with no sign anything was wrong.
+        assert!(parse_config("theme = \"classic\"\nbackground_opacity = 0.j66\n").is_err());
     }
 
     #[test]
