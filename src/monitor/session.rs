@@ -141,14 +141,6 @@ pub struct SessionStore {
     pub updated_at: DateTime<Utc>,
 }
 
-/// TUI instance state for menubar integration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TuiState {
-    pub tty: String,
-    pub pid: u32,
-    pub started_at: DateTime<Utc>,
-}
-
 impl Default for SessionStore {
     fn default() -> Self {
         Self {

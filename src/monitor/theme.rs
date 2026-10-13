@@ -403,10 +403,6 @@ pub mod anim {
     pub const CARD_DISAPPEAR: f64 = 0.15;
     /// Delay between each character in typewriter animations.
     pub const TYPEWRITER_DELAY: f64 = 0.02;
-    /// Status-bar blink period.
-    pub const STATUSBAR_BLINK_PERIOD: f64 = 1.0;
-    /// TUI tick interval in milliseconds.
-    pub const TUI_TICK_MS: u64 = 200;
 }
 
 /// Breathing pulse: returns a value in `[0.4, 1.0]` that oscillates

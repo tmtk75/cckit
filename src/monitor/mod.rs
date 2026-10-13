@@ -2,15 +2,12 @@ pub mod display;
 pub mod focus;
 pub mod hook;
 #[cfg(target_os = "macos")]
-pub mod menubar;
-#[cfg(target_os = "macos")]
 pub mod notification;
 pub mod paths;
 pub mod session;
 pub mod setup;
 pub mod storage;
 pub mod theme;
-pub mod tui;
 #[cfg(target_os = "macos")]
 pub mod window;
 #[cfg(target_os = "macos")]

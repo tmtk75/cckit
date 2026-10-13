@@ -1,5 +1,5 @@
 use super::paths;
-use super::session::{SessionStore, TuiState};
+use super::session::SessionStore;
 use chrono::Utc;
 use fs2::FileExt;
 use std::fs::{self, OpenOptions};
@@ -8,7 +8,6 @@ use std::io::Write;
 
 const SESSIONS_FILE: &str = "sessions.json";
 const LOCK_FILE: &str = "sessions.lock";
-const TUI_STATE_FILE: &str = "tui_state.json";
 const AF_CONFIG_FILE: &str = "af_disabled.json";
 const WINDOW_FRAME_FILE: &str = "window_frame.json";
 const PROJECT_COLUMN_FILE: &str = "project_column_width.json";
@@ -208,40 +207,6 @@ impl Storage {
             }
             removed
         })
-    }
-
-    /// Save TUI state (for menubar integration)
-    pub fn save_tui_state(&self, state: &TuiState) -> io::Result<()> {
-        self.ensure_dir()?;
-        let tui_path = self.path.parent().unwrap().join(TUI_STATE_FILE);
-        let content = serde_json::to_string_pretty(state)?;
-        fs::write(&tui_path, content)?;
-        Ok(())
-    }
-
-    /// Load TUI state (returns None if not exists or invalid)
-    pub fn load_tui_state(&self) -> Option<TuiState> {
-        let tui_path = self.path.parent()?.join(TUI_STATE_FILE);
-        let content = fs::read_to_string(&tui_path).ok()?;
-        let state: TuiState = serde_json::from_str(&content).ok()?;
-
-        // Check if TTY still exists (TUI is still running)
-        if Self::tty_exists(&state.tty) {
-            Some(state)
-        } else {
-            // Clean up stale state file
-            let _ = fs::remove_file(&tui_path);
-            None
-        }
-    }
-
-    /// Clear TUI state (called when TUI exits)
-    pub fn clear_tui_state(&self) -> io::Result<()> {
-        let tui_path = self.path.parent().unwrap().join(TUI_STATE_FILE);
-        if tui_path.exists() {
-            fs::remove_file(&tui_path)?;
-        }
-        Ok(())
     }
 
     /// Load AF disabled projects set

@@ -94,50 +94,29 @@ cckit session [COMMAND]
 
 | Command | Description |
 |---------|-------------|
-| `ls` | List active sessions (TUI, default) |
+| `ls` | List active sessions as text |
 | `hook <EVENT>` | Handle hook events (internal use) |
 | `install` | Configure hooks in `~/.claude/settings.json` |
 | `uninstall` | Remove cckit hooks from settings |
 | `status` | Show hook configuration status |
 | `sync` | Remove stale sessions from storage |
 
+`cckit session` with no subcommand opens the macOS window app (same as `cckit app`); on other platforms it prints the text list.
+
 ### session ls
 
-Display active sessions in TUI or text mode.
+Print active sessions as text, one line per session.
 
 ```
-cckit session ls [OPTIONS]
+cckit session ls
 ```
 
-| Option | Description |
-|--------|-------------|
-| `-t, --text` | Show as text instead of TUI |
-| `-i, --interval <SECS>` | Refresh interval in seconds (default: 5) |
-
-### TUI Interface
-
-Interactive terminal UI showing active Claude Code sessions.
-
-#### Display Columns
-
-| Column | Description |
-|--------|-------------|
-| Status | `● run` (running), `○ wait` (waiting input), `× done` (stopped) |
-| Path | Working directory (shortened with `~`) |
-| Tool | Last used tool and its input summary |
-| PID | Claude Code process ID |
-| Created | Session creation time (relative) |
-| Updated | Last activity time (relative) |
-
-#### Key Bindings
-
-| Key | Action |
-|-----|--------|
-| `↑/↓` or `j/k` | Select session |
-| `Enter` or `f` | Focus terminal (macOS only) |
-| `r` | Refresh |
-| `1-9` | Select by index |
-| `q`, `Esc`, or `Ctrl+C` | Quit |
+| Marker | Meaning |
+|--------|---------|
+| `●` | Running |
+| `◐` | Awaiting approval |
+| `○` | Waiting for input |
+| `×` | Stopped |
 
 ### Hook Events
 
@@ -205,7 +184,7 @@ Data is stored in the XDG data directory:
 
 ## Terminal Focus (macOS)
 
-The session TUI can focus the terminal window of a selected session. Supported terminals:
+The session window app can focus the terminal window of a selected session. Supported terminals:
 
 - iTerm2
 - Terminal.app

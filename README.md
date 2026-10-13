@@ -11,7 +11,7 @@ Claude Code Kit - A toolkit for managing Claude Code and OpenAI Codex environmen
 
 cckit helps you manage and monitor your AI coding tool sessions:
 
-- **Session Monitoring** (`session`) - Track active Claude Code, Codex, Antigravity and Grok sessions in real-time with an interactive TUI
+- **Session Monitoring** (`session`) - Track active Claude Code, Codex, Antigravity and Grok sessions in real-time in a macOS window app
 - **Session Search** (`session search`) - Search past Claude Code sessions by message text with an interactive TUI browser
 - **Session Bookmarks** (`session bookmark`) - Bookmark sessions with a name and tags so you can find them again later
 - **Multi-tool Support** - Works with Claude Code, OpenAI Codex, Antigravity (`agy`) and Grok via hooks
@@ -36,7 +36,7 @@ cargo install --path .
 ## Commands
 
 ```bash
-cckit session      # Manage Claude Code sessions (TUI)
+cckit session      # Manage Claude Code sessions (opens the window app)
 cckit ls           # List Claude Code projects
 cckit skill        # Manage skills across projects (ls, copy, promote, validate, how-to-remove)
 cckit mcp          # Manage MCP servers across projects (ls, copy, how-to-remove)
@@ -103,38 +103,21 @@ cckit session install --agy
 ### Usage
 
 ```bash
-# Show active sessions in TUI (default)
+# Open the session window app (macOS, same as `cckit app`)
 cckit session
 
-# Show as text instead of TUI
-cckit session ls --text
-
-# Set refresh interval (default: 5 seconds)
-cckit session ls --interval 3
+# Print active sessions as text
+cckit session ls
 ```
 
-### TUI
+Status markers in the text list:
 
-<img src="assets/tui.gif" width="77%">
+- `●` - Running (processing)
+- `◐` - Awaiting approval
+- `○` - Waiting for user input
+- `×` - Session ended
 
-- `● run` - Running (processing)
-- `○ wait` - Waiting for user input
-- `? pending` - Awaiting approval
-- `× done` - Session ended
-
-### Menubar Mode (macOS)
-
-<img src="assets/menubar.png" width="48%">
-
-Monitor sessions from the menubar:
-
-```bash
-# TUI + Menubar
-cckit session ls --menubar
-
-# Menubar only (no TUI)
-cckit session ls --menubar --no-tui
-```
+See [Mac App](#mac-app-macos) for the window.
 
 ### Hook Management
 
@@ -727,11 +710,11 @@ skill_stale_exclude = [
 
 <img src="assets/app.png" width="77%">
 
-CCKit can run as a standalone macOS app with a session window and menubar icon.
+CCKit can run as a standalone macOS app with a session window.
 
 ### Why?
 
-Keeping a TUI open in the terminal takes up screen space. The Mac App shows a dedicated window and menubar icon—just click to check session status when needed.
+Keeping a monitor open in the terminal takes up screen space. The Mac App shows a dedicated window: just glance at it to check session status when needed.
 
 Set it to launch at login and always stay aware of your Claude Code activity.
 
@@ -747,16 +730,10 @@ mise run build-app  # or: ./scripts/macos/build_app.sh
 Double-click `CCKit.app` or run from terminal:
 
 ```bash
-# Run as app (window + menubar)
+# Run as app
 cckit app
 
-# Run with menubar only
-cckit app --menubar-only
-
-# Run with window only
-cckit app --window-only
-
-# From app bundle (auto-detects .app context, launches window + menubar)
+# From app bundle (auto-detects .app context)
 open dist/CCKit.app
 ```
 
@@ -782,7 +759,7 @@ open dist/CCKit.app
 
 1. Uses Claude Code / Codex / Antigravity hooks to track session lifecycle events
 2. Stores session data in `~/Library/Application Support/cckit/sessions.json` (macOS)
-3. TUI/window app displays active sessions with status, working directory, and last tool info
+3. The window app displays active sessions with status, working directory, and last tool info
 4. Detects subagent sessions (Claude Code teams/agents) and shows agent names
 5. Auto-removes stale sessions when the underlying process exits
 

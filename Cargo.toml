@@ -49,8 +49,7 @@ core-foundation = "0.10"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSThread", "NSRunLoop", "NSDate", "NSTimer", "NSDictionary", "NSObject", "block2"] }
 objc2-app-kit = { version = "0.3", features = [
-    "NSApplication", "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusBarButton", "NSStatusItem",
-    "NSRunningApplication", "NSImage", "NSButton", "NSControl", "NSView", "NSResponder",
+    "NSApplication", "NSMenu", "NSMenuItem", "NSImage", "NSView", "NSResponder",
     # For custom notification window
     "NSWindow", "NSPanel", "NSScreen", "NSTextField", "NSColor", "NSFont",
     "NSVisualEffectView", "NSAnimationContext", "NSGraphics", "NSLayoutConstraint",

@@ -152,24 +152,8 @@ enum Commands {
         execute: bool,
     },
 
-    /// Run as macOS app with window and/or menubar (macOS only)
-    App {
-        /// Show only menubar (no window)
-        #[arg(long, help = "Show only menubar")]
-        menubar_only: bool,
-
-        /// Show only window (no menubar)
-        #[arg(long, help = "Show only window")]
-        window_only: bool,
-
-        /// Menubar display style: emoji, terminal, htop, compact
-        #[arg(
-            long,
-            default_value = "terminal",
-            help = "Menubar style (emoji|terminal|htop|compact)"
-        )]
-        style: String,
-    },
+    /// Run the session window app (macOS only)
+    App,
 
     /// Send a macOS notification (macOS only)
     Notify {
@@ -221,33 +205,9 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum SessionCommands {
-    /// List active sessions (TUI, default)
+    /// List active sessions as text
     #[command(visible_alias = "l")]
-    Ls {
-        #[arg(short, long, help = "Show as text instead of TUI")]
-        text: bool,
-
-        #[arg(short, long, help = "Show menubar icon (macOS only)")]
-        menubar: bool,
-
-        #[arg(long, help = "Menubar only, no TUI (macOS only)")]
-        no_tui: bool,
-
-        #[arg(long, default_value = "24", help = "Icon size in menubar (px)")]
-        icon_size: u32,
-
-        #[arg(long, default_value = "2000", help = "Session check interval in ms")]
-        check_interval: u64,
-
-        #[arg(long, default_value = "500", help = "Menubar poll interval in ms")]
-        poll_interval: u64,
-
-        #[arg(long, default_value = "2000", help = "Menu update interval in ms")]
-        menu_update_interval: u64,
-
-        #[arg(long, default_value = "500", help = "Event poll timeout in ms")]
-        event_timeout: u64,
-    },
+    Ls,
 
     /// Search past Claude Code sessions by user-message text (AND terms).
     /// Required unless --interactive is used (in which case it seeds the TUI query).
@@ -6401,6 +6361,18 @@ fn warn_if_hooks_missing() -> bool {
     true
 }
 
+/// Run the macOS session window app (`cckit app`, and `cckit session` with no subcommand).
+#[cfg(target_os = "macos")]
+fn run_window_app() {
+    if warn_if_hooks_missing() {
+        std::process::exit(1);
+    }
+    if let Err(e) = monitor::window::run_app() {
+        eprintln!("{}: {}", "Error running app".red(), e);
+        std::process::exit(1);
+    }
+}
+
 fn tidy_up_command(skills_only: bool, mcp_only: bool, budget_only: bool) {
     let home = dirs::home_dir().expect("Could not find home directory");
     let global_claude = home.join(".claude");
@@ -7592,69 +7564,8 @@ pub fn run() {
         }
         Some(Commands::Session { command }) => {
             match command {
-                Some(SessionCommands::Ls {
-                    text,
-                    menubar,
-                    no_tui,
-                    icon_size,
-                    check_interval,
-                    poll_interval,
-                    menu_update_interval,
-                    event_timeout,
-                }) => {
-                    if text {
-                        monitor::print_sessions_list();
-                    } else if warn_if_hooks_missing() {
-                        std::process::exit(1);
-                    } else if no_tui {
-                        #[cfg(target_os = "macos")]
-                        {
-                            monitor::menubar::set_icon_size(icon_size as f64);
-                            monitor::menubar::set_update_interval(menu_update_interval);
-                            if let Err(e) =
-                                monitor::menubar::run_menubar_with_polling(poll_interval)
-                            {
-                                eprintln!("{}: {}", "Error running menubar".red(), e);
-                                std::process::exit(1);
-                            }
-                        }
-                        #[cfg(not(target_os = "macos"))]
-                        {
-                            eprintln!("{}", "Menubar is only supported on macOS".red());
-                            std::process::exit(1);
-                        }
-                    } else {
-                        #[cfg(target_os = "macos")]
-                        if menubar {
-                            monitor::menubar::set_icon_size(icon_size as f64);
-                            monitor::menubar::set_update_interval(menu_update_interval);
-                        }
-
-                        #[cfg(not(target_os = "macos"))]
-                        if menubar {
-                            eprintln!(
-                                "{}",
-                                "Warning: --menubar is only supported on macOS, ignoring".yellow()
-                            );
-                        }
-
-                        let tui_config = monitor::tui::TuiConfig {
-                            check_interval_ms: check_interval,
-                            poll_interval_ms: poll_interval,
-                            menu_update_interval_ms: menu_update_interval,
-                            event_timeout_ms: event_timeout,
-                        };
-
-                        let result = if menubar {
-                            monitor::tui::run_tui_with_menubar(tui_config)
-                        } else {
-                            monitor::tui::run_tui(tui_config)
-                        };
-                        if let Err(e) = result {
-                            eprintln!("{}: {}", "Error running TUI".red(), e);
-                            std::process::exit(1);
-                        }
-                    }
+                Some(SessionCommands::Ls) => {
+                    monitor::print_sessions_list();
                 }
                 Some(SessionCommands::Search {
                     terms,
@@ -7815,63 +7726,18 @@ pub fn run() {
                     std::process::exit(1);
                 }
                 None => {
-                    // Default: same as `session ls -m`
-                    if warn_if_hooks_missing() {
-                        std::process::exit(1);
-                    }
+                    // Default: the window app on macOS, the text list elsewhere
                     #[cfg(target_os = "macos")]
-                    {
-                        monitor::menubar::set_icon_size(24.0);
-                        monitor::menubar::set_update_interval(2000);
-                        let result =
-                            monitor::tui::run_tui_with_menubar(monitor::tui::TuiConfig::default());
-                        if let Err(e) = result {
-                            eprintln!("{}: {}", "Error running TUI".red(), e);
-                            std::process::exit(1);
-                        }
-                    }
+                    run_window_app();
                     #[cfg(not(target_os = "macos"))]
-                    {
-                        if let Err(e) = monitor::tui::run_tui(monitor::tui::TuiConfig::default()) {
-                            eprintln!("{}: {}", "Error running TUI".red(), e);
-                            std::process::exit(1);
-                        }
-                    }
+                    monitor::print_sessions_list();
                 }
             }
         }
         #[cfg(target_os = "macos")]
-        Some(Commands::App {
-            menubar_only,
-            window_only,
-            style,
-        }) => {
-            if menubar_only && window_only {
-                eprintln!(
-                    "{}: --menubar-only and --window-only cannot be used together",
-                    "Error".red()
-                );
-                std::process::exit(1);
-            }
-            if warn_if_hooks_missing() {
-                std::process::exit(1);
-            }
-            if let Ok(s) = style.parse::<monitor::menubar::MenubarStyle>() {
-                monitor::menubar::set_style(s);
-            } else {
-                eprintln!(
-                    "{}: unknown style '{}' (use: emoji, terminal, htop, compact)",
-                    "Warning".yellow(),
-                    style
-                );
-            }
-            if let Err(e) = monitor::window::run_app(menubar_only, window_only) {
-                eprintln!("{}: {}", "Error running app".red(), e);
-                std::process::exit(1);
-            }
-        }
+        Some(Commands::App) => run_window_app(),
         #[cfg(not(target_os = "macos"))]
-        Some(Commands::App { .. }) => {
+        Some(Commands::App) => {
             eprintln!("App is only supported on macOS");
             std::process::exit(1);
         }
@@ -8427,7 +8293,7 @@ mod alias_tests {
         };
         assert!(matches!(
             session(&["cckit", "s", "l"]),
-            Some(SessionCommands::Ls { .. })
+            Some(SessionCommands::Ls)
         ));
         assert!(matches!(
             session(&["cckit", "s", "s"]),

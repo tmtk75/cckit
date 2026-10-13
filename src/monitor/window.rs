@@ -2802,7 +2802,6 @@ fn resize_window_to_layout(
 
 // --- Main entry point ---
 
-/// Unified app entry point: shows window + menubar (default), or one of them.
 fn set_app_icon(app: &NSApplication) {
     static ICON_PNG: &[u8] = include_bytes!("../../assets/icon_512.png");
     unsafe {
@@ -2823,7 +2822,8 @@ fn set_app_icon(app: &NSApplication) {
     }
 }
 
-pub fn run_app(menubar_only: bool, window_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+/// App entry point: the session window is the whole app.
+pub fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     // Load persisted AF disabled set
     {
         let storage = Storage::new();
@@ -2835,42 +2835,15 @@ pub fn run_app(menubar_only: bool, window_only: bool) -> Result<(), Box<dyn std:
     let mtm = MainThreadMarker::new().ok_or("Must run on main thread")?;
     let app = NSApplication::sharedApplication(mtm);
 
-    let show_window = !menubar_only;
-    let show_menubar = !window_only;
-
-    if show_window {
-        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    } else {
-        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    }
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
     set_app_icon(&app);
     app.finishLaunching();
 
-    // Menubar (kept alive via _menubar)
-    let _menubar = if show_menubar {
-        let menubar = std::rc::Rc::new(super::menubar::MenubarApp::new(mtm));
-        let menubar_for_timer = menubar.clone();
-        let block = block2::RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
-            menubar_for_timer.update_menu();
-        });
-        let _timer =
-            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &block) };
-        Some((menubar, _timer))
-    } else {
-        None
-    };
-
-    if show_window {
-        setup_window(mtm, &app)?;
-    }
+    setup_window(mtm, &app)?;
 
     app.run();
     Ok(())
-}
-
-pub fn run_window_app() -> Result<(), Box<dyn std::error::Error>> {
-    run_app(false, true)
 }
 
 fn setup_main_menu(mtm: MainThreadMarker, app: &NSApplication) {

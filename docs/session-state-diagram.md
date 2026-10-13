@@ -59,6 +59,6 @@ stateDiagram-v2
 - TTY deduplication: on every hook event, old sessions with the same TTY but different session_id are removed
 - `PreToolUse` records tool name and a summary of tool input (e.g., command for Bash, file_path for Read/Write/Edit)
 - `transcript_path` is captured from hook input on first event that provides it
-- Session stats (`prompt_count`, `tool_count`, `compact_count`) are displayed in window app and menubar
+- Session stats (`prompt_count`, `tool_count`, `compact_count`) are displayed in the window app
 - Tool duration is shown live while tool is running (AwaitingApproval), and as last duration otherwise
 - The `Stopped` status defined in `SessionStatus` enum is currently unused in hook transitions

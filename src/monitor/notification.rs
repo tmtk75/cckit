@@ -1,6 +1,5 @@
 // macOS custom notification window implementation
 
-use super::paths;
 use super::session::SessionStatus;
 use super::theme::{StatusColor, anim, notif_layout};
 use objc2::rc::Retained;
@@ -12,49 +11,9 @@ use objc2_app_kit::{
 use objc2_foundation::{
     MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString, NSTimer,
 };
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
-
-/// Menubar position info saved by menubar app
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MenubarPosition {
-    /// X coordinate of menubar button center (screen coordinates)
-    pub x: f64,
-    /// Y coordinate of menubar button bottom (screen coordinates)
-    pub y: f64,
-    /// Width of the menubar button
-    pub width: f64,
-    /// Timestamp when this was saved
-    pub timestamp: i64,
-}
-
-const MENUBAR_POSITION_FILE: &str = "menubar_position.json";
-
-/// Load menubar position from shared file
-pub fn load_menubar_position() -> Option<MenubarPosition> {
-    let path = paths::data_dir().join(MENUBAR_POSITION_FILE);
-    let content = std::fs::read_to_string(&path).ok()?;
-    let pos: MenubarPosition = serde_json::from_str(&content).ok()?;
-
-    // Check if position is stale (older than 60 seconds)
-    let now = chrono::Utc::now().timestamp();
-    if now - pos.timestamp > 60 {
-        return None;
-    }
-
-    Some(pos)
-}
-
-/// Save menubar position to shared file
-pub fn save_menubar_position(pos: &MenubarPosition) -> std::io::Result<()> {
-    let dir = paths::data_dir();
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(MENUBAR_POSITION_FILE);
-    let content = serde_json::to_string(pos)?;
-    std::fs::write(path, content)
-}
 
 type CGFloat = f64;
 
@@ -585,50 +544,10 @@ fn calculate_position(
     window_height: CGFloat,
     margin: CGFloat,
 ) -> (CGFloat, CGFloat) {
-    fn clamp_to_visible_frame(
-        visible_frame: NSRect,
-        window_width: CGFloat,
-        window_height: CGFloat,
-        margin: CGFloat,
-        x: CGFloat,
-        y: CGFloat,
-    ) -> (CGFloat, CGFloat) {
-        let min_x = visible_frame.origin.x + margin;
-        let max_x = visible_frame.origin.x + visible_frame.size.width - window_width - margin;
-        let min_y = visible_frame.origin.y + margin;
-        let max_y = visible_frame.origin.y + visible_frame.size.height - window_height - margin;
-
-        let clamped_x = if min_x <= max_x {
-            x.clamp(min_x, max_x)
-        } else {
-            min_x
-        };
-        let clamped_y = if min_y <= max_y {
-            y.clamp(min_y, max_y)
-        } else {
-            min_y
-        };
-
-        (clamped_x, clamped_y)
-    }
-
-    // Handle menubar position specially
+    // cckit no longer puts an icon in the menubar, so `menubar` means the
+    // top-right corner where that icon used to sit; kept so `--position mb`
+    // (the default) keeps working.
     if let Position::Menubar = position {
-        if let Some(mb_pos) = load_menubar_position() {
-            // Position below the menubar icon, centered on it
-            let x = mb_pos.x - window_width / 2.0;
-            // mb_pos.y is the bottom of the menubar button (top of visible area)
-            let y = mb_pos.y - window_height - margin;
-            return clamp_to_visible_frame(
-                visible_frame,
-                window_width,
-                window_height,
-                margin,
-                x,
-                y,
-            );
-        }
-        // Fallback to right-top if no menubar position available
         let vis_x = visible_frame.origin.x;
         let vis_y = visible_frame.origin.y;
         let vis_w = visible_frame.size.width;
