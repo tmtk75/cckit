@@ -6,7 +6,6 @@ pub mod progress;
 pub mod recent;
 pub mod search;
 pub mod skill_usage;
-pub mod tui;
 
 use chrono::{DateTime, Utc};
 use std::io;
@@ -15,7 +14,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct SearchOpts {
     pub terms: Vec<String>,
-    pub interactive: bool,
     pub limit: usize,
     pub json: bool,
     /// Report no matches instead of retrying fuzzily when the exact search comes up empty.
@@ -107,7 +105,7 @@ pub fn scan_all_sessions_with_progress() -> Vec<SessionRecord> {
     let progress = progress::ScanProgress::start("scanning transcripts", paths.len());
     let mut sessions = loader::parse_paths(&paths, || progress.tick());
     progress.finish();
-    // Every reader of this list (search, recent, the interactive browser) wants the
+    // Every reader of this list (search, recent) wants the
     // bookmarks, so they are attached here rather than at each call site.
     bookmark::attach_bookmarks(
         &mut sessions,
@@ -145,62 +143,43 @@ pub fn scan_monitor_launches_with_progress() -> (Vec<monitor_usage::MonitorLaunc
 }
 
 pub fn run_search(opts: SearchOpts) -> io::Result<i32> {
-    if opts.interactive && opts.json {
-        eprintln!("error: --json cannot be combined with --interactive");
-        return Ok(2);
-    }
-    if !opts.interactive && opts.terms.is_empty() {
-        eprintln!("error: at least one search term is required (or use --interactive)");
+    if opts.terms.is_empty() {
+        eprintln!("error: at least one search term is required");
         return Ok(2);
     }
 
-    if opts.interactive {
-        // Interactive mode: load all sessions, pass to TUI which filters live.
-        let load_start = std::time::Instant::now();
-        let sessions = scan_all_sessions_with_progress();
-        let load_elapsed = load_start.elapsed();
-        let initial_query = opts.terms.join(" ");
-        match tui::run_tui(sessions, &initial_query, opts.limit, load_elapsed)? {
-            Some(cwd) => {
-                println!("{}", cwd.display());
-                Ok(0)
-            }
-            None => Ok(1),
+    let start = std::time::Instant::now();
+    let sessions = scan_all_sessions_with_progress();
+    let scanned = sessions.len();
+
+    // Exact first. When it finds nothing, retry the same corpus fuzzily rather than
+    // reporting an empty result: typos are the common reason for a miss. The retry
+    // costs nothing extra, the transcripts are already in memory.
+    let mut hits = search::search_sessions(&sessions, &opts.terms, opts.limit);
+    let mut mode = MatchMode::Exact;
+    if hits.is_empty() && !opts.exact {
+        let query = opts.terms.join(" ");
+        let fuzzy = search::fuzzy_search_sessions(&sessions, &query, opts.limit);
+        if !fuzzy.is_empty() {
+            hits = fuzzy;
+            mode = MatchMode::Fuzzy;
         }
+    }
+    let elapsed = start.elapsed();
+
+    if opts.json {
+        // Keep stdout a bare JSON array for consumers; the notice goes to stderr.
+        if mode == MatchMode::Fuzzy {
+            eprintln!("{}", format::fuzzy_fallback_notice(&opts.terms));
+        }
+        println!("{}", format::format_json(&hits));
     } else {
-        let start = std::time::Instant::now();
-        let sessions = scan_all_sessions_with_progress();
-        let scanned = sessions.len();
-
-        // Exact first. When it finds nothing, retry the same corpus fuzzily rather than
-        // reporting an empty result: typos are the common reason for a miss. The retry
-        // costs nothing extra, the transcripts are already in memory.
-        let mut hits = search::search_sessions(&sessions, &opts.terms, opts.limit);
-        let mut mode = MatchMode::Exact;
-        if hits.is_empty() && !opts.exact {
-            let query = opts.terms.join(" ");
-            let fuzzy = search::fuzzy_search_sessions(&sessions, &query, opts.limit);
-            if !fuzzy.is_empty() {
-                hits = fuzzy;
-                mode = MatchMode::Fuzzy;
-            }
-        }
-        let elapsed = start.elapsed();
-
-        if opts.json {
-            // Keep stdout a bare JSON array for consumers; the notice goes to stderr.
-            if mode == MatchMode::Fuzzy {
-                eprintln!("{}", format::fuzzy_fallback_notice(&opts.terms));
-            }
-            println!("{}", format::format_json(&hits));
-        } else {
-            print!(
-                "{}",
-                format::format_oneshot(&hits, scanned, elapsed, mode, &opts.terms)
-            );
-        }
-        Ok(0)
+        print!(
+            "{}",
+            format::format_oneshot(&hits, scanned, elapsed, mode, &opts.terms)
+        );
     }
+    Ok(0)
 }
 
 #[cfg(test)]

@@ -17,8 +17,7 @@ ureq = { version = "3.0", features = ["json"] }
 regex-lite = "0.1"
 serde_yaml = "0.9"
 
-# monitor feature
-ratatui = "0.29"
+# Terminal size and raw-mode prompts
 crossterm = "0.28"
 chrono = { version = "0.4", features = ["serde"] }
 fs2 = "0.4"
@@ -36,7 +35,7 @@ walkdir = "2"
 # Parallel parsing of session transcripts
 rayon = "1"
 
-# Fuzzy matching for interactive session search
+# Fuzzy retry when the exact session search finds nothing
 fuzzy-matcher = "0.3"
 
 # macOS accessibility (for Ghostty tab focus)

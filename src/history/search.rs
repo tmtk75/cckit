@@ -111,56 +111,6 @@ fn collect_hits(
     hits
 }
 
-/// Concatenated text of all user turns in a session plus its bookmark, intended as the
-/// haystack for interactive fuzzy matching. Precompute once per session at load time.
-pub fn searchable_text(session: &SessionRecord) -> String {
-    let mut out = label_text(session).unwrap_or_default();
-    for turn in &session.turns {
-        if turn.role == Role::User {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&turn.text);
-        }
-    }
-    out
-}
-
-/// Fuzzy-filter sessions against a query string. Returns indices into the input
-/// slice, sorted by score descending. `haystacks[i]` is the precomputed
-/// `searchable_text` for `sessions[i]`.
-///
-/// When `query` is empty, returns all indices sorted by `ended_at` descending.
-pub fn fuzzy_filter(
-    sessions: &[SessionRecord],
-    haystacks: &[String],
-    query: &str,
-    limit: usize,
-) -> Vec<usize> {
-    debug_assert_eq!(sessions.len(), haystacks.len());
-
-    if query.is_empty() {
-        let mut idxs: Vec<usize> = (0..sessions.len()).collect();
-        idxs.sort_by(|a, b| sessions[*b].ended_at.cmp(&sessions[*a].ended_at));
-        idxs.truncate(limit);
-        return idxs;
-    }
-
-    // Use the fuzzy score only to decide whether a session matches. Matching
-    // sessions are then returned in `ended_at` descending order so the list
-    // is always chronologically consistent, regardless of how well any
-    // individual turn happened to fuzzy-score.
-    let matcher = SkimMatcherV2::default().ignore_case();
-    let mut matched: Vec<usize> = haystacks
-        .iter()
-        .enumerate()
-        .filter_map(|(i, hs)| matcher.fuzzy_match(hs, query).map(|_| i))
-        .collect();
-    matched.sort_by(|a, b| sessions[*b].ended_at.cmp(&sessions[*a].ended_at));
-    matched.truncate(limit);
-    matched
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,93 +217,6 @@ mod tests {
     }
 
     #[test]
-    fn searchable_text_joins_only_user_turns() {
-        let ts = chrono::Utc.with_ymd_and_hms(2026, 3, 12, 0, 0, 0).unwrap();
-        let rec = SessionRecord {
-            session_id: "s".into(),
-            cwd: "/tmp".into(),
-            git_branch: None,
-            file_path: "/tmp/s.jsonl".into(),
-            started_at: ts,
-            ended_at: ts,
-            bookmark: None,
-            turns: vec![
-                Turn {
-                    role: Role::User,
-                    timestamp: ts,
-                    text: "first user".into(),
-                },
-                Turn {
-                    role: Role::Assistant,
-                    timestamp: ts,
-                    text: "IGNORED".into(),
-                },
-                Turn {
-                    role: Role::User,
-                    timestamp: ts,
-                    text: "second user".into(),
-                },
-            ],
-        };
-        let text = searchable_text(&rec);
-        assert!(text.contains("first user"));
-        assert!(text.contains("second user"));
-        assert!(!text.contains("IGNORED"));
-    }
-
-    #[test]
-    fn fuzzy_filter_empty_query_sorts_by_ended_at_desc() {
-        let a = sample("old", (2024, 1, 1), &["foo"]);
-        let b = sample("new", (2026, 6, 1), &["bar"]);
-        let sessions = vec![a, b];
-        let haystacks: Vec<String> = sessions.iter().map(searchable_text).collect();
-        let idxs = fuzzy_filter(&sessions, &haystacks, "", 10);
-        let ids: Vec<&str> = idxs
-            .iter()
-            .map(|i| sessions[*i].session_id.as_str())
-            .collect();
-        assert_eq!(ids, vec!["new", "old"]);
-    }
-
-    #[test]
-    fn fuzzy_filter_matches_non_contiguous_characters() {
-        let a = sample("hit", (2026, 3, 12), &["osrm jni testing"]);
-        let b = sample("miss", (2026, 3, 12), &["totally unrelated"]);
-        let sessions = vec![a, b];
-        let haystacks: Vec<String> = sessions.iter().map(searchable_text).collect();
-        let idxs = fuzzy_filter(&sessions, &haystacks, "osrmjni", 10);
-        assert_eq!(idxs.len(), 1);
-        assert_eq!(sessions[idxs[0]].session_id, "hit");
-    }
-
-    #[test]
-    fn fuzzy_filter_is_case_insensitive() {
-        let a = sample("a", (2026, 3, 12), &["OSRM compile"]);
-        let sessions = vec![a];
-        let haystacks: Vec<String> = sessions.iter().map(searchable_text).collect();
-        let idxs = fuzzy_filter(&sessions, &haystacks, "osrm", 10);
-        assert_eq!(idxs.len(), 1);
-    }
-
-    #[test]
-    fn fuzzy_filter_matched_results_sort_by_ended_at_desc() {
-        // Build three sessions where the best fuzzy match is on the oldest
-        // one; the result order should still be newest-first.
-        let old = sample("old", (2024, 1, 1), &["osrm perfect match"]);
-        let mid = sample("mid", (2025, 6, 1), &["orsm typo something"]);
-        let new = sample("new", (2026, 3, 12), &["something with osrm inside"]);
-        let sessions = vec![old, mid, new];
-        let haystacks: Vec<String> = sessions.iter().map(searchable_text).collect();
-        let idxs = fuzzy_filter(&sessions, &haystacks, "osrm", 10);
-        let ids: Vec<&str> = idxs
-            .iter()
-            .map(|i| sessions[*i].session_id.as_str())
-            .collect();
-        assert!(ids.first() == Some(&"new"));
-        assert!(ids.last() == Some(&"old"));
-    }
-
-    #[test]
     fn assistant_turns_are_not_searched() {
         let ts = chrono::Utc.with_ymd_and_hms(2026, 3, 12, 0, 0, 0).unwrap();
         let rec = SessionRecord {
@@ -450,13 +313,5 @@ mod label_tests {
         let hits = fuzzy_search_sessions(&sessions, "authrefac", 10);
         assert_eq!(hits.len(), 1);
         assert!(hits[0].bookmark_matched);
-    }
-
-    #[test]
-    fn searchable_text_carries_the_label_so_the_interactive_filter_finds_it() {
-        let session = bookmarked("a", "unrelated chatter", "auth refactor", &["infra"]);
-        let text = searchable_text(&session);
-        assert!(text.contains("auth refactor"), "got: {text}");
-        assert!(text.contains("infra"), "got: {text}");
     }
 }

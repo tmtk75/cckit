@@ -12,7 +12,7 @@ Claude Code Kit - A toolkit for managing Claude Code and OpenAI Codex environmen
 cckit helps you manage and monitor your AI coding tool sessions:
 
 - **Session Monitoring** (`session`) - Track active Claude Code, Codex, Antigravity and Grok sessions in real-time in a macOS window app
-- **Session Search** (`session search`) - Search past Claude Code sessions by message text with an interactive TUI browser
+- **Session Search** (`session search`) - Search past Claude Code sessions by message text
 - **Session Bookmarks** (`session bookmark`) - Bookmark sessions with a name and tags so you can find them again later
 - **Multi-tool Support** - Works with Claude Code, OpenAI Codex, Antigravity (`agy`) and Grok via hooks
 - **Project Inspection** (`ls`) - View all Claude Code projects with their skills, agents, commands, plugins, and MCP servers at a glance
@@ -197,9 +197,6 @@ Search past Claude Code sessions by message text:
 ```bash
 # Search by keywords (AND match)
 cckit session search terraform plan
-
-# Interactive fuzzy search TUI
-cckit session search -i
 
 # JSON output
 cckit session search --json deploy
@@ -775,8 +772,7 @@ open dist/CCKit.app
 
 1. Scans all Claude Code transcript JSONL files under `~/.claude/projects/`
 2. Parses user/assistant turns with timestamps
-3. Matches search terms (AND logic) against session text
-4. In interactive mode, provides a fuzzy-search ratatui TUI for browsing results
+3. Matches search terms (AND logic) against session text, retrying fuzzily when nothing matches
 
 ### skill/mcp/agent commands
 

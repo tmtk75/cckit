@@ -210,22 +210,17 @@ enum SessionCommands {
     Ls,
 
     /// Search past Claude Code sessions by user-message text (AND terms).
-    /// Required unless --interactive is used (in which case it seeds the TUI query).
     #[command(visible_alias = "s")]
     Search {
-        /// Search terms (AND-matched in non-interactive mode; joined as fuzzy query in -i)
-        #[arg(num_args = 0..)]
+        /// Search terms (AND-matched; retried as one fuzzy query when nothing matches)
+        #[arg(num_args = 1..)]
         terms: Vec<String>,
-
-        /// Launch an interactive ratatui browser instead of plain text output
-        #[arg(short, long)]
-        interactive: bool,
 
         /// Maximum number of results to display
         #[arg(long, default_value = "20")]
         limit: usize,
 
-        /// Emit results as JSON (cannot be combined with --interactive)
+        /// Emit results as JSON
         #[arg(long)]
         json: bool,
 
@@ -7569,14 +7564,12 @@ pub fn run() {
                 }
                 Some(SessionCommands::Search {
                     terms,
-                    interactive,
                     limit,
                     json,
                     exact,
                 }) => {
                     let opts = crate::history::SearchOpts {
                         terms,
-                        interactive,
                         limit,
                         json,
                         exact,

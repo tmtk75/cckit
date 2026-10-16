@@ -38,10 +38,11 @@ mise run build-app              # runs scripts/macos/build_app.sh
 - CLI mode: all subcommands (`cckit session ls` prints the text list)
 - App mode: `cckit app` (or `cckit session` with no subcommand) runs the macOS session window; also auto-detected when launched from a .app bundle
 
-There is no terminal TUI and no menubar icon for live sessions, by design: the window is the
-only live monitor. Do not reintroduce either (`session ls --menubar`, `app --menubar-only` and
-the ratatui session TUI were removed on purpose). The `history` module still has its own
-ratatui browser for `session search -i`; that is a different thing.
+There is no terminal TUI anywhere and no menubar icon, by design: the window is the only
+live monitor, and `session search` is plain text (or `--json`). Do not reintroduce any of
+them (`session ls --menubar`, `app --menubar-only`, the ratatui session monitor and the
+ratatui `session search -i` browser were all removed on purpose, and `ratatui` is no longer
+a dependency).
 
 **CLI layer** (`src/cli.rs`, ~7900 lines): All subcommand definitions (clap derive), project scanning logic (`ls`, `prune`, `config`, `doctor`, `status`, `tidy-up`, `permissions`), YAML frontmatter parsing for skills/agents/commands, and dedicated `skill`/`mcp`/`agent` management subcommands (`ls`, `copy`, `promote`, `prune`, `remove`, `stale`, `how-to-remove`, `validate`). `mcp prune` removes stale MCP residue (orphaned `enabledMcpjsonServers`/`disabledMcpjsonServers` approvals and empty `.mcp.json` files); `mcp remove` deletes matching MCP server definitions across project/user/global scopes (plugin entries are reported, not removed); both are dry-run by default with `--execute` to apply and `.bak` backups. `skill remove` moves matching directory skills to a reversible trash (`<data_dir>/trash/`; marketplace/plugin untouched). `skill stale` mines Skill tool invocations from `~/.claude/projects/**/*.jsonl` to flag skills not fired in `--days N` (default 90), with an origin label (`self` / `external:marketplace` / `external:installed`).
 
@@ -67,7 +68,6 @@ that collides fails the suite rather than a user's first invocation.
 | `format.rs` | Plain text and JSON output formatting |
 | `progress.rs` | Determinate scan progress on stderr, drawn only on a TTY and only after a 250ms delay |
 | `recent.rs` | `session recent`: age filter, project/branch grouping, one-line-per-session text and flat JSON output |
-| `tui.rs` | Interactive ratatui browser for search results |
 | `skill_usage.rs` | Aggregate Skill tool invocations from transcripts (last-fired/count) for `skill stale` |
 | `monitor_usage.rs` | `monitor ls`: mine Monitor tool launches from transcripts, group by project and description, cross-check the process table for `--alive`, text and flat JSON output |
 
@@ -93,16 +93,14 @@ id, kept in `<data_dir>/bookmarks.json` rather than on the `Session` records in
 **Writing is CLI-only, by design.** A first version opened a picker over every transcript
 and it was unusable: this corpus is thousands of files, and a list of them all is not
 something a person reads. The workflow is `session search` to find the session, then
-`bookmark set <ID>` with a leading fragment of the id. Do not reintroduce a picker, and do
-not put bookmark editing inside the search TUI either: the point is that writing a
-bookmark costs one command, not a session in an interactive app.
+`bookmark set <ID>` with a leading fragment of the id. Do not reintroduce a picker: the
+point is that writing a bookmark costs one command, not a session in an interactive app.
 
 `attach_bookmarks` is applied inside `scan_all_sessions_with_progress`, so every reader
-(`search`, `recent`, the interactive browser) sees bookmarks without its own call.
+(`search`, `recent`) sees bookmarks without its own call.
 `recent` prints the bookmark at the head of the phrase column (`★name #tag`, magenta) so
 no column is added; `search` matches name and tags as well as turn text and reports a
-bookmark-only hit as `matches: bookmark`. The bookmark is also folded into
-`searchable_text`, which is what the interactive fuzzy filter reads. `--current` finds the
+bookmark-only hit as `matches: bookmark`. `--current` finds the
 session by terminal: `current_tty` walks up to five levels of the process tree because a
 command run from a tool call sits in a shell with no controlling terminal, and a `tty` of
 `unknown` matches nothing (Codex Desktop sessions record `unknown` too, so matching on it
