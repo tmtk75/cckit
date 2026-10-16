@@ -305,11 +305,17 @@ than bookmarks, since one bookmark with two tags is two rows.
 ```
 $ cckit session bookmark ls --group-by tag
 #jch
-  2026-09-25 17:12  jch-338. TLS version #jch #tls  066f035c-…  ~/src/team-server-jp/…
+  2026-09-25 17:12    3d ago  jch-338. TLS version #jch #tls  066f035c-…  ~/src/team-server-jp/…
 
 #tls
-  2026-09-25 17:12  jch-338. TLS version #jch #tls  066f035c-…  ~/src/team-server-jp/…
+  2026-09-25 17:12    3d ago  jch-338. TLS version #jch #tls  066f035c-…  ~/src/team-server-jp/…
 ```
+
+The first column is when the bookmark was last edited; the second is how long ago the
+session itself was last talked to, read from the last turn in its transcript (`-` when
+no transcript is found, as for a Codex thread). `--json` carries it as `last_active_at`.
+On a color terminal the age is shaded by recency so the live ones jump out: under 2h
+bright green, under 8h green, under 24h yellow, under 3d plain, under 7d dim, older grey.
 
 Under `--group-by path` the row stops at the session id, because the heading already
 names the directory. `--json` stays flat whatever the grouping, so `jq` consumers do not
@@ -324,8 +330,9 @@ renamed 7568e813-… from "auth refactor #auth" to "BCPの改善"
 ```
 
 Bookmarks are stored in `bookmarks.json` beside `sessions.json`, so they outlive the
-session they name. `bookmark ls` reads only that file, so it answers instantly even with
-thousands of transcripts on disk.
+session they name. `bookmark ls` reads only that file plus the tail of each bookmarked
+session's transcript for the age column, so it answers instantly even with thousands of
+transcripts on disk.
 
 Bookmarked sessions are marked with `★` in `session recent`, and `session search` matches
 names and tags as well as message text:

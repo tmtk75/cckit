@@ -105,7 +105,17 @@ session by terminal: `current_tty` walks up to five levels of the process tree b
 command run from a tool call sits in a shell with no controlling terminal, and a `tty` of
 `unknown` matches nothing (Codex Desktop sessions record `unknown` too, so matching on it
 would bookmark an unrelated session). `bookmark ls` and `bookmark id` read only `bookmarks.json`, which is why `cwd` and
-`session_started_at` are copied into each bookmark when it is written. `lookup` casts
+`session_started_at` are copied into each bookmark when it is written. The one thing `ls`
+adds on top is the age column (`3h ago`, when the session was last talked to): `Activity`
+walks `~/.claude/projects` for the listed ids' transcripts and reads each one's last turn
+timestamp from the file's tail (`loader::last_turn_at`, 64 KiB chunks backwards, in
+parallel), so the cost scales with the bookmarks, not the corpus. Do not use the mtime
+instead: Claude Code rewrites trailer lines (`pr-link`, `worktree-state`, `atis-latch`)
+long after the last turn, so a day-old session carries this morning's mtime. A session
+with no transcript there (a Codex thread, a pruned file) shows `-`; `--json` carries it as
+`last_active_at`. Under color the label is shaded by `AgeBand` (2h / 8h / 24h / 3d / 7d:
+bright green, green, yellow, plain, dim, grey) so the live sessions stand out; an unknown
+age is grey like the oldest, never plain, since plain would read as "a couple of days". `lookup` casts
 three nets in order (name substring, tag, id prefix) and the first that catches anything
 decides; name beats tag because a tag is the broader net and would turn a unique answer
 ambiguous. Several matches are never narrowed to one: `bookmark id` is built for `$(...)`,

@@ -78,43 +78,9 @@ pub fn parse_session_file(path: &Path) -> Option<SessionRecord> {
             }
         }
 
-        let Some(ty) = raw.r#type.as_deref() else {
-            continue;
-        };
-        let role = match ty {
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
-            _ => continue,
-        };
-
-        let Some(ts_str) = raw.timestamp.as_deref() else {
-            continue;
-        };
-        let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) else {
-            continue;
-        };
-        let ts: DateTime<Utc> = ts.with_timezone(&Utc);
-
-        let Some(msg) = raw.message.as_ref() else {
-            continue;
-        };
-        let Some(content) = msg.content.as_ref() else {
-            continue;
-        };
-
-        let mut text = extract_text(role, content);
-        if role == Role::User {
-            text = strip_claude_code_noise(&text);
+        if let Some(turn) = turn_of(&raw) {
+            turns.push(turn);
         }
-        if text.trim().is_empty() {
-            continue;
-        }
-
-        turns.push(Turn {
-            role,
-            timestamp: ts,
-            text,
-        });
     }
 
     let session_id = session_id?;
@@ -135,6 +101,90 @@ pub fn parse_session_file(path: &Path) -> Option<SessionRecord> {
         turns,
         bookmark: None,
     })
+}
+
+/// The conversation turn a transcript line records, if it records one: a `user` or
+/// `assistant` line with a timestamp and some text once Claude Code's own noise is
+/// stripped. Shared by the full parse and the tail read so "last turn" means the same
+/// thing in `session recent` and `bookmark ls`.
+fn turn_of(raw: &RawLine) -> Option<Turn> {
+    let role = match raw.r#type.as_deref()? {
+        "user" => Role::User,
+        "assistant" => Role::Assistant,
+        _ => return None,
+    };
+    let ts = DateTime::parse_from_rfc3339(raw.timestamp.as_deref()?).ok()?;
+    let content = raw.message.as_ref()?.content.as_ref()?;
+    let mut text = extract_text(role, content);
+    if role == Role::User {
+        text = strip_claude_code_noise(&text);
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(Turn {
+        role,
+        timestamp: ts.with_timezone(&Utc),
+        text,
+    })
+}
+
+/// When the last conversation turn in a transcript happened, found by reading the file
+/// backwards from its end rather than parsing it front to back.
+///
+/// The file's mtime will not do: Claude Code rewrites trailer lines (`pr-link`,
+/// `worktree-state`, `atis-latch`) long after the last turn, so a session nobody has
+/// talked to for a day can carry this morning's mtime. The turn timestamps are the
+/// only honest signal, and the last one sits a few lines from the end, so this reads
+/// 64 KiB chunks from the tail and stops at the first turn it completes. A line longer
+/// than a chunk (a tool result pasted into a user turn) is carried across reads until
+/// its start is found.
+pub fn last_turn_at(path: &Path) -> Option<DateTime<Utc>> {
+    use std::io::{Read, Seek, SeekFrom};
+    const CHUNK: u64 = 64 * 1024;
+
+    let mut file = File::open(path).ok()?;
+    let mut end = file.metadata().ok()?.len();
+    // The unfinished first line of the previous read, waiting for its beginning.
+    let mut carry: Vec<u8> = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let mut buf = vec![0u8; (end - start) as usize];
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut buf).ok()?;
+        buf.extend_from_slice(&carry);
+        // Everything after the first newline is whole lines; before it is the tail of a
+        // line whose start is still unread, unless this read reached the file's start.
+        let complete_from = if start == 0 {
+            0
+        } else {
+            match buf.iter().position(|&b| b == b'\n') {
+                Some(i) => i + 1,
+                None => {
+                    carry = buf;
+                    end = start;
+                    continue;
+                }
+            }
+        };
+        for line in buf[complete_from..].rsplit(|&b| b == b'\n') {
+            let Ok(line) = std::str::from_utf8(line) else {
+                continue;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some(turn) = serde_json::from_str::<RawLine>(line)
+                .ok()
+                .and_then(|raw| turn_of(&raw))
+            {
+                return Some(turn.timestamp);
+            }
+        }
+        carry = buf[..complete_from.saturating_sub(1)].to_vec();
+        end = start;
+    }
+    None
 }
 
 /// Remove Claude Code system-inserted blocks that appear in user-role messages when
@@ -264,6 +314,71 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/history")
             .join(name)
+    }
+
+    #[test]
+    fn last_turn_at_agrees_with_the_full_parse() {
+        let path = fixture("user_string.jsonl");
+        let rec = parse_session_file(&path).unwrap();
+        assert_eq!(last_turn_at(&path), Some(rec.ended_at));
+    }
+
+    #[test]
+    fn last_turn_at_ignores_trailer_lines_written_after_the_last_turn() {
+        // What a real transcript ends with: the last turn, then bookkeeping lines Claude
+        // Code rewrites later. Their timestamps (or mtime) must not pass for activity.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","cwd":"/p","sessionId":"s","timestamp":"2026-03-12T06:12:48.000Z","message":{"role":"user","content":"hi"}}"#,
+                "\n",
+                r#"{"type":"assistant","cwd":"/p","sessionId":"s","timestamp":"2026-03-12T06:13:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
+                "\n",
+                r#"{"type":"last-prompt","sessionId":"s"}"#,
+                "\n",
+                r#"{"type":"pr-link","sessionId":"s","prNumber":1,"timestamp":"2026-03-13T09:00:00.000Z"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let at = last_turn_at(&path).unwrap();
+        assert_eq!(at.to_rfc3339(), "2026-03-12T06:13:00+00:00");
+    }
+
+    #[test]
+    fn last_turn_at_handles_a_line_longer_than_one_read() {
+        // A tool result pasted into the last user turn can run past 64 KiB, so the line
+        // starts in an earlier chunk than it ends in.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let big = "x".repeat(200 * 1024);
+        std::fs::write(
+            &path,
+            format!(
+                concat!(
+                    r#"{{"type":"user","cwd":"/p","sessionId":"s","timestamp":"2026-03-12T06:12:48.000Z","message":{{"role":"user","content":"first"}}}}"#,
+                    "\n",
+                    r#"{{"type":"user","cwd":"/p","sessionId":"s","timestamp":"2026-03-12T07:00:00.000Z","message":{{"role":"user","content":"{}"}}}}"#,
+                    "\n",
+                    r#"{{"type":"pr-link","sessionId":"s"}}"#,
+                    "\n",
+                ),
+                big
+            ),
+        )
+        .unwrap();
+        let at = last_turn_at(&path).unwrap();
+        assert_eq!(at.to_rfc3339(), "2026-03-12T07:00:00+00:00");
+    }
+
+    #[test]
+    fn last_turn_at_is_none_for_a_transcript_with_no_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "{\"type\":\"summary\"}\n").unwrap();
+        assert_eq!(last_turn_at(&path), None);
     }
 
     #[test]

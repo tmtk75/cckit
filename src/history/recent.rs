@@ -191,7 +191,8 @@ fn plural(n: usize) -> &'static str {
 }
 
 /// Coarse "how long ago" label. Takes `now` as an argument so it stays testable.
-fn relative_since(now: DateTime<Utc>, dt: DateTime<Utc>) -> String {
+/// Shared with `bookmark ls`, whose age column should read like this listing's.
+pub(crate) fn relative_since(now: DateTime<Utc>, dt: DateTime<Utc>) -> String {
     let d = now.signed_duration_since(dt);
     if d.num_minutes() < 1 {
         "just now".into()

@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Offset, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -637,10 +637,12 @@ pub fn run_ls(
         entries.retain(|(_, bookmark)| !bookmark.hidden);
     }
 
+    let ids: Vec<&str> = entries.iter().map(|(id, _)| *id).collect();
+    let activity = Activity::from_transcripts(Utc::now(), &ids);
     if json {
         // The JSON stays flat whatever the grouping: a `jq` consumer can bucket it however
         // it likes, and a shape that changes with a display flag is harder to depend on.
-        println!("{}", format_list_json(&entries));
+        println!("{}", format_list_json(&entries, &activity));
         return Ok(0);
     }
 
@@ -662,13 +664,22 @@ pub fn run_ls(
     match group_by {
         Some(GroupBy::Path) => print!(
             "{}",
-            format_groups(&group_by_path(&entries), &tz, color, store.path())
+            format_groups(
+                &group_by_path(&entries),
+                &activity,
+                &tz,
+                color,
+                store.path()
+            )
         ),
         Some(GroupBy::Tag) => print!(
             "{}",
-            format_groups(&group_by_tag(&entries), &tz, color, store.path())
+            format_groups(&group_by_tag(&entries), &activity, &tz, color, store.path())
         ),
-        None => print!("{}", format_list(&entries, &tz, color, store.path())),
+        None => print!(
+            "{}",
+            format_list(&entries, &activity, &tz, color, store.path())
+        ),
     }
     if !all && hidden > 0 {
         print!("{}", hidden_note(hidden));
@@ -765,6 +776,120 @@ fn transcript_paths() -> Vec<PathBuf> {
     crate::history::loader::collect_session_paths(&home.join(".claude/projects"))
 }
 
+/// When each session was last talked to, keyed by session id, plus the clock to measure
+/// that against.
+///
+/// The source is the timestamp of the transcript's last conversation turn, read from the
+/// tail of the file. Not the mtime: Claude Code rewrites trailer lines (`pr-link`,
+/// `worktree-state`) long after the last turn, so mtime says "touched", not "talked to".
+/// A session with no transcript under `~/.claude/projects` (a Codex thread, or one whose
+/// file was pruned) has no entry and is shown as `-`.
+pub struct Activity {
+    pub last_seen: HashMap<String, DateTime<Utc>>,
+    pub now: DateTime<Utc>,
+}
+
+impl Activity {
+    /// Knows nothing: every label is `-`. For tests and for callers that have no corpus.
+    pub fn none(now: DateTime<Utc>) -> Self {
+        Self {
+            last_seen: HashMap::new(),
+            now,
+        }
+    }
+
+    /// Find the transcript of each listed session under `~/.claude/projects` and read
+    /// its last turn's timestamp from the file's tail (`loader::last_turn_at`). Only the
+    /// listed sessions are opened, in parallel, so the cost scales with the bookmarks,
+    /// not the corpus.
+    pub fn from_transcripts(now: DateTime<Utc>, session_ids: &[&str]) -> Self {
+        use rayon::prelude::*;
+
+        let paths = transcript_paths();
+        let by_id: HashMap<&str, &PathBuf> = paths
+            .iter()
+            .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(|id| (id, p)))
+            .collect();
+        let last_seen: HashMap<String, DateTime<Utc>> = session_ids
+            .par_iter()
+            .filter_map(|id| {
+                let path = by_id.get(id)?;
+                crate::history::loader::last_turn_at(path).map(|at| (id.to_string(), at))
+            })
+            .collect();
+        Self { last_seen, now }
+    }
+
+    pub fn last_seen(&self, session_id: &str) -> Option<DateTime<Utc>> {
+        self.last_seen.get(session_id).copied()
+    }
+
+    /// The age column: `3h ago`, or `-` when the session's transcript is not around.
+    pub fn label(&self, session_id: &str) -> String {
+        match self.last_seen(session_id) {
+            Some(at) => crate::history::recent::relative_since(self.now, at),
+            None => "-".into(),
+        }
+    }
+
+    /// Which recency band the session falls in, for coloring; `None` when unknown.
+    pub fn band(&self, session_id: &str) -> Option<AgeBand> {
+        self.last_seen(session_id)
+            .map(|at| AgeBand::of(self.now.signed_duration_since(at)))
+    }
+}
+
+/// Recency bands for the age column, so a listing of forty bookmarks reads at a glance:
+/// what was touched this morning stands out, what has sat for a week recedes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgeBand {
+    /// Under 2 hours: probably still open somewhere.
+    Hot,
+    /// Under 8 hours: earlier today.
+    Today,
+    /// Under 24 hours.
+    Day,
+    /// Under 3 days.
+    Days,
+    /// Under 7 days.
+    Week,
+    /// A week or more.
+    Old,
+}
+
+impl AgeBand {
+    pub fn of(age: chrono::Duration) -> Self {
+        let hours = age.num_hours();
+        if hours < 2 {
+            AgeBand::Hot
+        } else if hours < 8 {
+            AgeBand::Today
+        } else if hours < 24 {
+            AgeBand::Day
+        } else if hours < 24 * 3 {
+            AgeBand::Days
+        } else if hours < 24 * 7 {
+            AgeBand::Week
+        } else {
+            AgeBand::Old
+        }
+    }
+
+    /// The label painted for its band: a green-to-grey ramp, newest brightest. `None`
+    /// (no transcript) is dimmed like the oldest, since nothing is known about it.
+    fn paint(band: Option<Self>, label: &str) -> String {
+        use colored::Colorize;
+        match band {
+            Some(AgeBand::Hot) => label.bright_green().bold().to_string(),
+            Some(AgeBand::Today) => label.green().to_string(),
+            Some(AgeBand::Day) => label.yellow().to_string(),
+            Some(AgeBand::Days) => label.to_string(),
+            Some(AgeBand::Week) => label.dimmed().to_string(),
+            Some(AgeBand::Old) | None => label.bright_black().to_string(),
+        }
+    }
+}
+
 /// Whether a bookmark's session ran in `root` or anywhere below it.
 ///
 /// Compared segment by segment rather than as text, so a sibling that merely shares a
@@ -846,11 +971,13 @@ pub fn group_by_tag<'a>(entries: &[(&'a str, &'a Bookmark)]) -> Vec<Group<'a>> {
     groups
 }
 
-/// One bookmark as a row: when it was last edited, what it says, its session id, and the
-/// directory it ran in. Shared so the flat and grouped listings cannot drift apart.
+/// One bookmark as a row: when it was last edited, how long ago the session was last
+/// talked to, what it says, its session id, and the directory it ran in. Shared so the
+/// flat and grouped listings cannot drift apart.
 fn bookmark_row(
     session_id: &str,
     bookmark: &Bookmark,
+    activity: &Activity,
     tz: &chrono::FixedOffset,
     color: bool,
     show_cwd: bool,
@@ -862,6 +989,9 @@ fn bookmark_row(
         .updated_at
         .with_timezone(tz)
         .format("%Y-%m-%d %H:%M");
+    // Right-aligned to the widest common label (`just now`, `123d ago`) so the name
+    // column starts in the same place on every row.
+    let ago = format!("{:>8}", activity.label(session_id));
     let text = crate::history::format::bookmark_oneline(bookmark);
     let cwd = bookmark
         .cwd
@@ -872,7 +1002,7 @@ fn bookmark_row(
     // Only `ls --all` lists a hidden bookmark, and there it must not pass for a live one:
     // the mark says so in plain text, and with color the whole row is dimmed.
     let mark = if bookmark.hidden { " (hidden)" } else { "" };
-    let plain = format!("{when}  {text}{mark}  {session_id}");
+    let plain = format!("{when}  {ago}  {text}{mark}  {session_id}");
     // Under `--group-by path` the heading already names the directory, so the row ends
     // at the session id rather than trailing an empty column.
     let plain = if cwd.is_empty() {
@@ -887,8 +1017,9 @@ fn bookmark_row(
         return plain.dimmed().to_string();
     }
     let head = format!(
-        "{}  {}  {}",
+        "{}  {}  {}  {}",
         when.to_string().dimmed(),
+        AgeBand::paint(activity.band(session_id), &ago),
         text.magenta(),
         session_id.blue(),
     );
@@ -910,6 +1041,7 @@ pub enum GroupBy {
 /// so both listings read the same way.
 pub fn format_groups(
     groups: &[Group<'_>],
+    activity: &Activity,
     tz: &chrono::FixedOffset,
     color: bool,
     store_path: &Path,
@@ -937,7 +1069,14 @@ pub fn format_groups(
         for (session_id, bookmark) in &group.entries {
             out.push_str(&format!(
                 "  {}\n",
-                bookmark_row(session_id, bookmark, tz, color, group.rows_show_cwd)
+                bookmark_row(
+                    session_id,
+                    bookmark,
+                    activity,
+                    tz,
+                    color,
+                    group.rows_show_cwd
+                )
             ));
             shown += 1;
         }
@@ -959,11 +1098,12 @@ const UNKNOWN_HEADING: &str = "(unknown)";
 /// Heading for the bookmarks carrying no tag at all.
 const NO_TAG_HEADING: &str = "(no tag)";
 
-/// One line per bookmark: when it was last edited, what it says, which session it names,
-/// and where that session ran. The project comes last so a narrow terminal cuts it
-/// rather than the id.
+/// One line per bookmark: when it was last edited, how long ago its session was last
+/// active, what it says, which session it names, and where that session ran. The project
+/// comes last so a narrow terminal cuts it rather than the id.
 pub fn format_list(
     entries: &[(&str, &Bookmark)],
+    activity: &Activity,
     tz: &chrono::FixedOffset,
     color: bool,
     store_path: &Path,
@@ -986,7 +1126,7 @@ pub fn format_list(
     for (session_id, bookmark) in entries {
         out.push_str(&format!(
             "{}\n",
-            bookmark_row(session_id, bookmark, tz, color, true)
+            bookmark_row(session_id, bookmark, activity, tz, color, true)
         ));
     }
     let count = entries.len();
@@ -1000,8 +1140,9 @@ pub fn format_list(
     out
 }
 
-/// Flat array so `jq` consumers do not have to parse the columns.
-pub fn format_list_json(entries: &[(&str, &Bookmark)]) -> String {
+/// Flat array so `jq` consumers do not have to parse the columns. `last_active_at` is
+/// the transcript mtime (see `Activity`), null when no transcript was found.
+pub fn format_list_json(entries: &[(&str, &Bookmark)], activity: &Activity) -> String {
     let values: Vec<serde_json::Value> = entries
         .iter()
         .map(|(session_id, bookmark)| {
@@ -1011,6 +1152,7 @@ pub fn format_list_json(entries: &[(&str, &Bookmark)]) -> String {
                 "tags": bookmark.tags,
                 "cwd": bookmark.cwd,
                 "session_started_at": bookmark.session_started_at.map(|t| t.to_rfc3339()),
+                "last_active_at": activity.last_seen(session_id).map(|t| t.to_rfc3339()),
                 "bookmarked_at": bookmark.bookmarked_at.to_rfc3339(),
                 "updated_at": bookmark.updated_at.to_rfc3339(),
                 "hidden": bookmark.hidden,
@@ -1503,6 +1645,7 @@ mod listing_tests {
         let l = bookmark("auth refactor", &["infra"], Some("/tmp/proj"), 0);
         let out = format_list(
             &[("abcdef-1", &l)],
+            &Activity::none(Utc::now()),
             &tz(),
             false,
             Path::new("/d/bookmarks.json"),
@@ -1515,19 +1658,106 @@ mod listing_tests {
 
     #[test]
     fn the_listing_says_so_when_there_is_nothing_to_show() {
-        let out = format_list(&[], &tz(), false, Path::new("/d/bookmarks.json"));
+        let out = format_list(
+            &[],
+            &Activity::none(Utc::now()),
+            &tz(),
+            false,
+            Path::new("/d/bookmarks.json"),
+        );
         assert!(out.contains("No bookmarked sessions"), "got: {out}");
     }
 
     #[test]
     fn the_json_listing_is_a_flat_array_carrying_the_session_id() {
         let l = bookmark("auth refactor", &["infra"], Some("/tmp/proj"), 0);
-        let json = format_list_json(&[("abcdef-1", &l)]);
+        let json = format_list_json(&[("abcdef-1", &l)], &Activity::none(Utc::now()));
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed[0]["session_id"], "abcdef-1");
         assert_eq!(parsed[0]["name"], "auth refactor");
         assert_eq!(parsed[0]["tags"][0], "infra");
         assert_eq!(parsed[0]["cwd"], "/tmp/proj");
+        assert!(parsed[0]["last_active_at"].is_null(), "got: {json}");
+    }
+
+    fn active(id: &str, hours_ago: i64) -> Activity {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let mut activity = Activity::none(now);
+        activity
+            .last_seen
+            .insert(id.into(), now - chrono::Duration::hours(hours_ago));
+        activity
+    }
+
+    #[test]
+    fn the_age_column_says_how_long_since_the_session_was_last_talked_to() {
+        let l = bookmark("auth refactor", &[], None, 0);
+        let row = bookmark_row("abcdef-1", &l, &active("abcdef-1", 3), &tz(), false, true);
+        // Sits between the bookmark date and the name, padded so names line up.
+        assert!(row.contains("    3h ago  auth refactor"), "got: {row}");
+    }
+
+    #[test]
+    fn age_bands_split_at_2h_8h_24h_3d_and_7d() {
+        use chrono::Duration as D;
+        assert_eq!(AgeBand::of(D::minutes(5)), AgeBand::Hot);
+        assert_eq!(AgeBand::of(D::minutes(119)), AgeBand::Hot);
+        assert_eq!(AgeBand::of(D::hours(2)), AgeBand::Today);
+        assert_eq!(AgeBand::of(D::hours(7)), AgeBand::Today);
+        assert_eq!(AgeBand::of(D::hours(8)), AgeBand::Day);
+        assert_eq!(AgeBand::of(D::hours(23)), AgeBand::Day);
+        assert_eq!(AgeBand::of(D::hours(24)), AgeBand::Days);
+        assert_eq!(AgeBand::of(D::days(2)), AgeBand::Days);
+        assert_eq!(AgeBand::of(D::days(3)), AgeBand::Week);
+        assert_eq!(AgeBand::of(D::days(6)), AgeBand::Week);
+        assert_eq!(AgeBand::of(D::days(7)), AgeBand::Old);
+        assert_eq!(AgeBand::of(D::days(90)), AgeBand::Old);
+    }
+
+    #[test]
+    fn the_age_column_is_colored_by_band_under_color() {
+        colored::control::set_override(true);
+        let l = bookmark("auth refactor", &[], None, 0);
+        let row = |hours: i64| {
+            bookmark_row(
+                "abcdef-1",
+                &l,
+                &active("abcdef-1", hours),
+                &tz(),
+                true,
+                true,
+            )
+        };
+        // Newest is bright green, a day old is yellow, a week old is grey; the name
+        // stays magenta whatever the band.
+        assert!(row(1).contains("\u{1b}[1;92m"), "got: {:?}", row(1));
+        assert!(row(10).contains("\u{1b}[33m"), "got: {:?}", row(10));
+        assert!(
+            row(24 * 10).contains("\u{1b}[90m"),
+            "got: {:?}",
+            row(24 * 10)
+        );
+        assert!(row(1).contains("\u{1b}[35m"), "got: {:?}", row(1));
+        // Unknown is grey too: nothing is known, so it must not pass for recent.
+        let unknown = bookmark_row("abcdef-1", &l, &active("other", 1), &tz(), true, true);
+        assert!(unknown.contains("\u{1b}[90m"), "got: {unknown:?}");
+    }
+
+    #[test]
+    fn a_session_without_a_transcript_shows_a_dash_for_its_age() {
+        // A Codex thread, or a pruned transcript: nothing to stat, and the column must
+        // not collapse so the names of the other rows still line up.
+        let l = bookmark("auth refactor", &[], None, 0);
+        let row = bookmark_row("abcdef-1", &l, &active("other-id", 3), &tz(), false, true);
+        assert!(row.contains("         -  auth refactor"), "got: {row}");
+    }
+
+    #[test]
+    fn the_json_listing_carries_the_last_active_time() {
+        let l = bookmark("auth refactor", &[], None, 0);
+        let json = format_list_json(&[("abcdef-1", &l)], &active("abcdef-1", 3));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0]["last_active_at"], "2023-11-14T19:13:20+00:00");
     }
 
     #[test]
@@ -1994,6 +2224,7 @@ mod listing_footer_tests {
         let b = bookmark("auth refactor");
         let out = format_list(
             &[("abc", &b)],
+            &Activity::none(Utc::now()),
             &tz(),
             false,
             Path::new("/data/cckit/bookmarks.json"),
@@ -2007,6 +2238,7 @@ mod listing_footer_tests {
         let b = bookmark("two");
         let out = format_list(
             &[("a", &a), ("b", &b)],
+            &Activity::none(Utc::now()),
             &tz(),
             false,
             Path::new("/data/bookmarks.json"),
@@ -2018,7 +2250,13 @@ mod listing_footer_tests {
     fn an_empty_listing_still_says_where_the_file_would_be() {
         // "Nothing here" and "I looked in the wrong place" are different problems, and
         // the path is what tells them apart.
-        let out = format_list(&[], &tz(), false, Path::new("/data/bookmarks.json"));
+        let out = format_list(
+            &[],
+            &Activity::none(Utc::now()),
+            &tz(),
+            false,
+            Path::new("/data/bookmarks.json"),
+        );
         assert!(out.contains("/data/bookmarks.json"), "got: {out}");
     }
 }
@@ -2178,6 +2416,7 @@ mod group_render_tests {
         let b = bookmark("work", &[], Some("/p/one"));
         let out = format_groups(
             &group_by_path(&[("abc", &b)]),
+            &Activity::none(Utc::now()),
             &tz(),
             false,
             Path::new("/d/bookmarks.json"),
@@ -2191,6 +2430,7 @@ mod group_render_tests {
         let b = bookmark("work", &["cckit"], Some("/p/one"));
         let out = format_groups(
             &group_by_tag(&[("abc", &b)]),
+            &Activity::none(Utc::now()),
             &tz(),
             false,
             Path::new("/d/bookmarks.json"),
@@ -2203,6 +2443,7 @@ mod group_render_tests {
         let b = bookmark("work", &["cckit", "design"], None);
         let out = format_groups(
             &group_by_tag(&[("abc", &b)]),
+            &Activity::none(Utc::now()),
             &tz(),
             false,
             Path::new("/d/bookmarks.json"),
@@ -2342,9 +2583,16 @@ mod hide_tests {
         let book = store.load().unwrap();
         let entries = book.entries_newest_first();
         let tz = chrono::FixedOffset::east_opt(0).unwrap();
-        let out = format_list(&entries, &tz, false, Path::new("/d/bookmarks.json"));
+        let out = format_list(
+            &entries,
+            &Activity::none(Utc::now()),
+            &tz,
+            false,
+            Path::new("/d/bookmarks.json"),
+        );
         assert!(out.contains("auth (hidden)  aaaa-1"), "got: {out}");
-        let json: serde_json::Value = serde_json::from_str(&format_list_json(&entries)).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&format_list_json(&entries, &Activity::none(Utc::now()))).unwrap();
         assert_eq!(json[0]["hidden"], true);
     }
 
@@ -2355,8 +2603,22 @@ mod hide_tests {
         store.set_hidden("aaaa-1", true, at(10)).unwrap();
         let book = store.load().unwrap();
         let tz = chrono::FixedOffset::east_opt(0).unwrap();
-        let hidden = bookmark_row("aaaa-1", book.get("aaaa-1").unwrap(), &tz, true, false);
-        let visible = bookmark_row("bbbb-2", book.get("bbbb-2").unwrap(), &tz, true, false);
+        let hidden = bookmark_row(
+            "aaaa-1",
+            book.get("aaaa-1").unwrap(),
+            &Activity::none(Utc::now()),
+            &tz,
+            true,
+            false,
+        );
+        let visible = bookmark_row(
+            "bbbb-2",
+            book.get("bbbb-2").unwrap(),
+            &Activity::none(Utc::now()),
+            &tz,
+            true,
+            false,
+        );
         // One dim span around the whole row, no magenta name or blue id inside it.
         assert!(hidden.starts_with("\u{1b}[2m"), "got: {hidden:?}");
         assert!(!hidden.contains("\u{1b}[35m") && !hidden.contains("\u{1b}[34m"));
